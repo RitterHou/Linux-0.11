@@ -23,7 +23,7 @@ build/floppy.img: build/boot.bin build/loader.bin Makefile
 	dd if=build/loader.bin of=$@ bs=512 seek=1 conv=notrunc
 
 run: build/floppy.img
-	$(QEMU) -name "Two-stage boot - AB" \
+	$(QEMU) -name "Two-stage boot - ABP" \
 		-machine pc -accel tcg -m 16M \
 		-drive file=$<,format=raw,if=floppy,index=0 \
 		-boot order=a -display $(QEMU_DISPLAY) \
