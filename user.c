@@ -2,7 +2,7 @@
  * 用户程序：任务 B 在特权级 3（用户态）运行这里的代码。
  *
  * 链接脚本把本文件的代码、只读数据、数据和用户栈单独放进按 4 KB 对齐的 .user 段，
- * paging.c 只给这几页打开“用户”位。内核的代码、数据和显存对这里的代码都不可访问，
+ * paging.c 只给这几页打开“用户”位，其中代码所在的页只读。内核的代码、数据和显存对这里的代码都不可访问，
  * cli、hlt、in、out 等特权指令也不能执行，要做任何事都只能用 int 0x80 请内核帮忙。
  * 所以这里只包含 syscall.h，不包含内核的 kernel.h。
  */
@@ -34,6 +34,8 @@ void user_main(void)
 #elif SELFTEST == SELFTEST_USER_EXIT
     write(1, "bye", 3);
     exit(7);
+#elif SELFTEST == SELFTEST_USER_WRITE_CODE
+    *(volatile uint8_t *)user_main = 0xC3;  /* 改写自己的代码：代码页只读，期望因 #PF 被结束 */
 #elif SELFTEST == SELFTEST_USER_SPIN
     /* 做一次系统调用（让内核写出 U），然后一直在用户态空转，便于测试在用户态注入 NMI */
     write(1, "s", 1);

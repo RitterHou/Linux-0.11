@@ -385,10 +385,14 @@ def test_user_setup(m, elf):
     pde0 = read_u32(m, table["page_directory"][0])
     check(pde0 & 0x4, f"第 0 个页目录项应打开用户位：{pde0:#x}")
     tables = table["identity_tables"][0]
-    user_start, user_end = table["__user_start"][0], table["__user_end"][0]
+    user_start, user_data, user_end = (table[n][0] for n in ("__user_start", "__user_data", "__user_end"))
+    check(user_start <= table["user_main"][0] < user_data <= table["user_stack"][0] < user_end,
+          "用户代码应在 __user_start～__user_data，用户栈应在 __user_data～__user_end")
     for addr in range(user_start, user_end, 4096):
         pte = read_u32(m, tables + (addr >> 12) * 4)
         check(pte & 0x4, f"用户程序的页 {addr:#x} 应打开用户位：{pte:#x}")
+        writable = addr >= user_data
+        check(bool(pte & 0x2) == writable, f"用户页 {addr:#x} 应{'可写' if writable else '只读'}：{pte:#x}")
     for name in ("kmain", "timer_ticks", "idt", "tss"):
         addr = table[name][0]
         pte = read_u32(m, tables + (addr >> 12) * 4)
@@ -734,6 +738,20 @@ def test_nmi_in_user_mode(_m, _elf):
         check("killed" not in message_row(m), f"NMI 不应结束任务 B：{message_row(m)!r}")
 
 
+def test_user_write_code(_m, _elf):
+    """用户程序改写自己的代码：代码页只读，只结束任务 B"""
+    d = build_selftest("USER_WRITE_CODE")
+    table = symbols(os.path.join(d, "kernel.elf"))
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        m.wait_for(lambda mm: "killed" in message_row(mm), what="第 7 行的任务结束消息")
+        msg = message_row(m)
+        check(msg.startswith("task 2 killed by #PF page fault"), f"第 7 行不对：{msg!r}")
+        fields = panel_fields([msg])
+        check(fields.get("error") == 7, f"错误码应为 7（页存在、写、用户态）：{msg!r}")
+        check(in_function(table, "user_main", fields.get("EIP", 0)), f"EIP 应在 user_main 内：{msg!r}")
+        check_only_task_a_left(m, "用户程序改写代码")
+
+
 # 前几项共用一台正常启动的虚拟机；其余各自启动自检内核。
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_console_scroll,
@@ -743,7 +761,7 @@ SEPARATE_TESTS = [test_syscalls, test_early_key, test_keyboard_edge_cases, test_
                   test_clobber_loader, test_other_segments,
                   test_big_kernel, test_user_write_kernel, test_user_privileged,
                   test_user_bad_pointer, test_user_exit, test_all_tasks_exit,
-                  test_nmi_in_user_mode]
+                  test_nmi_in_user_mode, test_user_write_code]
 
 
 def main():
