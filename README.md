@@ -28,7 +28,7 @@ QEMU 打开窗口后应看到：
 | 6 | `tasks: AAAAAAAAAABBBBBBBBBB…` | 任务 A、B 轮流运行，各写自己的字母，每段约 10 个；写满一行后从行首覆盖 |
 | 8 | `keyboard: ` | 键盘中断，在窗口里打字会回显在这里 |
 
-键盘支持字母、数字、常用符号、空格、回车和退格，暂不支持 Shift 等组合键。打字前先点一下 QEMU 窗口，让它获得键盘焦点。
+键盘支持字母、数字、常用符号、空格、回车、退格、左右 Shift 和 Caps Lock（美式布局），暂不支持方向键、Ctrl、Alt 和小键盘。打字前先点一下 QEMU 窗口，让它获得键盘焦点。
 
 关闭 QEMU 窗口，或在启动它的终端按 Ctrl+C，即可退出。修改代码后，先关闭旧窗口，再执行 `make run`。
 
@@ -49,7 +49,7 @@ make test
 - 启动后各行的输出；`0x10000` 处的内存与 `kernel.bin` 一致；处于保护模式，各段寄存器的值正确，GDTR 指向内核自己的 `gdt`。
 - 分页已打开，CR3 指向 `page_directory`；用监视器的 `gva2gpa` 逐个检查虚拟地址：`0xC0000000` 映射到 `0xB8000`，第 0 页和 16 MB 以上未映射，其余一一对应。
 - 定时器频率约为 100 Hz（允许 90～110）。
-- 模拟按键后的回显、回车和退格，退格不会删到上一行。
+- 模拟按键后的回显、回车和退格，退格不会删到上一行；左右 Shift 得到大写字母和 `!@_` 等符号，Caps Lock 只影响字母，与 Shift 同时生效时得到小写。
 - 任务等待时 CPU 停在任务 A 或 B 的 `hlt` 上，且 IF 为 1。
 - 两个任务轮流运行：第 6 行只有 A 和 B、多次交替、每段不超过 15 个字母，0.5 秒后内容有变化；TR 在任务 A、B 的 TSS 选择子 `0x20` 和 `0x28` 之间切换。
 - 除以零显示 `#DE`，EIP 正好指向 `div` 指令；触发未填写的 IDT 表项显示 `#GP`，错误码为 `0x182`。
@@ -151,7 +151,7 @@ IDT 有 256 项，每项 8 字节，放在 `.bss` 中。`idt_init()` 把前 48 �
 
 ### 键盘
 
-每按下或松开一个键，键盘控制器就把一个扫描码放进 `0x60` 端口，并发出 IRQ1。`keyboard_handle()` 必须读走扫描码，控制器才会送来下一个。扫描码最高位为 1 表示松开，直接忽略；按下时查表转成字符，交给 `vga_putc()` 回显，同时移动屏幕上闪烁的硬件光标。
+每按下或松开一个键，键盘控制器就把一个扫描码放进 `0x60` 端口，并发出 IRQ1。`keyboard_handle()` 必须读走扫描码，控制器才会送来下一个。扫描码最高位为 1 表示松开。`keyboard.c` 记录左右 Shift 是否按住（要同时处理按下和松开）、Caps Lock 是否打开（每按一次切换），其余键只处理按下：查普通表或 Shift 表转成字符，交给 `vga_putc()` 回显，同时移动屏幕上闪烁的硬件光标。Caps Lock 只影响字母，与 Shift 同时生效时字母为小写，与真实键盘一致。方向键等扩展键先送一个前缀 `0xE0` 再送一个字节，目前连同后一个字节一起忽略。键盘上的 Caps Lock 指示灯需要向键盘发命令才会亮，这里没有做。
 
 ### 异常
 
@@ -280,7 +280,7 @@ loader 进入保护模式时用的是写在 `loader.bin` 里的 GDT。进入内�
 | `paging.c` | 页目录和页表，打开分页 | `boot/head.s` 中的 `setup_paging`、`mm/memory.c` |
 | `timer.c` | 8253 定时器 | `kernel/sched.c` 中的 `sched_init()`、`do_timer()` |
 | `sched.c` | 两个任务的 TSS 和硬件任务切换 | `kernel/sched.c` 中的 `schedule()`、`include/linux/sched.h` 中的 `switch_to` |
-| `keyboard.c` | 键盘扫描码转字符并回显 | `kernel/chr_drv/keyboard.S` |
+| `keyboard.c` | 键盘扫描码转字符并回显，支持 Shift 和 Caps Lock | `kernel/chr_drv/keyboard.S` |
 | `vga.c` | 直接写 VGA 显存、移动硬件光标、整数转字符串 | `kernel/chr_drv/console.c` |
 | `kernel.h`、`io.h` | 各模块共用的声明；端口读写 `inb`、`outb` | `include/asm/io.h` |
 | `selftest.c` | 自检代码，只在 `make test` 构建的自检内核中生效 | 无 |

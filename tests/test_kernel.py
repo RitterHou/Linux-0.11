@@ -271,6 +271,17 @@ def test_keyboard_echo(m, elf):
     check(rows[10] == "", f"第 10 行的 ab 应被退格删光，且不会删到上一行，实际是 {rows[10]!r}")
 
 
+def test_keyboard_shift(m, elf):
+    """Shift、右 Shift 和 Caps Lock"""
+    # 接在上一项之后：光标在第 10 行行首。
+    m.sendkeys(["shift-h", "i", "shift-1", "spc", "shift-2", "shift-minus", "shift_r-q", "ret",
+                "caps_lock", "a", "b", "shift-c", "1", "caps_lock", "d"])
+    time.sleep(0.3)
+    rows = m.screen(12)
+    check(rows[10] == "Hi! @_Q", f"第 10 行应为 'Hi! @_Q'，实际是 {rows[10]!r}")
+    check(rows[11] == "ABc1d", f"第 11 行应为 'ABc1d'（Caps Lock 下 Shift 得到小写，数字不受影响），实际是 {rows[11]!r}")
+
+
 def test_idle_in_hlt(m, elf):
     """任务等待时停在 hlt 上，且中断已打开"""
     table = symbols(elf)
@@ -408,7 +419,8 @@ def test_big_kernel(_m, _elf):
 
 # 前几项共用一台正常启动的虚拟机；其余各自启动自检内核。
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
-                test_timer_rate, test_keyboard_echo, test_idle_in_hlt, test_tasks_alternate]
+                test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_idle_in_hlt,
+                test_tasks_alternate]
 SEPARATE_TESTS = [test_divide_error, test_bad_gate, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,
                   test_big_kernel]
