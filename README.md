@@ -1,4 +1,4 @@
-# 两阶段引导与 C 内核：从 A 到 kmain()
+# 两阶段引导与 C 内核：从 A 到中断
 
 这是 `learning` 分支上的独立实验。`main` 分支保留 Linux 0.11 原始源码。
 
@@ -17,13 +17,16 @@ cd /Users/Ray/Projects/infra/linux-0.11
 make run
 ```
 
-QEMU 打开窗口后，第 0 行应显示 `ABPKC`，第 2 行应显示 `Hello from kmain() in C!`：
+QEMU 打开窗口后应看到：
 
-- `A` 来自第一阶段。
-- `B` 来自第二阶段在实模式下调用 BIOS 的输出。
-- `P` 是第二阶段进入 32 位保护模式后直接写显存的输出。
-- `K` 来自内核的汇编入口 `entry.asm`。
-- `C` 和第 2 行来自 C 函数 `kmain()`。
+| 行 | 内容 | 来源 |
+| --- | --- | --- |
+| 0 | `ABPKCI` | `A` 第一阶段；`B` 第二阶段在实模式下调用 BIOS；`P` 第二阶段进入保护模式后写显存；`K` 内核汇编入口 `entry.asm`；`C` C 函数 `kmain()`；`I` 打开中断之后 |
+| 2 | `Hello from kmain() in C!` | `kmain()` |
+| 4 | `ticks: N` | 定时器中断，每秒加 100 |
+| 6 | `keyboard: ` | 键盘中断，在窗口里打字会回显在这里 |
+
+键盘支持字母、数字、常用符号、空格、回车和退格，暂不支持 Shift 等组合键。打字前先点一下 QEMU 窗口，让它获得键盘焦点。
 
 关闭 QEMU 窗口，或在启动它的终端按 Ctrl+C，即可退出。修改代码后，先关闭旧窗口，再执行 `make run`。
 
@@ -47,38 +50,84 @@ QEMU 打开窗口后，第 0 行应显示 `ABPKC`，第 2 行应显示 `Hello fr
 11. BIOS 在保护模式下不可用，直接向 VGA 文本显存 `0xB8004` 写入字符 `P` 和属性 `0x07`。
 12. 执行 `jmp eax` 跳到 `0x10000`，即内核入口 `_start`（`entry.asm`）。
 13. `_start` 把 ESP 换成内核自己的 4 KB 栈，把 `.bss` 清零，向 `0xB8006` 写入 `K`，然后 `call kmain`。
-14. `kmain()`（`kernel.c`）从第 0 行第 4 列写入 `C`，再换两行打印 `Hello from kmain() in C!`，最后循环执行 `hlt`。
+14. `kmain()`（`kernel.c`）从第 0 行第 4 列写入 `C`，再换两行打印 `Hello from kmain() in C!`。
+15. `kmain()` 依次调用 `idt_init()`、`pic_init()`、`timer_init(100)`，装好 IDT、重新设置 8259、把定时器设为每秒 100 次，然后写出第 4、6 行的标签。
+16. `sti` 打开中断，在第 0 行写入 `I`，然后进入 `hlt` 循环。此后 CPU 平时停在 `hlt`，每来一个定时器或键盘中断就醒来处理一次，处理完又回到循环里。
 
 内核必须在第 7 步、也就是仍处于实模式时读入：进入保护模式后 BIOS 的 `int 0x13` 就不能再用了，而我们还没有自己的磁盘驱动。Linux 0.11 也是这样做的：`bootsect.s` 在实模式下把内核读到 `0x10000`（`SYSSEG = 0x1000`），`head.s` 设好栈后再跳进 C 的 `main()`。
 
-现在内核已经能用 C 编写，但还没有 IDT（中断一直关闭），也没有建立分页。下一步：建立 IDT，重新设置 8259 中断控制器，打开定时器和键盘中断。
+现在内核已经能响应定时器、键盘中断和 CPU 异常，但还没有建立分页。下一步：建立页目录和页表，一一对应映射物理内存，打开 CR0 的 PG 位。
 
 ## 内核的构建过程
 
 ```text
-entry.asm ──nasm -f elf32──▶ entry.o ─┐
-                                      ├─ ld.lld + linker.ld ─▶ kernel.bin（写进软盘）
-kernel.c  ──clang -c───────▶ kernel.o ─┘                    └─▶ kernel.elf（带符号，供调试）
+entry.asm、isr.asm ──nasm -f elf32──▶ *.o ─┐
+                                          ├─ ld.lld + linker.ld ─▶ kernel.bin（写进软盘）
+kernel.c、vga.c、interrupt.c、            │                    └─▶ kernel.elf（带符号，供调试）
+timer.c、keyboard.c ──clang -c─────▶ *.o ─┘
 ```
 
 - `clang --target=i386-elf` 让系统自带的 clang 生成 32 位 x86 的 ELF 目标文件，而不是 macOS 程序。其他编译选项的作用写在 `Makefile` 的注释里，核心是 `-ffreestanding`：没有标准库，不能用 `printf`，也没有 `main` 入口。
 - `linker.ld` 把链接地址定为 `0x10000`，并把 `entry.asm` 的 `.text.entry` 段排在最前面。loader 不解析任何文件格式，只是把 `kernel.bin` 原样读到 `0x10000` 后跳过去，所以文件的第一个字节必须是 `_start`。脚本末尾的 `ASSERT` 在这一点不成立时让链接失败。
 - `ld.lld --oformat=binary` 输出去掉 ELF 头的纯机器码，作为 `kernel.bin`。`.bss` 在最后，不占文件空间。
 - `kernel.elf` 不进软盘，可以用系统自带的 `objdump -d build/kernel.elf` 反汇编，或用 `objdump -t build/kernel.elf` 查看各符号的地址。
+- 修改 `kernel.h`、`io.h` 或 `Makefile` 后，所有 C 文件都会重新编译。
 
 一次构建中各段的地址如下（具体数值随代码变化，以 `objdump -h build/kernel.elf` 为准）：
 
 | 段 | 地址 | 内容 |
 | --- | --- | --- |
-| `.text` | `0x10000` 起 | `_start` 在最前，后面是 `kmain` 等 C 函数 |
-| `.rodata` | 紧随 `.text` | 字符串 `"Hello from kmain() in C!"` |
-| `.bss` | 紧随其后，约 4 KB | 内核栈和 `cursor_row`、`cursor_col` |
+| `.text` | `0x10000` 起，约 2 KB | `_start` 在最前，后面是 48 个中断入口和各个 C 函数 |
+| `.rodata` | 紧随 `.text` | 中断入口地址表、异常名称、扫描码表、字符串 |
+| `.bss` | 紧随其后，约 6 KB | 4 KB 内核栈、2 KB 的 IDT、光标位置、`timer_ticks` 等 |
 
 ## 为什么要清零 .bss
 
 C 语言规定，没有初值的全局变量和 `static` 变量初值为 0。编译器把它们放进 `.bss` 段，`kernel.bin` 里不存它们的内容，以节省空间。在普通程序里，由操作系统在加载时清零；我们的内核没有人帮忙，只能在 `_start` 中自己用 `rep stosb` 清零。
 
-`kernel.c` 中的光标位置 `cursor_row`、`cursor_col` 就在 `.bss` 里。去掉清零后，在 QEMU 中运行通常仍然正常，因为 QEMU 启动时内存全是 0；只有当这块内存里原本有别的内容时才会出错。下面的修改实验演示了这种情况。
+现在依赖这一点的有 `timer_ticks`（ticks 从 0 开始数）、`keyboard.c` 中的 `line_length`，以及 IDT 中没有填写的 48～255 号表项（全 0 才是确定的“非法门”）。
+
+在 QEMU 中去掉清零，目前看不出差别：SeaBIOS 开机自检时会把常规内存清零，开机前写进内存的值到内核运行时都已变成 0；`timer_ticks` 和 `line_length` 位于 `0x12000` 之后，不在 loader 从磁盘读入的范围内；IDT 中未填写的表项即使变成垃圾，目前也不会被触发。第 3 步（提交 `a716a38`）的 README 中有一个能看到效果的实验：当时光标变量没有被显式赋值，又位于读入范围内，往镜像里写入垃圾后输出就乱了。在真实硬件上，或由别的引导程序加载时，内存不一定是 0，所以清零不能省。
+
+## 中断
+
+### 中断的处理路径
+
+```text
+定时器 / 键盘 ──IRQ──▶ 8259 ──中断号 0x20 / 0x21──┐
+                                                ├─▶ CPU 查 IDT ─▶ isr.asm 的 isrN ─▶ interrupt_dispatch()
+CPU 异常（除零、#GP 等）──中断号 0～31─────────┘
+```
+
+1. CPU 收到中断号 N，在 IDT 中取出第 N 项，跳到对应的入口 `isrN`（`isr.asm`）。中断门会自动清除 IF，处理期间不会再被别的中断打断。CPU 自动压入 EFLAGS、CS、EIP，少数异常还会压入错误码。
+2. `isrN` 对没有错误码的中断补压一个 0，再压入中断号 N，然后跳到公共部分 `isr_common`。这样所有中断的栈布局都相同。
+3. `isr_common` 用 `pushad` 保存通用寄存器，把栈顶地址作为参数调用 `interrupt_dispatch()`。栈上的内容就是 `kernel.h` 中的 `struct interrupt_frame`。
+4. `interrupt_dispatch()`（`interrupt.c`）按中断号分发：0～31 号交给 `exception_panic()`，0x20 交给 `timer_handle()`，0x21 交给 `keyboard_handle()`。外设中断处理完后向 8259 发送 EOI。
+5. 回到 `isr_common`，`popad` 恢复寄存器，丢掉中断号和错误码，`iretd` 回到被打断的地方，通常是 `kmain()` 的 `hlt` 循环。
+
+### IDT
+
+IDT 有 256 项，每项 8 字节，放在 `.bss` 中。`idt_init()` 把前 48 项填成 32 位中断门，入口地址来自 `isr.asm` 中的地址表，选择子是 loader 的代码段 `0x08`；其余各项保持全 0。最后用 `lidt` 把 IDT 的界限和基址装入 IDTR。
+
+全 0 的表项类型字段为 0，不是合法的门描述符。若被触发，CPU 在检查存在位之前就产生 13 号一般保护异常，错误码为 `中断号 × 8 + 2`（第 1 位表示错误来自 IDT）。
+
+### 8259 中断控制器
+
+两片 8259 级联，管理 16 根 IRQ 线：主片负责 IRQ0～7，从片负责 IRQ8～15，从片接在主片的 IRQ2 上。BIOS 把主片映射到中断号 `0x08`～`0x0F`，与 CPU 异常 8～15 重叠：不改的话，每次定时器中断都会被当成 8 号双重错误。`pic_init()` 重新发送 4 个初始化命令字，把 IRQ0～15 映射到 `0x20`～`0x2F`，并只打开 IRQ0（定时器）和 IRQ1（键盘）。Linux 0.11 的 `setup.s` 做的是同样的事。
+
+8259 在送出一个中断后，要等 CPU 回复 EOI（End Of Interrupt），才会送来同级和更低优先级的中断。忘记发 EOI，定时器只会响一次。
+
+### 定时器
+
+8253 定时器的输入时钟是 1.193180 MHz。`timer_init(hz)` 把分频值 `1193180 / hz` 写进通道 0，于是每秒产生 `hz` 次 IRQ0。分频值是 16 位的，所以 `hz` 至少为 19。`timer_handle()` 把 `timer_ticks` 加 1，并刷新第 4 行的数字。Linux 0.11 的 `sched_init()` 用同样的方法设置 100 Hz 的时钟，用来驱动进程调度。
+
+### 键盘
+
+每按下或松开一个键，键盘控制器就把一个扫描码放进 `0x60` 端口，并发出 IRQ1。`keyboard_handle()` 必须读走扫描码，控制器才会送来下一个。扫描码最高位为 1 表示松开，直接忽略；按下时查表转成字符，交给 `vga_putc()` 回显，同时移动屏幕上闪烁的硬件光标。
+
+### 异常
+
+0～31 号是 CPU 异常，目前都无法恢复。`exception_panic()` 在第 10、11 行用红底白字显示异常号、名称、出错指令的 EIP 和错误码，然后停机。可以用 `objdump -d build/kernel.elf` 按 EIP 找到出错的那条指令。
 
 ## 磁盘与内存布局
 
@@ -90,6 +139,8 @@ C 语言规定，没有初值的全局变量和 `static` 变量初值为 0。编
 | 其余空间 | 9216 起 | 不加载 | 无 |
 
 loader 的栈从 `0x7C00` 向低地址增长；进入内核后改用 `.bss` 中的内核栈。这里的 `0x8000` 是本实验选择的地址。VGA 文本显存从 `0xB8000` 开始，每个字符格占 2 字节：低字节是字符，高字节是颜色属性。第 r 行第 c 列的地址是 `0xB8000 + (r × 80 + c) × 2`。
+
+GDT 仍在 loader 所在的 `0x8000` 附近，IDT 中的代码段选择子 `0x08` 指的就是它。内核今后不能占用这块内存，否则加载段寄存器或进入中断时会出错。
 
 CHS 的扇区号从 1 开始。镜像写入命令中的 `seek=1` 跳过一个 512 字节块，对应 CHS 的扇区 2；`seek=2` 对应扇区 3。
 
@@ -122,32 +173,42 @@ CHS 的扇区号从 1 开始。镜像写入命令中的 `seek=1` 跳过一个 51
 - 改 `loader.asm` 中的 `mov al, 'B'`：改变第二阶段在实模式下的输出。
 - 改 `loader.asm` 中的 `'P'` 或属性 `0x07`：改变保护模式下的输出和颜色，例如 `0x1F` 是蓝底白字。
 - 改 `entry.asm` 中的 `'K'`：改变内核入口的输出。
-- 改 `kernel.c` 中 `kmain()` 打印的字符串，或 `VGA_GRAY`：改变 C 代码的输出。
+- 改 `kernel.c` 中 `kmain()` 打印的字符串，或 `kernel.h` 中的 `VGA_GRAY`：改变 C 代码的输出。
 - 若要观察 BIOS 读盘失败，将 `boot.asm` 中的 `mov cl, 2` 暂时改成 `mov cl, 0`。CHS 扇区 0 无效，应看到 `AE`。实验后改回 2，关闭旧窗口并重新运行。
 - 若要观察读内核失败，将 `loader.asm` 中的 `mov cl, KERNEL_START_SECTOR` 暂时改成 `mov cl, 0`。重试 3 次后应看到 `ABE`。实验后改回。
-- 若要观察三重错误，将 `loader.asm` 中 `protected_mode` 后面的 `mov ax, DATA_SEL` 暂时改成 `mov ax, 0x18`。GDT 只有 3 项，`0x18` 超出界限，装入段寄存器时触发一般保护异常（13 号）；此时没有 IDT，处理异常再次出错变成双重错误（8 号），最终三重错误。Makefile 带有 `-no-reboot`，QEMU 窗口会直接关闭。用 `make run QEMU_FLAGS="-d int,cpu_reset -D qemu.log"` 运行，可在 `qemu.log` 中看到 `new 0xd`、`new 0x8` 和 `Triple fault`。实验后改回。
-- 若要观察不清零 `.bss` 的后果，将 `entry.asm` 中的 `rep stosb` 暂时注释掉，执行 `make`，再用下面的命令在镜像中内核之后的位置填入 `0x01`，然后 `make run`：
+- 若要观察三重错误，将 `loader.asm` 中 `protected_mode` 后面的 `mov ax, DATA_SEL` 暂时改成 `mov ax, 0x18`。GDT 只有 3 项，`0x18` 超出界限，装入段寄存器时触发一般保护异常（13 号）；此时还没有 IDT，处理异常再次出错变成双重错误（8 号），最终三重错误。Makefile 带有 `-no-reboot`，QEMU 窗口会直接关闭。用 `make run QEMU_FLAGS="-d int,cpu_reset -D qemu.log"` 运行，可在 `qemu.log` 中看到 `new 0xd`、`new 0x8` 和 `Triple fault`。实验后改回。
+- 若要观察忘记发 EOI 的后果，将 `interrupt.c` 中 `interrupt_dispatch()` 末尾的 `pic_send_eoi(vector);` 暂时注释掉。`ticks` 停在 1，键盘也没有反应：8259 一直等着 CPU 回复，不再送来定时器和优先级更低的键盘中断。实验后改回。
+- 若要改变时钟频率，修改 `kernel.c` 中的 `TIMER_HZ`。改成 50，`ticks` 每秒加 50。改成 1000 也能明显变快，但在 QEMU 的 TCG 模拟下会丢失部分中断，实测每秒只加约 700。不要小于 19，否则分频值超出 16 位。
+- 若要观察除零异常，在 `kernel.c` 中 `vga_write_at(0, 5, "I", VGA_GRAY);` 的下一行加入：
 
-  ```sh
-  head -c 6000 /dev/zero | tr '\0' '\1' | dd of=build/floppy.img bs=1 seek=1536 conv=notrunc
+  ```c
+  __asm__ volatile("xorl %%edx, %%edx; movl $1, %%eax; xorl %%ecx, %%ecx; divl %%ecx" ::: "eax", "ecx", "edx");
   ```
 
-  loader 会把这些字节一起读进 `.bss` 所在的内存。`cursor_row` 不再是 0，`C` 和第 2 行都不会出现在屏幕上，只剩 `ABPK`。恢复 `rep stosb` 并再次填入同样的字节，输出恢复正常。命令从镜像偏移 1536（内核文件的第 512 字节）开始填写，适用于 `kernel.bin` 小于 512 字节的情况。实验后执行 `make clean`，再重新 `make run`。
+  第 10、11 行会出现 `Exception 0  #DE divide error` 和出错指令的 `EIP`，用 `objdump -d build/kernel.elf` 可以看到那个地址正是 `divl`。这里必须用内联汇编：如果写成 C 的 `1 / zero`，clang 会把它优化成不用除法指令的比较，根本不会触发异常。
+- 若要观察未填写的 IDT 表项，在同一位置加入 `__asm__ volatile("int $0x30");`。应看到 `Exception 13 #GP general protection`，`error=0x00000182`，即 `0x30 × 8 + 2`。
 
 读取成功只表示扇区读取完成；这个最小实验尚未检查第二阶段和内核的内容或校验和。
 
-`bits 16`、`bits 32` 和 `org` 是汇编指令，不是 CPU 执行的机器指令。`org` 告诉汇编器加载地址，不会在文件开头填充相应数量的字节。`loader.asm` 中远跳转之前按 16 位编码，`protected_mode` 之后按 32 位编码，与 CPU 当时所处的模式一致。`entry.asm` 编译成 ELF 目标文件，加载地址由链接脚本决定，所以不写 `org`。
+`bits 16`、`bits 32` 和 `org` 是汇编指令，不是 CPU 执行的机器指令。`org` 告诉汇编器加载地址，不会在文件开头填充相应数量的字节。`loader.asm` 中远跳转之前按 16 位编码，`protected_mode` 之后按 32 位编码，与 CPU 当时所处的模式一致。`entry.asm` 和 `isr.asm` 编译成 ELF 目标文件，加载地址由链接脚本决定，所以不写 `org`。
 
 ## 文件
 
-- `boot.asm`：第一阶段，带中文注释的读盘、错误处理和跳转代码。
-- `loader.asm`：第二阶段，打印 `B`，在实模式下读入内核，再建立 GDT、打开 A20、进入保护模式，写显存打印 `P` 后跳进内核。
-- `entry.asm`：内核的汇编入口 `_start`，设置内核栈、清零 `.bss`、打印 `K` 后调用 `kmain()`。
-- `kernel.c`：内核的 C 部分，直接写 VGA 显存输出字符和字符串。
-- `linker.ld`：内核链接脚本，规定链接地址 `0x10000` 和各段顺序。
-- `Makefile`：汇编、编译、链接、检查内核大小、按扇区布局打包和运行 QEMU。
-- `build/boot.bin`、`build/loader.bin`、`build/kernel.bin`：写进软盘的三段机器码。
-- `build/kernel.elf`：带符号的内核，供反汇编和调试使用。
-- `build/floppy.img`：用于启动的软盘镜像。
+| 文件 | 作用 | 对应 Linux 0.11 |
+| --- | --- | --- |
+| `boot.asm` | 第一阶段：读盘、错误处理和跳转 | `boot/bootsect.s` |
+| `loader.asm` | 第二阶段：打印 `B`，读入内核，建立 GDT、打开 A20、进入保护模式，打印 `P` 后跳进内核 | `boot/bootsect.s`、`boot/setup.s` |
+| `entry.asm` | 内核入口 `_start`：设置内核栈、清零 `.bss`、打印 `K`，调用 `kmain()` | `boot/head.s` |
+| `isr.asm` | 48 个中断入口和公共保存、恢复代码 | `kernel/asm.s`、`kernel/system_call.s` |
+| `kernel.c` | `kmain()`：初始化各模块，打开中断 | `init/main.c` |
+| `interrupt.c` | IDT、8259、中断分发和异常显示 | `kernel/traps.c` |
+| `timer.c` | 8253 定时器 | `kernel/sched.c` 中的 `sched_init()`、`do_timer()` |
+| `keyboard.c` | 键盘扫描码转字符并回显 | `kernel/chr_drv/keyboard.S` |
+| `vga.c` | 直接写 VGA 显存、移动硬件光标、整数转字符串 | `kernel/chr_drv/console.c` |
+| `kernel.h`、`io.h` | 各模块共用的声明；端口读写 `inb`、`outb` | `include/asm/io.h` |
+| `linker.ld` | 内核链接脚本：链接地址 `0x10000` 和各段顺序 | `Makefile` 中的链接参数 |
+| `Makefile` | 汇编、编译、链接、检查内核大小、打包和运行 QEMU | `Makefile`、`tools/build.c` |
 
-参考：[SeaBIOS 读盘实现](https://github.com/coreboot/seabios/blob/master/src/disk.c)、[NASM 引导扇区填充与签名](https://www.nasm.us/doc/nasm14.html)、[QEMU 启动参数](https://www.qemu.org/docs/master/system/qemu-manpage.html)、[OSDev：A20 地址线](https://wiki.osdev.org/A20_Line)、[OSDev：GDT](https://wiki.osdev.org/Global_Descriptor_Table)、[LLD 链接脚本](https://lld.llvm.org/ELF/linker_script.html)。
+生成的文件都在 `build/` 中：写进软盘的 `boot.bin`、`loader.bin`、`kernel.bin`，带符号的 `kernel.elf`，以及软盘镜像 `floppy.img`。
+
+参考：[SeaBIOS 读盘实现](https://github.com/coreboot/seabios/blob/master/src/disk.c)、[NASM 引导扇区填充与签名](https://www.nasm.us/doc/nasm14.html)、[QEMU 启动参数](https://www.qemu.org/docs/master/system/qemu-manpage.html)、[OSDev：A20 地址线](https://wiki.osdev.org/A20_Line)、[OSDev：GDT](https://wiki.osdev.org/Global_Descriptor_Table)、[LLD 链接脚本](https://lld.llvm.org/ELF/linker_script.html)、[OSDev：IDT](https://wiki.osdev.org/Interrupt_Descriptor_Table)、[OSDev：8259 PIC](https://wiki.osdev.org/8259_PIC)、[OSDev：PIT](https://wiki.osdev.org/Programmable_Interval_Timer)。

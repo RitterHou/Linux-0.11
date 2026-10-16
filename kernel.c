@@ -1,54 +1,35 @@
 /*
- * 内核的 C 部分：entry.asm 换好栈、清零 .bss 后调用 kmain()。
+ * 内核的 C 入口：entry.asm 换好栈、清零 .bss 后调用 kmain()。
  *
- * 这里没有标准库，也没有 BIOS，输出只能直接写 VGA 文本显存。
- * 第 0 行已有 ABPK，kmain 接着写 C，再在第 2 行打印一句话。
+ * 这里没有标准库，也没有 BIOS。kmain 先接着第 0 行的 ABPK 写 C 和问候语，
+ * 然后装好 IDT、8259 和定时器，打开中断，此后的工作都由中断驱动：
+ * 定时器每秒 100 次刷新第 4 行的计数，键盘输入回显在第 6 行。
  */
-#include <stdint.h>
+#include "kernel.h"
 
-#define VGA_TEXT  ((volatile uint16_t *)0xB8000)  /* 每格 2 字节：低字节字符，高字节属性 */
-#define VGA_COLS  80
-#define VGA_ROWS  25
-#define VGA_GRAY  0x07                             /* 黑底浅灰字 */
-
-/*
- * 光标位置。没有初值的 static 变量放在 .bss，起始值 0 依赖 entry.asm 的清零；
- * 如果没有清零，它们会是磁盘上 kernel.bin 之后的随机内容。
- */
-static int cursor_row;
-static int cursor_col;
-
-static void vga_putc(char ch)
-{
-    if (ch == '\n') {
-        cursor_row++;
-        cursor_col = 0;
-        return;
-    }
-    VGA_TEXT[cursor_row * VGA_COLS + cursor_col] = (uint16_t)(VGA_GRAY << 8 | (uint8_t)ch);
-    if (++cursor_col == VGA_COLS) {
-        cursor_col = 0;
-        cursor_row++;
-    }
-    if (cursor_row == VGA_ROWS)
-        cursor_row = 0;         /* 还没有滚屏，写满后回到第 0 行 */
-}
-
-static void vga_puts(const char *s)
-{
-    while (*s)
-        vga_putc(*s++);
-}
+#define TIMER_HZ 100                /* 与 Linux 0.11 的 HZ 相同，每 10 ms 一次 */
 
 void kmain(void);
 
 void kmain(void)
 {
-    cursor_col = 4;             /* 第 0 行前 4 格已有 ABPK，从第 0 行第 4 列接着写 */
+    vga_set_cursor(0, 4);           /* 第 0 行前 4 格已有 ABPK，从第 4 列接着写 */
     vga_putc('C');
-
     vga_puts("\n\nHello from kmain() in C!");
 
+    /* 顺序很重要：IDT 和 8259 都准备好之后，才能打开中断。 */
+    idt_init();
+    pic_init();
+    timer_init(TIMER_HZ);
+
+    vga_write_at(4, 0, "ticks: 0", VGA_GRAY);
+    vga_write_at(6, 0, "keyboard: ", VGA_GRAY);
+    vga_set_cursor(6, 10);          /* 键盘回显从这里开始 */
+
+    __asm__ volatile("sti");        /* 打开中断：定时器和键盘从此可以打断下面的循环 */
+    vga_write_at(0, 5, "I", VGA_GRAY);
+
+    /* 没事可做就停下，等下一个中断唤醒 CPU；中断处理完又回到这里。 */
     for (;;)
         __asm__ volatile("hlt");
 }
