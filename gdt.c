@@ -8,7 +8,7 @@
  */
 #include "kernel.h"
 
-#define GDT_ENTRIES 8               /* 0 空描述符，1 代码段，2 数据段，3～7 备用（TSS 等） */
+#define GDT_ENTRIES 10              /* 0 空，1～2 内核段，3～5 TSS，6～7 用户段，8～9 备用 */
 
 struct gdt_pointer {                /* lgdt 的操作数：界限和基址，共 6 字节 */
     uint16_t limit;
@@ -43,6 +43,9 @@ void gdt_init(void)
     /* 与 loader.asm 中的两项相同：基址 0、界限 0xFFFFF × 4 KB = 4 GB 的平坦段。 */
     gdt_set_entry(1, 0, 0xFFFFF, 0x9A, 0xC);    /* 代码段：存在、DPL 0、可执行可读 */
     gdt_set_entry(2, 0, 0xFFFFF, 0x92, 0xC);    /* 数据段：存在、DPL 0、可读写 */
+    /* 用户段：范围相同，只是 DPL 为 3，特权级 3 的代码才能使用。能访问哪些内存由页表的用户位决定。 */
+    gdt_set_entry(6, 0, 0xFFFFF, 0xFA, 0xC);    /* 用户代码段：存在、DPL 3、可执行可读 */
+    gdt_set_entry(7, 0, 0xFFFFF, 0xF2, 0xC);    /* 用户数据段：存在、DPL 3、可读写 */
 
     struct gdt_pointer gdtr = { sizeof(gdt) - 1, (uint32_t)gdt };
     __asm__ volatile("lgdt %0" : : "m"(gdtr));

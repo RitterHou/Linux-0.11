@@ -10,6 +10,8 @@
 /* gdt.c：内核自己的 GDT，选择子与 loader 的相同 */
 #define KERNEL_CODE_SEL 0x08
 #define KERNEL_DATA_SEL 0x10
+#define USER_CODE_SEL   0x33        /* GDT 第 6 项，低 2 位的 RPL 为 3 */
+#define USER_DATA_SEL   0x3B        /* GDT 第 7 项 */
 void gdt_init(void);
 void gdt_set_entry(int index, uint32_t base, uint32_t limit, uint8_t access, uint8_t flags);
 
@@ -25,6 +27,8 @@ char *format_uint(uint32_t value, unsigned base, char buf[12]);
  * 中断发生时栈上的内容，从低地址到高地址排列。
  * isr.asm 依次压入错误码（或补 0）、中断号、pushad 的 8 个寄存器和 4 个段寄存器，
  * 更早的 EIP、CS、EFLAGS 由 CPU 自动压入。段寄存器压栈时占 4 字节，只有低 16 位有效。
+ * 从用户态（CS 的低 2 位为 3）进入时，CPU 先换到 TSS 中的内核栈，再多压入用户态的 ESP 和 SS；
+ * 从内核态进入时没有这两项，user_esp、user_ss 的位置是被打断代码的栈内容。
  */
 struct interrupt_frame {
     uint32_t gs, fs, es, ds;                                    /* isr.asm 压入 */
@@ -32,7 +36,13 @@ struct interrupt_frame {
     uint32_t vector;                                            /* isr.asm 压入 */
     uint32_t error_code;                                        /* CPU 压入或补 0 */
     uint32_t eip, cs, eflags;                                   /* CPU 压入 */
+    uint32_t user_esp, user_ss;                                 /* 仅从用户态进入时 CPU 才压入 */
 };
+
+static inline int from_user_mode(const struct interrupt_frame *frame)
+{
+    return (frame->cs & 3) == 3;
+}
 
 /* interrupt.c：IDT、8259 与中断分发 */
 void idt_init(void);
@@ -43,6 +53,7 @@ void interrupt_dispatch(struct interrupt_frame *frame);
 #define VGA_PHYS  0x000B8000u       /* 显存的物理地址 */
 #define VGA_ALIAS 0xC0000000u       /* 打开分页后，这个虚拟地址也指向显存 */
 void paging_init(void);
+int user_range_ok(uint32_t addr, uint32_t size);
 
 /* timer.c：8253 定时器 */
 extern volatile uint32_t timer_ticks;
@@ -61,6 +72,11 @@ void syscall_dispatch(struct interrupt_frame *frame);
 
 /* keyboard.c：键盘 */
 void keyboard_handle(void);
+
+/* user.c：任务 B 在用户态运行的程序 */
+void user_main(void);
+extern uint8_t user_stack[];
+#define USER_STACK_SIZE 4096
 
 /* selftest.c：make test 构建的自检内核在这里故意制造异常 */
 void selftest_run(void);

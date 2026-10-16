@@ -158,8 +158,18 @@ static void exception_panic(const struct interrupt_frame *frame)
 
     __asm__ volatile("movl %%cr2, %0" : "=r"(cr2));     /* 缺页时 CPU 把出错的虚拟地址放在这里 */
     __asm__ volatile("movl %%cr3, %0" : "=r"(cr3));
-    /* 同一特权级内发生异常时 CPU 不压入 ESP，出错时的 ESP 就是 EFLAGS 之上的地址。 */
-    uint32_t esp = (uint32_t)(frame + 1);
+    /*
+     * 出错时的栈：从用户态进入时，CPU 压入了用户态的 SS 和 ESP；
+     * 同一特权级内发生异常时 CPU 不压入它们，出错时的 ESP 就是 EFLAGS 之上的地址。
+     */
+    uint32_t esp, ss;
+    if (from_user_mode(frame)) {
+        esp = frame->user_esp;
+        ss = frame->user_ss;
+    } else {
+        esp = (uint32_t)&frame->user_esp;
+        __asm__ volatile("movl %%ss, %0" : "=r"(ss));
+    }
 
     line.len = 0;
     line.text[0] = '\0';
@@ -173,6 +183,7 @@ static void exception_panic(const struct interrupt_frame *frame)
     line_append_hex(&line, "CS", frame->cs, 4);
     line_append_hex(&line, "EFLAGS", frame->eflags, 8);
     line_append_hex(&line, "error", frame->error_code, 8);
+    line_append_hex(&line, "SS", ss, 4);
     line_flush(&line, PANEL_ROW + 1);
 
     line_append_hex(&line, "EAX", frame->eax, 8);
