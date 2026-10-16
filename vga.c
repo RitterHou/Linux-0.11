@@ -72,10 +72,14 @@ void vga_putc(char ch)
         cursor_row++;
         cursor_col = 0;
     } else if (ch == '\b') {
+        /* 退到前一格；在行首时退到上一行行尾，这样自动换行的长输入也能逐字删回去 */
         if (cursor_col > 0) {
             cursor_col--;
-            put_cell(cursor_row, cursor_col, ' ', VGA_GRAY);
+        } else if (cursor_row > window_top) {
+            cursor_row--;
+            cursor_col = VGA_COLS - 1;
         }
+        put_cell(cursor_row, cursor_col, ' ', VGA_GRAY);
     } else {
         put_cell(cursor_row, cursor_col, ch, VGA_GRAY);
         if (++cursor_col == VGA_COLS) {

@@ -15,6 +15,7 @@
 #define SELFTEST_REGISTER_DUMP  8   /* 寄存器设为已知值后执行 ud2：期望 6 号 #UD，面板显示这些值 */
 #define SELFTEST_SYSCALLS       9   /* 依次调用各个系统调用，把返回值写到第 7 行 */
 #define SELFTEST_EARLY_KEY     10   /* 初始化 8259 之前就有按键：期望键盘之后仍能工作 */
+#define SELFTEST_KEYBOARD_EDGE 11   /* 喂扫描码：Caps Lock 自动重复、退格跨过自动换行 */
 
 /* 20 号起是用户态自检，由任务 B 在特权级 3 执行，见 user.c。 */
 #define SELFTEST_USER_WRITE_KERNEL 20   /* 用户程序写内核的变量：期望因 #PF 被结束，错误码 7 */
