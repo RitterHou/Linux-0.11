@@ -18,7 +18,9 @@ KERNEL_CFLAGS := --target=i386-elf -march=i386 -std=c11 -O2 -Wall -Wextra \
 	-ffreestanding -nostdlibinc -fno-builtin -fno-pic -fno-stack-protector \
 	-fno-asynchronous-unwind-tables -mgeneral-regs-only
 
-KERNEL_OBJS := build/entry.o build/kernel.o
+KERNEL_OBJS := build/entry.o build/isr.o build/kernel.o build/vga.o \
+	build/interrupt.o build/timer.o build/keyboard.o
+KERNEL_HEADERS := kernel.h io.h
 
 .PHONY: all run clean
 
@@ -33,10 +35,11 @@ build/boot.bin: boot.asm | build
 build/loader.bin: loader.asm Makefile | build
 	$(NASM) -f bin -DKERNEL_SECTORS=$(KERNEL_SECTORS) $< -o $@
 
-build/entry.o: entry.asm | build
+# 内核的汇编文件（entry.asm、isr.asm）编译成 ELF 目标文件，地址由链接脚本决定。
+build/%.o: %.asm | build
 	$(NASM) -f elf32 $< -o $@
 
-build/kernel.o: kernel.c Makefile | build
+build/%.o: %.c $(KERNEL_HEADERS) Makefile | build
 	$(CLANG) $(KERNEL_CFLAGS) -c $< -o $@
 
 # kernel.bin 是去掉 ELF 头、按链接地址排好的纯机器码，写进软盘；
