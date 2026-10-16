@@ -14,6 +14,7 @@ void gdt_init(void);
 void gdt_set_entry(int index, uint32_t base, uint32_t limit, uint8_t access, uint8_t flags);
 
 /* vga.c：直接写 VGA 文本显存 */
+void vga_set_window(int top, int bottom);
 void vga_set_cursor(int row, int col);
 void vga_putc(char ch);
 void vga_puts(const char *s);
