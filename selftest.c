@@ -11,6 +11,7 @@
 #define SELFTEST_CLOBBER_LOADER 5   /* 清零 loader 所在内存：内核有自己的 GDT，期望照常运行 */
 #define SELFTEST_OTHER_SEGMENTS 6   /* DS 等换成基址 1 MB 的段后空转：中断入口要换段并恢复 */
 #define SELFTEST_BIG_KERNEL     7   /* 内核撑到约 90 个扇区，跨越多个磁道和柱面：期望完整读入 */
+#define SELFTEST_REGISTER_DUMP  8   /* 寄存器设为已知值后执行 ud2：期望 6 号 #UD，面板显示这些值 */
 
 #if defined(SELFTEST) && SELFTEST == SELFTEST_BIG_KERNEL
 /*
@@ -62,6 +63,23 @@ void selftest_run(void)
 #elif SELFTEST == SELFTEST_BIG_KERNEL
     const volatile uint8_t *data = big_data;
     vga_write_at(0, 8, data[BIG_SIZE - 1] == 'Y' ? "Y" : "X", VGA_GRAY);
+#elif SELFTEST == SELFTEST_REGISTER_DUMP
+    /*
+     * 不声明被改写的寄存器：ud2 之后不会再回到这里，编译器之后的假设无关紧要。
+     * 全局标号 selftest_ud2 让测试能查到 ud2 的地址，与面板上的 EIP 比较。
+     */
+    __asm__ volatile(
+        "movl $0x11111111, %eax\n\t"
+        "movl $0x22222222, %ebx\n\t"
+        "movl $0x33333333, %ecx\n\t"
+        "movl $0x44444444, %edx\n\t"
+        "movl $0x55555555, %esi\n\t"
+        "movl $0x66666666, %edi\n\t"
+        "movl $0x77777777, %ebp\n"
+        ".globl selftest_ud2\n"
+        "selftest_ud2:\n\t"
+        "ud2");
+    __builtin_unreachable();
 #else
 #error "未知的 SELFTEST"
 #endif
