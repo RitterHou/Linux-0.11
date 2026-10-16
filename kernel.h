@@ -11,6 +11,7 @@
 #define KERNEL_CODE_SEL 0x08
 #define KERNEL_DATA_SEL 0x10
 void gdt_init(void);
+void gdt_set_entry(int index, uint32_t base, uint32_t limit, uint8_t access, uint8_t flags);
 
 /* vga.c：直接写 VGA 文本显存 */
 void vga_set_cursor(int row, int col);
@@ -21,10 +22,11 @@ char *format_uint(uint32_t value, unsigned base, char buf[12]);
 
 /*
  * 中断发生时栈上的内容，从低地址到高地址排列。
- * isr.asm 依次压入错误码（或补 0）、中断号和 pushad 的 8 个寄存器，
- * 更早的 EIP、CS、EFLAGS 由 CPU 自动压入。
+ * isr.asm 依次压入错误码（或补 0）、中断号、pushad 的 8 个寄存器和 4 个段寄存器，
+ * 更早的 EIP、CS、EFLAGS 由 CPU 自动压入。段寄存器压栈时占 4 字节，只有低 16 位有效。
  */
 struct interrupt_frame {
+    uint32_t gs, fs, es, ds;                                    /* isr.asm 压入 */
     uint32_t edi, esi, ebp, esp_at_pushad, ebx, edx, ecx, eax;   /* pushad */
     uint32_t vector;                                            /* isr.asm 压入 */
     uint32_t error_code;                                        /* CPU 压入或补 0 */

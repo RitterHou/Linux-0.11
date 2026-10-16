@@ -24,14 +24,30 @@ isr%+n:
 %assign n n + 1
 %endrep
 
-; 目前只有内核态，段寄存器始终是同一组平坦段，所以这里不保存 DS 等段寄存器。
-; 以后有了用户态，就要在这里保存并切换成内核数据段。
+KERNEL_DATA_SEL equ 0x10        ; 与 kernel.h 中的定义一致
+
+; 中断可能打断任何代码，被打断时 DS 等段寄存器不一定是内核数据段
+; （以后的用户态程序就会用自己的段）。CPU 只自动切换 CS 和 SS，
+; 所以这里先保存 DS、ES、FS、GS，换成内核数据段再进入 C 代码，返回前原样恢复。
 isr_common:
     pushad                      ; 保存 8 个通用寄存器
+    push ds
+    push es
+    push fs
+    push gs
+    mov ax, KERNEL_DATA_SEL
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
     cld                         ; C 代码要求 DF=0
     push esp                    ; 参数：指向栈上的 struct interrupt_frame
     call interrupt_dispatch
     add esp, 4
+    pop gs
+    pop fs
+    pop es
+    pop ds
     popad
     add esp, 8                  ; 丢掉中断号和错误码
     iretd                       ; 弹出 EIP、CS、EFLAGS，回到被打断的地方

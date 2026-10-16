@@ -53,6 +53,7 @@ make test
 - 除以零显示 `#DE`，EIP 正好指向 `div` 指令；触发未填写的 IDT 表项显示 `#GP`，错误码为 `0x182`。
 - 读未映射的 `0xD0000000` 显示 `#PF`，错误码 0，CR2 为该地址；写空指针显示 `#PF`，错误码 2（写操作），CR2 为 0。
 - 把 loader 所在的 `0x8000`～`0x81FF` 清零后，定时器照常工作：内核已不再依赖 loader 的 GDT。
+- 把 DS、ES、FS、GS 换成一个基址为 1 MB 的数据段后空转，定时器照常工作，空闲时这些段寄存器仍是原来的值：中断入口会换成内核段，返回前再恢复。这里不用空选择子测试，因为 QEMU 的 TCG 模拟不检查通过空选择子访问内存，换不换段都看不出区别。
 
 后面几项需要故意制造异常或破坏内存。测试脚本会用 `make BUILD=build/selftest/<名称> SELFTEST=<名称>` 另外构建自检内核：`SELFTEST` 非空时，`selftest.c` 中对应的代码会被编译进去，在打开中断后触发异常。正常构建不定义 `SELFTEST`，`selftest_run()` 是空函数。
 
@@ -124,9 +125,9 @@ CPU 异常（除零、#GP 等）──中断号 0～31────────�
 
 1. CPU 收到中断号 N，在 IDT 中取出第 N 项，跳到对应的入口 `isrN`（`isr.asm`）。中断门会自动清除 IF，处理期间不会再被别的中断打断。CPU 自动压入 EFLAGS、CS、EIP，少数异常还会压入错误码。
 2. `isrN` 对没有错误码的中断补压一个 0，再压入中断号 N，然后跳到公共部分 `isr_common`。这样所有中断的栈布局都相同。
-3. `isr_common` 用 `pushad` 保存通用寄存器，把栈顶地址作为参数调用 `interrupt_dispatch()`。栈上的内容就是 `kernel.h` 中的 `struct interrupt_frame`。
+3. `isr_common` 用 `pushad` 保存通用寄存器，再保存 DS、ES、FS、GS，并把它们换成内核数据段 `0x10`：中断可能打断任何代码，那时的段寄存器不一定是内核的，而 CPU 只自动切换 CS（以及特权级变化时的 SS）。然后把栈顶地址作为参数调用 `interrupt_dispatch()`。栈上的内容就是 `kernel.h` 中的 `struct interrupt_frame`。
 4. `interrupt_dispatch()`（`interrupt.c`）按中断号分发：0～31 号交给 `exception_panic()`，0x20 交给 `timer_handle()`，0x21 交给 `keyboard_handle()`。外设中断处理完后向 8259 发送 EOI。
-5. 回到 `isr_common`，`popad` 恢复寄存器，丢掉中断号和错误码，`iretd` 回到被打断的地方，通常是 `kmain()` 的 `hlt` 循环。
+5. 回到 `isr_common`，恢复 GS、FS、ES、DS，`popad` 恢复通用寄存器，丢掉中断号和错误码，`iretd` 回到被打断的地方，通常是 `kmain()` 的 `hlt` 循环。
 
 ### IDT
 
@@ -205,7 +206,7 @@ CHS 的扇区号从 1 开始。镜像写入命令中的 `seek=1` 跳过一个 51
 
 ## GDT
 
-loader 进入保护模式时用的是写在 `loader.bin` 里的 GDT。进入内核后，`gdt.c` 中的 `gdt_init()` 在 `.bss` 里建一份内容相同的新表，用 `lgdt` 装入，再用一次远跳转重新装载 CS、用 `mov` 重新装载其余段寄存器：段寄存器缓存着装入时读到的描述符，换表后不重新装载就仍在用旧描述符。选择子保持不变，所以 IDT 等处引用的 `0x08`、`0x10` 都不用改。Linux 0.11 的 `head.s` 也会重建 GDT，因为 `setup.s` 留下的那份在 `0x90000` 附近，之后会被覆盖。
+loader 进入保护模式时用的是写在 `loader.bin` 里的 GDT。进入内核后，`gdt.c` 中的 `gdt_init()` 在 `.bss` 里建一份内容相同的新表，用 `lgdt` 装入，再用一次远跳转重新装载 CS、用 `mov` 重新装载其余段寄存器：段寄存器缓存着装入时读到的描述符，换表后不重新装载就仍在用旧描述符。选择子保持不变，所以 IDT 等处引用的 `0x08`、`0x10` 都不用改。新表有 8 项，第 3～7 项留给以后的 TSS 等描述符，用 `gdt_set_entry()` 填写。Linux 0.11 的 `head.s` 也会重建 GDT，因为 `setup.s` 留下的那份在 `0x90000` 附近，之后会被覆盖。
 
 | 选择子 | 描述符 | 含义 |
 | --- | --- | --- |
