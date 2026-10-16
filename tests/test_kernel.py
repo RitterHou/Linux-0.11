@@ -671,6 +671,32 @@ def test_keyboard_edge_cases(_m, _elf):
         check(rows[9] == "", f"退格应删光换到第 9 行的字符，ok 写回第 8 行末尾：第 9 行是 {rows[9]!r}")
 
 
+def test_nmi_in_user_mode(_m, _elf):
+    """用户态时收到 NMI：不算用户程序的错，显示异常面板，面板上是用户态的 SS 和 ESP"""
+    d = build_selftest("USER_SPIN")
+    table = symbols(os.path.join(d, "kernel.elf"))
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        m.wait_for(boot_ready, what="启动完成")
+        for _ in range(100):        # 暂停虚拟机，确认此刻任务 B 在用户态，再注入 NMI
+            m.cmd("stop")
+            regs = m.registers()
+            if regs["TR"] == 0x28 and regs["CS"] == 0x33:
+                break
+            m.cmd("cont")
+            time.sleep(0.03)
+        else:
+            raise TestFailure("没能在任务 B 处于用户态时暂停虚拟机")
+        m.cmd("nmi")
+        m.cmd("cont")
+        panel = wait_for_panel(m)
+        check(panel[0].startswith("Exception 2 ") and "NMI" in panel[0], f"第 19 行不对：{panel[0]!r}")
+        fields = panel_fields(panel)
+        check(fields.get("CS") == 0x33 and fields.get("SS") == 0x3B, f"NMI 发生在用户态：{panel[1]!r}")
+        user_stack, size = table["user_stack"]
+        check(user_stack < fields.get("ESP", 0) <= user_stack + size, f"ESP 应是用户栈中的值：{panel[3]!r}")
+        check("killed" not in message_row(m), f"NMI 不应结束任务 B：{message_row(m)!r}")
+
+
 # 前几项共用一台正常启动的虚拟机；其余各自启动自检内核。
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_console_scroll,
@@ -679,7 +705,8 @@ SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, te
 SEPARATE_TESTS = [test_syscalls, test_early_key, test_keyboard_edge_cases, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,
                   test_big_kernel, test_user_write_kernel, test_user_privileged,
-                  test_user_bad_pointer, test_user_exit, test_all_tasks_exit]
+                  test_user_bad_pointer, test_user_exit, test_all_tasks_exit,
+                  test_nmi_in_user_mode]
 
 
 def main():

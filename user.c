@@ -34,6 +34,11 @@ void user_main(void)
 #elif SELFTEST == SELFTEST_USER_EXIT
     write(1, "bye", 3);
     exit(7);
+#elif SELFTEST == SELFTEST_USER_SPIN
+    /* 做一次系统调用（让内核写出 U），然后一直在用户态空转，便于测试在用户态注入 NMI */
+    write(1, "s", 1);
+    for (;;)
+        __asm__ volatile("");
 #elif SELFTEST == SELFTEST_ALL_EXIT
     write(1, "bye", 3);
     exit(2);

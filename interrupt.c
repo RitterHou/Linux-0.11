@@ -176,6 +176,15 @@ static void exception_panic(const struct interrupt_frame *frame)
 }
 
 /*
+ * 这个异常是不是当前指令造成的。NMI（2）、双重错误（8）、机器检查（18）来自硬件，
+ * 或者表示内核处理异常时又出了错，与用户程序无关：即使发生时 CPU 恰好在用户态，也不能算到它头上。
+ */
+static int caused_by_program(uint32_t vector)
+{
+    return vector != 2 && vector != 8 && vector != 18;
+}
+
+/*
  * 用户态程序出错：只结束出错的任务，内核和其他任务照常运行。
  * 在第 7 行写一条消息，说明哪个任务因为什么异常、在哪条指令被结束。
  */
@@ -201,9 +210,9 @@ void interrupt_dispatch(struct interrupt_frame *frame)
     uint32_t vector = frame->vector;
 
     if (vector < IRQ_BASE) {
-        if (from_user_mode(frame))
+        if (from_user_mode(frame) && caused_by_program(vector))
             user_exception(frame);  /* 不会返回 */
-        exception_panic(frame);     /* 内核自己出错，无法恢复 */
+        exception_panic(frame);     /* 内核自己出错，或者硬件出了问题，无法恢复 */
         return;
     }
     if (vector == SYSCALL_VECTOR) {
