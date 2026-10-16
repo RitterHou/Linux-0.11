@@ -660,12 +660,23 @@ def test_early_key(_m, _elf):
         check(row == "keyboard: hi", f"开中断前的按键被丢弃后，键盘应照常回显：第 8 行是 {row!r}")
 
 
+def test_keyboard_edge_cases(_m, _elf):
+    """Caps Lock 自动重复只切换一次；退格能跨过自动换行回到上一行"""
+    d = build_selftest("KEYBOARD_EDGE")
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        m.wait_for(boot_ready, what="启动完成")
+        rows = m.screen(10)
+        expected = "keyboard: Aa" + "x" * 66 + "ok"
+        check(rows[8] == expected, f"第 8 行应为 'keyboard: Aa' + 66 个 x + 'ok'，实际是 {rows[8]!r}")
+        check(rows[9] == "", f"退格应删光换到第 9 行的字符，ok 写回第 8 行末尾：第 9 行是 {rows[9]!r}")
+
+
 # 前几项共用一台正常启动的虚拟机；其余各自启动自检内核。
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_console_scroll,
                 test_idle_in_hlt, test_syscall_gate, test_user_setup, test_user_task,
                 test_tasks_alternate]
-SEPARATE_TESTS = [test_syscalls, test_early_key, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
+SEPARATE_TESTS = [test_syscalls, test_early_key, test_keyboard_edge_cases, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,
                   test_big_kernel, test_user_write_kernel, test_user_privileged,
                   test_user_bad_pointer, test_user_exit, test_all_tasks_exit]

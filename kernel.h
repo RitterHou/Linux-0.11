@@ -87,6 +87,7 @@ void syscall_dispatch(struct interrupt_frame *frame);
 /* keyboard.c：键盘 */
 void keyboard_init(void);
 void keyboard_handle(void);
+void keyboard_process(uint8_t scancode);
 
 /* user.c：任务 B 在用户态运行的程序 */
 void user_main(void);
