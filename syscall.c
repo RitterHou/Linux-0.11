@@ -51,10 +51,27 @@ static int32_t sys_sleep(uint32_t ticks, uint32_t b, uint32_t c, int from_user)
     return 0;
 }
 
+/* exit(code)：在第 7 行说明当前任务以什么代码结束，然后结束它，不再返回。 */
+static int32_t sys_exit(uint32_t code, uint32_t b, uint32_t c, int from_user)
+{
+    (void)b, (void)c, (void)from_user;
+    struct text_line line;
+
+    line_init(&line);
+    line_append(&line, "task ");
+    line_append_dec(&line, (uint32_t)current_pid());
+    line_append(&line, " exited with code ");
+    line_append_dec(&line, code);
+    line_show(&line, VGA_YELLOW, TASK_MESSAGE_ROW);
+    sched_exit_current();
+    return 0;                       /* 不会执行到这里 */
+}
+
 static const syscall_fn syscall_table[SYS_CALLS] = {
     [SYS_WRITE]  = sys_write,
     [SYS_GETPID] = sys_getpid,
     [SYS_SLEEP]  = sys_sleep,
+    [SYS_EXIT]   = sys_exit,
 };
 
 void syscall_dispatch(struct interrupt_frame *frame)

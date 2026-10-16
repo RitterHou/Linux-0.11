@@ -124,3 +124,46 @@ char *format_uint(uint32_t value, unsigned base, char buf[12])
     buf[len] = '\0';
     return buf;
 }
+
+/*
+ * 拼一整行文字，再一次写到屏幕上：异常面板、任务结束的消息等都用它。
+ * 不用 = { 0 } 初始化 text，因为编译器可能为此生成对 memset 的调用，而内核里没有 memset。
+ */
+void line_init(struct text_line *line)
+{
+    line->len = 0;
+    line->text[0] = '\0';
+}
+
+void line_append(struct text_line *line, const char *s)
+{
+    while (*s && line->len < VGA_COLS)
+        line->text[line->len++] = *s++;
+    line->text[line->len] = '\0';
+}
+
+void line_append_dec(struct text_line *line, uint32_t value)
+{
+    char buf[12];
+    line_append(line, format_uint(value, 10, buf));
+}
+
+/* 追加 "名字=0x十六进制 "。digits 为 8 或 4（段寄存器只有 16 位）。 */
+void line_append_hex(struct text_line *line, const char *name, uint32_t value, int digits)
+{
+    char buf[12];
+
+    line_append(line, name);
+    line_append(line, "=0x");
+    line_append(line, format_uint(value, 16, buf) + (8 - digits));
+    line_append(line, " ");
+}
+
+/* 补空格到 80 列再写到第 row 行，盖住这一行原来的内容；然后清空，可以接着拼下一行。 */
+void line_show(struct text_line *line, uint8_t color, int row)
+{
+    while (line->len < VGA_COLS)
+        line_append(line, " ");
+    vga_write_at(row, 0, line->text, color);
+    line_init(line);
+}
