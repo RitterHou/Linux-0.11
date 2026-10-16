@@ -18,6 +18,7 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUILD = os.path.join(ROOT, "build")
+QEMU = os.environ.get("QEMU", "qemu-system-i386")     # make test 会传入 Makefile 中的 QEMU
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
@@ -34,24 +35,42 @@ class Machine:
     """一台无头 QEMU 虚拟机，用监视器命令观察和操作它。"""
 
     def __init__(self, image):
-        self.sock_path = os.path.join(tempfile.mkdtemp(prefix="kernel-test-"), "monitor.sock")
-        self.proc = subprocess.Popen(
-            ["qemu-system-i386", "-machine", "pc", "-accel", "tcg", "-m", "16M",
-             "-drive", f"file={image},format=raw,if=floppy,index=0", "-boot", "order=a",
-             "-display", "none", "-nic", "none", "-serial", "none",
-             "-monitor", f"unix:{self.sock_path},server,nowait", "-no-reboot"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        deadline = time.time() + 5
-        while not os.path.exists(self.sock_path):
-            check(time.time() < deadline, "QEMU 没有创建监视器 socket")
-            check(self.proc.poll() is None, "QEMU 启动失败")
-            time.sleep(0.05)
-        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.sock.connect(self.sock_path)
-        self.sock.settimeout(0.2)
-        self._read_until_prompt()
+        tmp = tempfile.mkdtemp(prefix="kernel-test-")
+        self.sock_path = os.path.join(tmp, "monitor.sock")
+        self.log_path = os.path.join(tmp, "qemu.log")
+        self.sock = None
+        # QEMU 的错误输出写进文件：用管道却不读，输出多了会把 QEMU 卡住
+        with open(self.log_path, "w") as log:
+            self.proc = subprocess.Popen(
+                [QEMU, "-machine", "pc", "-accel", "tcg", "-m", "16M",
+                 "-drive", f"file={image},format=raw,if=floppy,index=0", "-boot", "order=a",
+                 "-display", "none", "-nic", "none", "-serial", "none",
+                 "-monitor", f"unix:{self.sock_path},server,nowait", "-no-reboot"],
+                stdout=subprocess.DEVNULL, stderr=log)
+        try:
+            deadline = time.time() + 5
+            while not os.path.exists(self.sock_path):
+                check(self.proc.poll() is None, f"QEMU 启动失败：{self.log_tail()}")
+                check(time.time() < deadline, "QEMU 没有创建监视器 socket")
+                time.sleep(0.05)
+            self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.sock.connect(self.sock_path)
+            self.sock.settimeout(0.2)
+            self._read_until_prompt()
+        except BaseException:
+            self.close()            # 启动到一半失败，也不能把 QEMU 留在后台
+            raise
 
-    def _read_until_prompt(self, timeout=3.0):
+    def log_tail(self):
+        try:
+            with open(self.log_path) as f:
+                return f.read().strip()[-300:] or "（没有输出）"
+        except OSError:
+            return "（读不到日志）"
+
+    def _read_until_prompt(self, timeout=5.0):
+        """读到监视器的提示符 (qemu) 为止。超时就报错，不能把半截输出当成结果：
+        迟到的输出会被下一条命令当成自己的回答。"""
         data = ""
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -63,26 +82,34 @@ class Machine:
                 break
             data += chunk.decode(errors="replace")
             if ANSI_ESCAPE.sub("", data).rstrip().endswith("(qemu)"):
-                break
-        return ANSI_ESCAPE.sub("", data)
+                return ANSI_ESCAPE.sub("", data)
+        check(self.proc.poll() is None, f"QEMU 已经退出（可能发生了三重错误）：{self.log_tail()}")
+        raise TestFailure(f"QEMU 监视器 {timeout:.0f} 秒内没有回到提示符，收到：{ANSI_ESCAPE.sub('', data)[-200:]!r}")
 
     def cmd(self, line):
         """执行一条监视器命令，返回它的输出。"""
-        check(self.proc.poll() is None, "QEMU 已经退出（可能发生了三重错误）")
+        check(self.proc.poll() is None, f"QEMU 已经退出（可能发生了三重错误）：{self.log_tail()}")
         self.sock.sendall((line + "\n").encode())
         return self._read_until_prompt()
 
     def read_memory(self, addr, length):
-        """读取物理内存。"""
+        """读取物理内存。核对每一行的地址，读错位置时报错，而不是悄悄返回错的字节。"""
         out = bytearray()
         while len(out) < length:
             n = min(512, length - len(out))
-            dump = self.cmd(f"xp /{n}xb {addr + len(out):#x}")
+            start = addr + len(out)
+            dump = self.cmd(f"xp /{n}xb {start:#x}")
+            chunk = bytearray()
             for line in dump.splitlines():
-                m = re.match(r"\s*[0-9a-f]+:\s*((?:0x[0-9a-f]{2}\s*)+)$", line)
+                m = re.match(r"\s*([0-9a-f]+):\s*((?:0x[0-9a-f]{2}\s*)+)$", line)
                 if m:
-                    out.extend(int(b, 16) for b in m.group(1).split())
-        return bytes(out[:length])
+                    line_addr = int(m.group(1), 16)
+                    check(line_addr == start + len(chunk),
+                          f"xp 输出的地址 {line_addr:#x} 与期望的 {start + len(chunk):#x} 不符")
+                    chunk.extend(int(b, 16) for b in m.group(2).split())
+            check(len(chunk) == n, f"xp 只返回了 {len(chunk)} 字节，期望 {n} 字节")
+            out.extend(chunk)
+        return bytes(out)
 
     def screen(self, rows=25):
         """读出 VGA 文本显存的前几行，每行去掉行尾空格。"""
@@ -125,16 +152,26 @@ class Machine:
             time.sleep(delay)
 
     def wait_for(self, predicate, timeout=5.0, what="条件"):
+        """反复检查条件。条件里的 check() 失败算作“还没满足”（例如屏幕还没画出来），
+        最后一次失败的原因附在超时信息里。QEMU 退出则立刻报错。"""
         deadline = time.time() + timeout
+        last = ""
         while time.time() < deadline:
-            if predicate(self):
-                return
+            check(self.proc.poll() is None, f"QEMU 已经退出（可能发生了三重错误）：{self.log_tail()}")
+            try:
+                if predicate(self):
+                    return
+            except TestFailure as e:
+                if self.proc.poll() is not None:
+                    raise
+                last = f"（最后一次检查：{e}）"
             time.sleep(0.1)
-        raise TestFailure(f"{timeout:.0f} 秒内没有等到{what}")
+        raise TestFailure(f"{timeout:.0f} 秒内没有等到{what}{last}")
 
     def close(self):
         try:
-            self.sock.sendall(b"quit\n")
+            if self.sock:
+                self.sock.sendall(b"quit\n")
         except OSError:
             pass
         try:
@@ -728,16 +765,27 @@ def main():
         except TestFailure as e:
             failures += 1
             status, detail = "FAIL", f"\n       {e}"
+        except Exception as e:      # 测试脚本自己的意外错误：只算这一项失败，其余照常运行
+            failures += 1
+            status, detail = "FAIL", f"\n       意外的 {type(e).__name__}：{e}"
         print(f"{status}  {test.__doc__}（{time.monotonic() - start:.1f}s）{detail}", flush=True)
 
-    with Machine(image) as m:
-        try:
-            m.wait_for(boot_ready, what="启动完成（第 0 行出现 ABPKCVITU）")
-        except TestFailure as e:
-            print(f"FAIL  启动：{e}")
-            sys.exit(1)
-        for test in SHARED_TESTS:
-            run(test, m)
+    # 正常内核没能启动时，依赖它的各项都记为失败，但自检内核的各项照常运行
+    boot_error = None
+    try:
+        with Machine(image) as m:
+            try:
+                m.wait_for(boot_ready, what="启动完成（第 0 行出现 ABPKCVITU）")
+            except TestFailure as e:
+                boot_error = e
+            else:
+                for test in SHARED_TESTS:
+                    run(test, m)
+    except TestFailure as e:
+        boot_error = e
+    if boot_error:
+        failures += len(SHARED_TESTS)
+        print(f"FAIL  正常内核没有启动完成，依赖它的 {len(SHARED_TESTS)} 项都记为失败：{boot_error}", flush=True)
     for test in SEPARATE_TESTS:
         run(test, None)
 
