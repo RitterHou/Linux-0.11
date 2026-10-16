@@ -45,15 +45,16 @@ make test
 
 `tests/test_kernel.py` 只用 Python 标准库。它在后台启动没有窗口的 QEMU，通过 QEMU 监视器读取显存和寄存器、模拟按键，再用系统自带的 `objdump` 查符号地址和反汇编。目前检查：
 
-- 启动后各行的输出；`0x10000` 处的内存与 `kernel.bin` 一致；处于保护模式，代码段为 `0x08`。
+- 启动后各行的输出；`0x10000` 处的内存与 `kernel.bin` 一致；处于保护模式，各段寄存器的值正确，GDTR 指向内核自己的 `gdt`。
 - 分页已打开，CR3 指向 `page_directory`；用监视器的 `gva2gpa` 逐个检查虚拟地址：`0xC0000000` 映射到 `0xB8000`，第 0 页和 16 MB 以上未映射，其余一一对应。
 - 定时器频率约为 100 Hz（允许 90～110）。
 - 模拟按键后的回显、回车和退格，退格不会删到上一行。
 - 空闲时 CPU 停在 `kmain()` 的 `hlt` 上，且 IF 为 1。
 - 除以零显示 `#DE`，EIP 正好指向 `div` 指令；触发未填写的 IDT 表项显示 `#GP`，错误码为 `0x182`。
 - 读未映射的 `0xD0000000` 显示 `#PF`，错误码 0，CR2 为该地址；写空指针显示 `#PF`，错误码 2（写操作），CR2 为 0。
+- 把 loader 所在的 `0x8000`～`0x81FF` 清零后，定时器照常工作：内核已不再依赖 loader 的 GDT。
 
-最后两项需要故意制造异常。测试脚本会用 `make BUILD=build/selftest/<名称> SELFTEST=<名称>` 另外构建自检内核：`SELFTEST` 非空时，`selftest.c` 中对应的代码会被编译进去，在打开中断后触发异常。正常构建不定义 `SELFTEST`，`selftest_run()` 是空函数。
+后面几项需要故意制造异常或破坏内存。测试脚本会用 `make BUILD=build/selftest/<名称> SELFTEST=<名称>` 另外构建自检内核：`SELFTEST` 非空时，`selftest.c` 中对应的代码会被编译进去，在打开中断后触发异常。正常构建不定义 `SELFTEST`，`selftest_run()` 是空函数。
 
 全部测试约需 5 秒。任何一项失败时脚本以非 0 状态退出，并打印期望值与实际值。
 
@@ -73,7 +74,7 @@ make test
 12. 执行 `jmp eax` 跳到 `0x10000`，即内核入口 `_start`（`entry.asm`）。
 13. `_start` 把 ESP 换成内核自己的 4 KB 栈，把 `.bss` 清零，向 `0xB8006` 写入 `K`，然后 `call kmain`。
 14. `kmain()`（`kernel.c`）从第 0 行第 4 列写入 `C`，再换两行打印 `Hello from kmain() in C!`。
-15. `kmain()` 调用 `idt_init()` 装好 IDT，再调用 `paging_init()` 建立页表并打开分页，然后通过虚拟地址 `0xC0000000` 在第 0 行写入 `V`，在第 5 行写出分页信息。
+15. `kmain()` 调用 `gdt_init()` 换上内核自己的 GDT，调用 `idt_init()` 装好 IDT，再调用 `paging_init()` 建立页表并打开分页，然后通过虚拟地址 `0xC0000000` 在第 0 行写入 `V`，在第 5 行写出分页信息。
 16. `kmain()` 调用 `pic_init()`、`timer_init(100)`，重新设置 8259、把定时器设为每秒 100 次，然后写出第 4、6 行的标签。
 17. `sti` 打开中断，在第 0 行写入 `I`，然后进入 `hlt` 循环。此后 CPU 平时停在 `hlt`，每来一个定时器或键盘中断就醒来处理一次，处理完又回到循环里。
 
@@ -84,10 +85,9 @@ make test
 ## 内核的构建过程
 
 ```text
-entry.asm、isr.asm ──nasm -f elf32──▶ *.o ─┐
-                                          ├─ ld.lld + linker.ld ─▶ kernel.bin（写进软盘）
-kernel.c、vga.c、interrupt.c、paging.c、 │                    └─▶ kernel.elf（带符号，供调试）
-timer.c、keyboard.c、selftest.c ─clang -c─▶ *.o ─┘
+内核的 .asm 文件 ──nasm -f elf32──▶ *.o ─┐
+                                        ├─ ld.lld + linker.ld ─┬─▶ kernel.bin（写进软盘）
+内核的 .c 文件 ────clang -c────────▶ *.o ─┘                      └─▶ kernel.elf（带符号，供调试）
 ```
 
 - `clang --target=i386-elf` 让系统自带的 clang 生成 32 位 x86 的 ELF 目标文件，而不是 macOS 程序。其他编译选项的作用写在 `Makefile` 的注释里，核心是 `-ffreestanding`：没有标准库，不能用 `printf`，也没有 `main` 入口。
@@ -130,7 +130,7 @@ CPU 异常（除零、#GP 等）──中断号 0～31────────�
 
 ### IDT
 
-IDT 有 256 项，每项 8 字节，放在 `.bss` 中。`idt_init()` 把前 48 项填成 32 位中断门，入口地址来自 `isr.asm` 中的地址表，选择子是 loader 的代码段 `0x08`；其余各项保持全 0。最后用 `lidt` 把 IDT 的界限和基址装入 IDTR。
+IDT 有 256 项，每项 8 字节，放在 `.bss` 中。`idt_init()` 把前 48 项填成 32 位中断门，入口地址来自 `isr.asm` 中的地址表，选择子是内核 GDT 的代码段 `0x08`；其余各项保持全 0。最后用 `lidt` 把 IDT 的界限和基址装入 IDTR。
 
 全 0 的表项类型字段为 0，不是合法的门描述符。若被触发，CPU 在检查存在位之前就产生 13 号一般保护异常，错误码为 `中断号 × 8 + 2`（第 1 位表示错误来自 IDT）。
 
@@ -186,7 +186,7 @@ CR3 → 页目录第 768 项 → alias_table → 第 0 项 → 物理页 0xB8000
 
 loader 的栈从 `0x7C00` 向低地址增长；进入内核后改用 `.bss` 中的内核栈。这里的 `0x8000` 是本实验选择的地址。VGA 文本显存从 `0xB8000` 开始，每个字符格占 2 字节：低字节是字符，高字节是颜色属性。第 r 行第 c 列的地址是 `0xB8000 + (r × 80 + c) × 2`。
 
-GDT 仍在 loader 所在的 `0x8000` 附近，IDT 中的代码段选择子 `0x08` 指的就是它。内核今后不能占用这块内存，否则加载段寄存器或进入中断时会出错。
+进入内核后，loader 所在的 `0x7C00`～`0x81FF` 就不再需要了：内核用 `gdt_init()` 换上了自己的 GDT，栈也换成了 `.bss` 中的内核栈。
 
 CHS 的扇区号从 1 开始。镜像写入命令中的 `seek=1` 跳过一个 512 字节块，对应 CHS 的扇区 2；`seek=2` 对应扇区 3。
 
@@ -204,6 +204,8 @@ CHS 的扇区号从 1 开始。镜像写入命令中的 `seek=1` 跳过一个 51
 若把 `KERNEL_SECTORS` 改成大于 16，汇编 `loader.asm` 会报错，因为当前的一次性读取无法跨越磁道。`.bss` 不计入 `kernel.bin` 的大小，但它在内存中紧跟内核之后，不能覆盖其他正在使用的内存。
 
 ## GDT
+
+loader 进入保护模式时用的是写在 `loader.bin` 里的 GDT。进入内核后，`gdt.c` 中的 `gdt_init()` 在 `.bss` 里建一份内容相同的新表，用 `lgdt` 装入，再用一次远跳转重新装载 CS、用 `mov` 重新装载其余段寄存器：段寄存器缓存着装入时读到的描述符，换表后不重新装载就仍在用旧描述符。选择子保持不变，所以 IDT 等处引用的 `0x08`、`0x10` 都不用改。Linux 0.11 的 `head.s` 也会重建 GDT，因为 `setup.s` 留下的那份在 `0x90000` 附近，之后会被覆盖。
 
 | 选择子 | 描述符 | 含义 |
 | --- | --- | --- |
@@ -243,6 +245,7 @@ CHS 的扇区号从 1 开始。镜像写入命令中的 `seek=1` 跳过一个 51
 | `entry.asm` | 内核入口 `_start`：设置内核栈、清零 `.bss`、打印 `K`，调用 `kmain()` | `boot/head.s` |
 | `isr.asm` | 48 个中断入口和公共保存、恢复代码 | `kernel/asm.s`、`kernel/system_call.s` |
 | `kernel.c` | `kmain()`：初始化各模块，打开中断 | `init/main.c` |
+| `gdt.c` | 内核自己的 GDT | `boot/head.s` 中的 `setup_gdt` |
 | `interrupt.c` | IDT、8259、中断分发和异常显示 | `kernel/traps.c` |
 | `paging.c` | 页目录和页表，打开分页 | `boot/head.s` 中的 `setup_paging`、`mm/memory.c` |
 | `timer.c` | 8253 定时器 | `kernel/sched.c` 中的 `sched_init()`、`do_timer()` |

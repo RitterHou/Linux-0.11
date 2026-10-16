@@ -7,6 +7,11 @@
 #define VGA_GRAY      0x07          /* 黑底浅灰字 */
 #define VGA_WHITE_RED 0x4F          /* 红底白字，用于异常信息 */
 
+/* gdt.c：内核自己的 GDT，选择子与 loader 的相同 */
+#define KERNEL_CODE_SEL 0x08
+#define KERNEL_DATA_SEL 0x10
+void gdt_init(void);
+
 /* vga.c：直接写 VGA 文本显存 */
 void vga_set_cursor(int row, int col);
 void vga_putc(char ch);

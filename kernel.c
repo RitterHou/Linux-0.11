@@ -17,6 +17,7 @@ void kmain(void)
     vga_putc('C');
     vga_puts("\n\nHello from kmain() in C!");
 
+    gdt_init();                     /* 换上内核自己的 GDT，此后不再依赖 loader 所在的内存 */
     idt_init();                     /* 先装好 IDT：之后出了错（比如页表写错）才能显示异常 */
 
     paging_init();

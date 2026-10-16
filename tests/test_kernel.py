@@ -211,10 +211,16 @@ def test_kernel_in_memory(m, elf):
 
 
 def test_protected_mode(m, elf):
-    """处于 32 位保护模式，代码段是 0x08"""
+    """处于 32 位保护模式，GDTR 指向内核自己的 GDT"""
     regs = m.registers()
     check(regs["CR0"] & 1, f"CR0.PE 应为 1，CR0={regs['CR0']:#x}")
     check(regs["CS"] == 0x08, f"CS 应为 0x08，实际是 {regs['CS']:#x}")
+    for seg in ("DS", "ES", "FS", "GS", "SS"):
+        check(regs[seg] == 0x10, f"{seg} 应为 0x10，实际是 {regs[seg]:#x}")
+    gdt_addr, gdt_size = symbols(elf)["gdt"]
+    base, limit = regs["GDT"]
+    check(base == gdt_addr, f"GDTR 基址应为内核的 gdt {gdt_addr:#x}，实际是 {base:#x}（仍在用 loader 的 GDT？）")
+    check(limit == gdt_size - 1, f"GDTR 界限应为 {gdt_size - 1}，实际是 {limit}")
 
 
 def test_paging(m, elf):
@@ -324,10 +330,23 @@ def test_null_write(_m, _elf):
     page_fault_test("NULL_WRITE", 2, 0)
 
 
+def test_clobber_loader(_m, _elf):
+    """清零 loader 所在内存后仍能正常响应中断"""
+    d = build_selftest("CLOBBER_LOADER")
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        m.wait_for(lambda mm: mm.screen(1)[0].endswith("Z"), what="清零完成的标记 Z")
+        k1 = ticks_value(m)
+        time.sleep(1.0)
+        k2 = ticks_value(m)
+        check(k2 - k1 >= 50, f"清零后定时器应继续工作，1 秒内 ticks 只从 {k1} 变到 {k2}")
+        check(not exception_screen(m)[0], f"不应出现异常：{exception_screen(m)[0]!r}")
+
+
 # 前几项共用一台正常启动的虚拟机；其余各自启动自检内核。
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_idle_in_hlt]
-SEPARATE_TESTS = [test_divide_error, test_bad_gate, test_unmapped_read, test_null_write]
+SEPARATE_TESTS = [test_divide_error, test_bad_gate, test_unmapped_read, test_null_write,
+                  test_clobber_loader]
 
 
 def main():
