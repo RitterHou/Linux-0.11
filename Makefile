@@ -11,9 +11,6 @@ BUILD ?= build
 # 非空时把 selftest.c 中对应的自检代码编进内核，例如 SELFTEST=DIVIDE_ERROR。
 SELFTEST ?=
 
-# 内核在软盘上占用的扇区数。loader 按这个数读取，打包时检查 kernel.bin 不超出。
-KERNEL_SECTORS := 16
-
 # 编译内核 C 代码：生成 32 位 x86 的 ELF 目标文件，不依赖 macOS 的头文件和库。
 #   -ffreestanding          独立环境：没有标准库，main 也不是入口
 #   -nostdlibinc            不搜索系统头文件，只用 clang 自带的 stdint.h 等
@@ -41,8 +38,9 @@ $(BUILD):
 $(BUILD)/boot.bin: boot.asm | $(BUILD)
 	$(NASM) -f bin $< -o $@
 
-$(BUILD)/loader.bin: loader.asm Makefile | $(BUILD)
-	$(NASM) -f bin -DKERNEL_SECTORS=$(KERNEL_SECTORS) $< -o $@
+# loader 要读多少个扇区，按 kernel.bin 的实际大小向上取整，在汇编时传进去。
+$(BUILD)/loader.bin: loader.asm $(BUILD)/kernel.bin Makefile | $(BUILD)
+	$(NASM) -f bin -DKERNEL_SECTORS=$$(( ($$(wc -c < $(BUILD)/kernel.bin) + 511) / 512 )) $< -o $@
 
 # 内核的汇编文件（entry.asm、isr.asm）编译成 ELF 目标文件，地址由链接脚本决定。
 $(BUILD)/%.o: %.asm | $(BUILD)
@@ -61,11 +59,6 @@ $(BUILD)/kernel.elf: $(KERNEL_OBJS) linker.ld
 
 # 标准 1.44 MB 软盘：扇区 1 放 boot，扇区 2 放 loader，从扇区 3 起放 kernel。
 $(BUILD)/floppy.img: $(BUILD)/boot.bin $(BUILD)/loader.bin $(BUILD)/kernel.bin Makefile
-	@size=$$(wc -c < $(BUILD)/kernel.bin | tr -d ' '); \
-	if [ $$size -gt $$(( $(KERNEL_SECTORS) * 512 )) ]; then \
-		echo "kernel.bin 有 $$size 字节，超出 KERNEL_SECTORS=$(KERNEL_SECTORS) 个扇区"; \
-		exit 1; \
-	fi
 	dd if=/dev/zero of=$@ bs=512 count=2880
 	dd if=$(BUILD)/boot.bin of=$@ bs=512 conv=notrunc
 	dd if=$(BUILD)/loader.bin of=$@ bs=512 seek=1 conv=notrunc

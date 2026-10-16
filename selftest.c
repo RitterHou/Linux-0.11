@@ -10,6 +10,17 @@
 #define SELFTEST_NULL_WRITE   4     /* 写空指针：第 0 页未映射，期望 14 号 #PF，错误码 2 */
 #define SELFTEST_CLOBBER_LOADER 5   /* 清零 loader 所在内存：内核有自己的 GDT，期望照常运行 */
 #define SELFTEST_OTHER_SEGMENTS 6   /* DS 等换成基址 1 MB 的段后空转：中断入口要换段并恢复 */
+#define SELFTEST_BIG_KERNEL     7   /* 内核撑到约 90 个扇区，跨越多个磁道和柱面：期望完整读入 */
+
+#if defined(SELFTEST) && SELFTEST == SELFTEST_BIG_KERNEL
+/*
+ * 40 KB 的只读数据会原样写进 kernel.bin。最后一个字节是标记，没读全就看不到它。
+ * 编译器能在编译时算出这个字节是 'Y'，会把比较和整个数组都优化掉，
+ * 所以加上 used 属性，并通过 volatile 指针读取。
+ */
+#define BIG_SIZE (40 * 1024)
+static const uint8_t big_data[BIG_SIZE] __attribute__((used)) = { [BIG_SIZE - 1] = 'Y' };
+#endif
 
 void selftest_run(void)
 {
@@ -48,6 +59,9 @@ void selftest_run(void)
         "movw %%ax, %%gs\n"
         "1:\thlt\n\t"
         "jmp 1b" ::: "eax", "memory");
+#elif SELFTEST == SELFTEST_BIG_KERNEL
+    const volatile uint8_t *data = big_data;
+    vga_write_at(0, 8, data[BIG_SIZE - 1] == 'Y' ? "Y" : "X", VGA_GRAY);
 #else
 #error "未知的 SELFTEST"
 #endif
