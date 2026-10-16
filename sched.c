@@ -2,9 +2,9 @@
  * 任务调度：任务 A 和任务 B 在定时器中断的驱动下轮流运行，各自把字母写到第 6 行。
  *
  * 用 x86 的硬件任务切换，与 Linux 0.11 相同：每个任务有一个 TSS（任务状态段），
- * GDT 中有它的描述符。远跳转到 TSS 的选择子时，CPU 自动把当前寄存器存进当前任务的 TSS，
- * 再从目标任务的 TSS 装入全部寄存器（包括 EIP、ESP、EFLAGS、段寄存器和 CR3），
- * 于是目标任务从它上次被切走的地方接着运行。
+ * GDT 中有它的描述符。远跳转到 TSS 的选择子时，CPU 自动把当前的通用寄存器、段寄存器、
+ * EFLAGS 和 EIP 存进当前任务的 TSS，再从目标任务的 TSS 装入这些寄存器以及 CR3，
+ * 于是目标任务从它上次被切走的地方接着运行。CR3 只装入、不保存，每个 TSS 都要预先填好。
  *
  * 任务 0 是 kmain() 自己：sched_init() 用 ltr 把它登记为当前任务，
  * 调度开始后它就被切走，之后只在 A、B 之间轮转。
@@ -13,6 +13,7 @@
  */
 #include "io.h"
 #include "kernel.h"
+#include "selftest.h"
 #include "syscall.h"
 
 #define TASKS          3            /* 0 = kmain，1 = A，2 = B */
@@ -77,6 +78,13 @@ static void task_main(void)
 {
     char letter = (char)('A' + getpid() - 1);
 
+#if defined(SELFTEST) && SELFTEST == SELFTEST_ALL_EXIT
+    for (int i = 0; i < 5; i++) {   /* 自检：写 5 个字母后结束，之后任务 B 也会结束 */
+        write(1, &letter, 1);
+        sleep(2);
+    }
+    exit(1);
+#endif
     for (;;) {
         write(1, &letter, 1);
         sleep(2);
@@ -121,6 +129,12 @@ void sched_init(void)
     uint32_t cr3;
     __asm__ volatile("movl %%cr3, %0" : "=r"(cr3));
 
+    /*
+     * 任务 0 的 TSS 也要填 CR3：任务切换时 CPU 不会把当前的 CR3 存进旧 TSS，
+     * 将来切回任务 0（所有任务都结束时）装入的就是这里的值，留 0 会把物理地址 0 当成页目录。
+     * Linux 0.11 的 INIT_TASK 同样把 cr3 填为页目录 pg_dir。
+     */
+    tss[0].cr3 = cr3;
     for (int n = 0; n < TASKS; n++) {
         tss[n].iomap_base = sizeof(struct tss);     /* 没有 I/O 权限位图 */
         gdt_set_entry(TSS_GDT_INDEX + n, (uint32_t)&tss[n], sizeof(struct tss) - 1, TSS_ACCESS, 0);

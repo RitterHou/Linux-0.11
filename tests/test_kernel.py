@@ -626,6 +626,27 @@ def test_user_bad_pointer(_m, _elf):
         check("K" in out and "X" not in out, f"write 应拒绝内核地址并返回 -1（用户程序写 K），实际输出 {out!r}")
 
 
+def test_all_tasks_exit(_m, _elf):
+    """任务 A、B 都结束后切回任务 0：定时器照常走，CPU 停在 kmain 的 hlt 上"""
+    d = build_selftest("ALL_EXIT")
+    table = symbols(os.path.join(d, "kernel.elf"))
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        m.wait_for(lambda mm: message_row(mm) == "task 2 exited with code 2", what="任务 B 的结束消息")
+        k1 = ticks_value(m)
+        time.sleep(1.0)
+        check(ticks_value(m) - k1 >= 50, "所有任务结束后定时器应照常工作")
+        check(not exception_screen(m)[0], f"不应出现异常面板：{exception_screen(m)[0]!r}")
+        check(task_output(m).startswith("AAAAAbye"), f"任务 A 写 5 个 A 后结束，任务 B 写 bye 后结束：{task_output(m)!r}")
+        for _ in range(10):
+            regs = m.registers()
+            if regs["HLT"] == 1:
+                break
+            time.sleep(0.05)
+        check(regs["TR"] == 0x18, f"应切回任务 0（TR=0x18），实际 TR={regs['TR']:#x}")
+        check(in_function(table, "kmain", regs["EIP"]), f"应停在 kmain 的 hlt 上，EIP={regs['EIP']:#x}")
+        check(regs["CR3"] == table["page_directory"][0], f"CR3 应仍是页目录，实际是 {regs['CR3']:#x}")
+
+
 # 前几项共用一台正常启动的虚拟机；其余各自启动自检内核。
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_console_scroll,
@@ -634,7 +655,7 @@ SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, te
 SEPARATE_TESTS = [test_syscalls, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,
                   test_big_kernel, test_user_write_kernel, test_user_privileged,
-                  test_user_bad_pointer, test_user_exit]
+                  test_user_bad_pointer, test_user_exit, test_all_tasks_exit]
 
 
 def main():

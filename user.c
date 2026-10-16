@@ -34,6 +34,9 @@ void user_main(void)
 #elif SELFTEST == SELFTEST_USER_EXIT
     write(1, "bye", 3);
     exit(7);
+#elif SELFTEST == SELFTEST_ALL_EXIT
+    write(1, "bye", 3);
+    exit(2);
 #else
 #error "未知的用户态 SELFTEST"
 #endif
