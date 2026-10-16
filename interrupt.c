@@ -6,10 +6,12 @@
  */
 #include "io.h"
 #include "kernel.h"
+#include "syscall.h"
 
 #define IDT_ENTRIES      256
 #define ISR_STUBS        48         /* isr.asm 提供 0～47 号入口 */
 #define INTERRUPT_GATE   0x8E       /* 存在、DPL 0、32 位中断门：进入时 CPU 自动清 IF */
+#define USER_TRAP_GATE   0xEF       /* 存在、DPL 3、32 位陷阱门：用户态也能 int 调用，进入时不清 IF */
 
 #define PIC1_CMD   0x20             /* 主片：IRQ0～7 */
 #define PIC1_DATA  0x21
@@ -36,23 +38,31 @@ struct idt_pointer {                /* lidt 的操作数：界限和基址，共
 } __attribute__((packed));
 
 extern const uint32_t isr_stub_table[ISR_STUBS];
+extern void isr_syscall(void);
 
 /* 位于 .bss，由 entry.asm 清零；没有填写的表项存在位为 0。 */
 static struct idt_entry idt[IDT_ENTRIES] __attribute__((aligned(8)));
 
-static void idt_set_gate(int vector, uint32_t handler)
+static void idt_set_gate(int vector, uint32_t handler, uint8_t type_attr)
 {
     idt[vector].offset_low  = handler & 0xFFFF;
     idt[vector].selector    = KERNEL_CODE_SEL;
     idt[vector].zero        = 0;
-    idt[vector].type_attr   = INTERRUPT_GATE;
+    idt[vector].type_attr   = type_attr;
     idt[vector].offset_high = handler >> 16;
 }
 
 void idt_init(void)
 {
     for (int i = 0; i < ISR_STUBS; i++)
-        idt_set_gate(i, isr_stub_table[i]);
+        idt_set_gate(i, isr_stub_table[i], INTERRUPT_GATE);
+
+    /*
+     * 系统调用用 DPL 3 的门：int n 只能调用 DPL ≥ 当前特权级的门，DPL 0 的门在用户态调用会触发 #GP。
+     * 用陷阱门而不是中断门，系统调用执行期间中断仍然打开，sleep 才能等到定时器。
+     * Linux 0.11 用 set_system_gate(0x80, &system_call) 做同样的设置。
+     */
+    idt_set_gate(SYSCALL_VECTOR, (uint32_t)isr_syscall, USER_TRAP_GATE);
 
     /*
      * 48～255 号表项全为 0，类型字段 0 不是合法的门描述符。万一被触发，CPU 在检查
@@ -195,6 +205,10 @@ void interrupt_dispatch(struct interrupt_frame *frame)
 
     if (vector < IRQ_BASE) {
         exception_panic(frame);
+        return;
+    }
+    if (vector == SYSCALL_VECTOR) {
+        syscall_dispatch(frame);    /* 不是 8259 送来的，不能发 EOI */
         return;
     }
 

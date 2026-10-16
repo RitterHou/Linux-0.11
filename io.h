@@ -19,6 +19,22 @@ static inline uint8_t inb(uint16_t port)
     return value;
 }
 
+/*
+ * 关中断并返回原来的 EFLAGS；irq_restore() 再恢复原状。
+ * 比直接 cli/sti 更安全：调用者原本就关着中断时，结束后不会被意外打开。
+ */
+static inline uint32_t irq_save(void)
+{
+    uint32_t flags;
+    __asm__ volatile("pushfl; popl %0; cli" : "=r"(flags) : : "memory");
+    return flags;
+}
+
+static inline void irq_restore(uint32_t flags)
+{
+    __asm__ volatile("pushl %0; popfl" : : "r"(flags) : "memory", "cc");
+}
+
 /* 向空闲端口 0x80 写一个字节，给老式外设留出处理上一条命令的时间。 */
 static inline void io_wait(void)
 {

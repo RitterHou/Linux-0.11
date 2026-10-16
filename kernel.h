@@ -53,6 +53,11 @@ void timer_handle(void);
 void sched_init(void);
 void sched_start(void);
 void schedule(void);
+int current_pid(void);
+void task_write_char(char ch);
+
+/* syscall.c：int 0x80 系统调用 */
+void syscall_dispatch(struct interrupt_frame *frame);
 
 /* keyboard.c：键盘 */
 void keyboard_handle(void);

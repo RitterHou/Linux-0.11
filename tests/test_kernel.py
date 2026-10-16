@@ -322,16 +322,28 @@ def test_console_scroll(m, elf):
 
 
 def test_idle_in_hlt(m, elf):
-    """任务等待时停在 hlt 上，且中断已打开"""
+    """任务等待时停在 sleep 系统调用的 hlt 上，且中断已打开"""
     table = symbols(elf)
     for _ in range(10):
         regs = m.registers()
-        in_task = in_function(table, "task_a", regs["EIP"]) or in_function(table, "task_b", regs["EIP"])
-        if regs["HLT"] == 1 and in_task:
+        if regs["HLT"] == 1 and in_function(table, "sys_sleep", regs["EIP"]):
             check(regs["EFL"] & 0x200, "空闲时 IF 应为 1")
             return
         time.sleep(0.1)
-    raise TestFailure("10 次采样都没有停在任务 A 或 B 的 hlt 上")
+    raise TestFailure("10 次采样都没有停在 sys_sleep 的 hlt 上")
+
+
+def test_syscall_gate(m, elf):
+    """IDT 第 0x80 项是指向 isr_syscall 的 DPL 3 陷阱门"""
+    base, limit = m.registers()["IDT"]
+    check(limit >= 0x80 * 8 + 7, f"IDT 界限 {limit:#x} 不够容纳第 0x80 项")
+    entry = m.read_memory(base + 0x80 * 8, 8)
+    offset = entry[0] | entry[1] << 8 | entry[6] << 16 | entry[7] << 24
+    selector = entry[2] | entry[3] << 8
+    check(entry[5] == 0xEF, f"第 0x80 项的类型属性应为 0xEF（存在、DPL 3、陷阱门），实际是 {entry[5]:#x}")
+    check(selector == 0x08, f"第 0x80 项的选择子应为 0x08，实际是 {selector:#x}")
+    target = symbols(elf)["isr_syscall"][0]
+    check(offset == target, f"第 0x80 项应指向 isr_syscall {target:#x}，实际是 {offset:#x}")
 
 
 def task_output(m):
@@ -490,12 +502,28 @@ def test_register_dump(_m, _elf):
         check(fields.get("EFLAGS", 0) & 0x200, "出错时中断已打开，EFLAGS 的 IF 位应为 1")
 
 
+def test_syscalls(_m, _elf):
+    """各个系统调用的返回值和效果"""
+    d = build_selftest("SYSCALLS")
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        m.wait_for(lambda mm: "slept=" in mm.screen(8)[7], what="第 7 行的系统调用结果")
+        rows = m.screen(8)
+        fields = dict(re.findall(r"(\w+)=([0-9A-F]+)", rows[7]))
+        check(fields.get("pid") == "0", f"kmain 是任务 0，getpid() 应返回 0：{rows[7]!r}")
+        check(fields.get("unknown") == "FFFFFFFF", f"未知调用号应返回 -1：{rows[7]!r}")
+        check(fields.get("write") == "3", f"write 应返回写出的字节数 3：{rows[7]!r}")
+        check(fields.get("badfd") == "FFFFFFFF", f"不支持的 fd 应返回 -1：{rows[7]!r}")
+        slept = int(fields.get("slept", "0"))
+        check(10 <= slept <= 12, f"sleep(10) 应等待约 10 个 tick，实际 {slept}：{rows[7]!r}")
+        check(rows[6].startswith("tasks: xyz"), f"write 的内容应出现在第 6 行开头：{rows[6]!r}")
+
+
 # 前几项共用一台正常启动的虚拟机；其余各自启动自检内核。
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_console_scroll,
-                test_idle_in_hlt,
+                test_idle_in_hlt, test_syscall_gate,
                 test_tasks_alternate]
-SEPARATE_TESTS = [test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
+SEPARATE_TESTS = [test_syscalls, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,
                   test_big_kernel]
 

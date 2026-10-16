@@ -3,6 +3,7 @@
  * 检验异常处理是否正确。正常构建时没有定义 SELFTEST，selftest_run() 什么也不做。
  */
 #include "kernel.h"
+#include "syscall.h"
 
 #define SELFTEST_DIVIDE_ERROR 1     /* 除以零：期望 0 号 #DE */
 #define SELFTEST_BAD_GATE     2     /* int 0x30：IDT 第 48 项为空，期望 13 号 #GP */
@@ -12,6 +13,25 @@
 #define SELFTEST_OTHER_SEGMENTS 6   /* DS 等换成基址 1 MB 的段后空转：中断入口要换段并恢复 */
 #define SELFTEST_BIG_KERNEL     7   /* 内核撑到约 90 个扇区，跨越多个磁道和柱面：期望完整读入 */
 #define SELFTEST_REGISTER_DUMP  8   /* 寄存器设为已知值后执行 ud2：期望 6 号 #UD，面板显示这些值 */
+#define SELFTEST_SYSCALLS       9   /* 依次调用各个系统调用，把返回值写到第 7 行 */
+
+#if defined(SELFTEST) && SELFTEST == SELFTEST_SYSCALLS
+static int report_col;
+
+/* 在第 7 行接着写 "名字=值 "；base 为 16 时写 8 位十六进制。 */
+static void report(const char *name, uint32_t value, unsigned base)
+{
+    char buf[12];
+    const char *parts[3] = { name, "=", format_uint(value, base, buf) };
+
+    for (int i = 0; i < 3; i++) {
+        vga_write_at(7, report_col, parts[i], VGA_GRAY);
+        for (const char *p = parts[i]; *p; p++)
+            report_col++;
+    }
+    report_col++;
+}
+#endif
 
 #if defined(SELFTEST) && SELFTEST == SELFTEST_BIG_KERNEL
 /*
@@ -80,6 +100,21 @@ void selftest_run(void)
         "selftest_ud2:\n\t"
         "ud2");
     __builtin_unreachable();
+#elif SELFTEST == SELFTEST_SYSCALLS
+    /* kmain 是任务 0，此时还没开始调度。write 的内容出现在第 6 行开头。 */
+    int32_t pid = getpid();
+    int32_t unknown = syscall3(99, 0, 0, 0);
+    int32_t written = write(1, "xyz", 3);
+    int32_t bad_fd = write(5, "q", 1);
+    uint32_t before = timer_ticks;
+    sleep(10);
+    uint32_t slept = timer_ticks - before;
+
+    report("pid", (uint32_t)pid, 10);
+    report("unknown", (uint32_t)unknown, 16);
+    report("write", (uint32_t)written, 10);
+    report("badfd", (uint32_t)bad_fd, 16);
+    report("slept", slept, 10);
 #else
 #error "未知的 SELFTEST"
 #endif

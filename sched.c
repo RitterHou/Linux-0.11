@@ -9,7 +9,9 @@
  * 任务 0 是 kmain() 自己：sched_init() 用 ltr 把它登记为当前任务，
  * 调度开始后它就被切走，之后只在 A、B 之间轮转。
  */
+#include "io.h"
 #include "kernel.h"
+#include "syscall.h"
 
 #define TASKS          3            /* 0 = kmain，1 = A，2 = B */
 #define TSS_GDT_INDEX  3            /* 任务 n 的 TSS 描述符在 GDT 第 3 + n 项 */
@@ -42,30 +44,38 @@ static int scheduling;              /* sched_start() 之后才开始切换 */
 static uint32_t slice_left;
 static int output_pos;              /* 两个任务共用的输出位置 */
 
-/* 写一个字符到第 6 行。两个任务共用 output_pos，关中断保证读、写、加一不被切换打断。 */
-static void task_output(char ch)
+/*
+ * 写一个字符到第 6 行，供 write 系统调用使用。各任务共用 output_pos，
+ * 关中断保证“读位置、写字符、位置加一”不被任务切换打断；结束后恢复原来的中断状态。
+ */
+void task_write_char(char ch)
 {
     char s[2] = { ch, '\0' };
+    uint32_t flags = irq_save();
 
-    __asm__ volatile("cli");
     vga_write_at(OUTPUT_ROW, OUTPUT_COL + output_pos, s, VGA_GRAY);
     output_pos = (output_pos + 1) % OUTPUT_WIDTH;
-    __asm__ volatile("sti");
+    irq_restore(flags);
 }
 
-/* 每 2 个 tick 写一个字母；等待期间用 hlt 停下，直到下一个中断。 */
-static void task_loop(char ch)
+int current_pid(void)
 {
+    return current_task;
+}
+
+/*
+ * 两个任务运行同一段代码，只通过系统调用和内核打交道：
+ * 用 getpid() 得到任务号，任务 1 写 A、任务 2 写 B；每写一个字母 sleep 2 个 tick。
+ */
+static void task_main(void)
+{
+    char letter = (char)('A' + getpid() - 1);
+
     for (;;) {
-        task_output(ch);
-        uint32_t start = timer_ticks;
-        while (timer_ticks - start < 2)
-            __asm__ volatile("hlt");
+        write(1, &letter, 1);
+        sleep(2);
     }
 }
-
-static void task_a(void) { task_loop('A'); }
-static void task_b(void) { task_loop('B'); }
 
 static void init_task(int n, void (*entry)(void), uint32_t cr3)
 {
@@ -88,8 +98,8 @@ void sched_init(void)
         tss[n].iomap_base = sizeof(struct tss);     /* 没有 I/O 权限位图 */
         gdt_set_entry(TSS_GDT_INDEX + n, (uint32_t)&tss[n], sizeof(struct tss) - 1, TSS_ACCESS, 0);
     }
-    init_task(1, task_a, cr3);
-    init_task(2, task_b, cr3);
+    init_task(1, task_main, cr3);
+    init_task(2, task_main, cr3);
 
     /* 把 kmain 登记为任务 0：第一次切换时，CPU 才知道把当前寄存器存到哪个 TSS。 */
     __asm__ volatile("ltr %w0" : : "r"(TSS_SEL(0)));
