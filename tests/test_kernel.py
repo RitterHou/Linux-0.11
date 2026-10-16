@@ -160,6 +160,30 @@ def symbols(elf):
     return table
 
 
+def sections(elf):
+    """用 objdump -h 读出各段：名称 -> (地址, 大小)。"""
+    out = subprocess.run(["objdump", "-h", elf], capture_output=True, text=True, check=True).stdout
+    table = {}
+    for line in out.splitlines():
+        m = re.match(r"\s*\d+\s+(\S+)\s+([0-9a-f]{8})\s+([0-9a-f]{8})", line)
+        if m:
+            table[m.group(1)] = (int(m.group(3), 16), int(m.group(2), 16))
+    return table
+
+
+def check_kernel_loaded(m, elf, kernel_bin):
+    """比较内存与 kernel.bin 中的只读部分（.text 和 .rodata）。.data 运行时会被改写，不比较。"""
+    with open(kernel_bin, "rb") as f:
+        image = f.read()
+    table = sections(elf)
+    for name in (".text", ".rodata"):
+        check(name in table, f"kernel.elf 中没有 {name} 段")
+        addr, size = table[name]
+        expected = image[addr - 0x10000:addr - 0x10000 + size]
+        check(len(expected) == size, f"{name} 超出了 kernel.bin 的范围")
+        check(m.read_memory(addr, size) == expected, f"{name}（{addr:#x} 起 {size} 字节）与 kernel.bin 不一致")
+
+
 def instruction_at(elf, addr):
     """反汇编 addr 处的一条指令，返回助记符。"""
     out = subprocess.run(
@@ -204,11 +228,8 @@ def test_boot_screen(m, elf):
 
 
 def test_kernel_in_memory(m, elf):
-    """0x10000 处的内存与 kernel.bin 一致"""
-    with open(os.path.join(BUILD, "kernel.bin"), "rb") as f:
-        expected = f.read()
-    actual = m.read_memory(0x10000, len(expected))
-    check(actual == expected, f"0x10000 处的 {len(expected)} 字节与 kernel.bin 不一致")
+    """内存中内核的代码和只读数据与 kernel.bin 一致"""
+    check_kernel_loaded(m, elf, os.path.join(BUILD, "kernel.bin"))
 
 
 def test_protected_mode(m, elf):
@@ -280,6 +301,24 @@ def test_keyboard_shift(m, elf):
     rows = m.screen(12)
     check(rows[10] == "Hi! @_Q", f"第 10 行应为 'Hi! @_Q'，实际是 {rows[10]!r}")
     check(rows[11] == "ABc1d", f"第 11 行应为 'ABc1d'（Caps Lock 下 Shift 得到小写，数字不受影响），实际是 {rows[11]!r}")
+
+
+def test_console_scroll(m, elf):
+    """回显窗口（第 8～18 行）写满后向上滚动，窗口外的内容不受影响"""
+    before = m.screen(8)
+    # 接在上一项之后：光标在第 11 行末尾。先换行，再输入 l1～l12 共 12 行，每行以回车结束。
+    keys = ["ret"]
+    for i in range(1, 13):
+        keys += ["l", str(i % 10), "ret"]
+    m.sendkeys(keys)
+    time.sleep(0.3)
+    rows = m.screen(25)
+    expected = [f"l{i % 10}" for i in range(3, 13)] + [""]     # l3 … l2，最后是光标所在的空行
+    check(rows[8:19] == expected, f"第 8～18 行应为 {expected}，实际是 {rows[8:19]}")
+    for r in (0, 2, 5):
+        check(rows[r] == before[r], f"第 {r} 行不应被滚动影响：{before[r]!r} 变成了 {rows[r]!r}")
+    check(rows[6].startswith("tasks: ") and rows[4].startswith("ticks: "), "第 4、6 行不应被滚动影响")
+    check(all(r == "" for r in rows[19:]), f"第 19～24 行应为空：{rows[19:]}")
 
 
 def test_idle_in_hlt(m, elf):
@@ -414,12 +453,13 @@ def test_big_kernel(_m, _elf):
         m.wait_for(lambda mm: len(mm.screen(1)[0]) > 8, what="第 0 行第 8 列的标记")
         row0 = m.screen(1)[0]
         check(row0[8] == "Y", f"内核末尾的标记应为 Y，第 0 行是 {row0!r}")
-        check(m.read_memory(0x10000, len(kernel)) == kernel, f"0x10000 处的 {len(kernel)} 字节与 kernel.bin 不一致")
+        check_kernel_loaded(m, os.path.join(d, "kernel.elf"), os.path.join(d, "kernel.bin"))
 
 
 # 前几项共用一台正常启动的虚拟机；其余各自启动自检内核。
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
-                test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_idle_in_hlt,
+                test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_console_scroll,
+                test_idle_in_hlt,
                 test_tasks_alternate]
 SEPARATE_TESTS = [test_divide_error, test_bad_gate, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,

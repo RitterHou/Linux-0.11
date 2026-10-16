@@ -19,6 +19,10 @@
 static int cursor_row;
 static int cursor_col;
 
+/* vga_putc() 输出的窗口（含首尾两行）。光标写过最后一行时，窗口内容整体上移一行。 */
+static int window_top = 0;
+static int window_bottom = VGA_ROWS - 1;
+
 static void put_cell(int row, int col, char ch, uint8_t color)
 {
     VGA_TEXT[row * VGA_COLS + col] = (uint16_t)(color << 8 | (uint8_t)ch);
@@ -33,6 +37,26 @@ static void update_hardware_cursor(void)
     outb(VGA_CRTC_DATA, pos & 0xFF);
     outb(VGA_CRTC_INDEX, 0x0E);
     outb(VGA_CRTC_DATA, pos >> 8);
+}
+
+/*
+ * 设置 vga_putc() 使用的窗口。只有窗口内的行会滚动，窗口外的固定内容
+ * （第 0 行的标记、ticks 计数、任务输出等）不受影响。
+ */
+void vga_set_window(int top, int bottom)
+{
+    window_top = top;
+    window_bottom = bottom;
+}
+
+/* 窗口内的行依次上移一行，最后一行清空。VGA_TEXT 是 volatile，编译器不会把循环换成 memmove。 */
+static void scroll_window(void)
+{
+    for (int row = window_top; row < window_bottom; row++)
+        for (int col = 0; col < VGA_COLS; col++)
+            VGA_TEXT[row * VGA_COLS + col] = VGA_TEXT[(row + 1) * VGA_COLS + col];
+    for (int col = 0; col < VGA_COLS; col++)
+        put_cell(window_bottom, col, ' ', VGA_GRAY);
 }
 
 void vga_set_cursor(int row, int col)
@@ -59,8 +83,10 @@ void vga_putc(char ch)
             cursor_row++;
         }
     }
-    if (cursor_row == VGA_ROWS)
-        cursor_row = 0;             /* 还没有滚屏，写满后回到第 0 行 */
+    if (cursor_row > window_bottom) {
+        scroll_window();
+        cursor_row = window_bottom;
+    }
     update_hardware_cursor();
 }
 
