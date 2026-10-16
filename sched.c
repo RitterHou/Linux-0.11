@@ -8,6 +8,8 @@
  *
  * 任务 0 是 kmain() 自己：sched_init() 用 ltr 把它登记为当前任务，
  * 调度开始后它就被切走，之后只在 A、B 之间轮转。
+ * 任务 A 在内核态（特权级 0）运行 task_main()；任务 B 在用户态（特权级 3）运行 user.c 的 user_main()，
+ * 两者做同样的事，都只通过系统调用输出和等待。
  */
 #include "io.h"
 #include "kernel.h"
@@ -36,7 +38,10 @@ struct tss {
 } __attribute__((packed));
 
 static struct tss tss[TASKS];
-/* 任务 1、2 各自的栈；任务 0 就是 kmain，沿用 entry.asm 设置的内核栈。 */
+/*
+ * 任务 1、2 各自的内核栈；任务 0 就是 kmain，沿用 entry.asm 设置的内核栈。
+ * 任务 B 在用户态时用 user.c 中的用户栈，进入中断或系统调用时 CPU 换到这里的内核栈。
+ */
 static uint8_t task_stacks[TASKS - 1][STACK_SIZE] __attribute__((aligned(16)));
 
 static int current_task;            /* 当前任务号，起始为 0 */
@@ -64,7 +69,7 @@ int current_pid(void)
 }
 
 /*
- * 两个任务运行同一段代码，只通过系统调用和内核打交道：
+ * 任务 A 的代码（特权级 0）。任务 B 的 user_main() 与它做同样的事，只是运行在用户态：
  * 用 getpid() 得到任务号，任务 1 写 A、任务 2 写 B；每写一个字母 sleep 2 个 tick。
  */
 static void task_main(void)
@@ -77,6 +82,7 @@ static void task_main(void)
     }
 }
 
+/* 内核任务：特权级 0，栈就是它的内核栈。 */
 static void init_task(int n, void (*entry)(void), uint32_t cr3)
 {
     struct tss *t = &tss[n];
@@ -89,6 +95,26 @@ static void init_task(int n, void (*entry)(void), uint32_t cr3)
     t->cr3 = cr3;                   /* 任务切换会装入 CR3，必须填当前的页目录 */
 }
 
+/*
+ * 用户任务：CS 等填用户段选择子（RPL 为 3），硬件任务切换装入这个 TSS 时就直接进入特权级 3。
+ * ss0:esp0 是它的内核栈：在用户态发生中断或系统调用时，CPU 从这里取出内核栈，
+ * 再把用户态的 SS、ESP、EFLAGS、CS、EIP 压上去。EFLAGS 的 IOPL 为 0，用户态不能执行 cli、in、out。
+ * Linux 0.11 的 copy_process() 也把 esp0 设为该进程内核栈的顶端。
+ */
+static void init_user_task(int n, void (*entry)(void), uint32_t user_esp, uint32_t cr3)
+{
+    struct tss *t = &tss[n];
+
+    t->eip = (uint32_t)entry;
+    t->esp = user_esp;
+    t->eflags = 0x202;
+    t->cs = USER_CODE_SEL;
+    t->ds = t->es = t->fs = t->gs = t->ss = USER_DATA_SEL;
+    t->ss0 = KERNEL_DATA_SEL;
+    t->esp0 = (uint32_t)&task_stacks[n - 1][STACK_SIZE];
+    t->cr3 = cr3;
+}
+
 void sched_init(void)
 {
     uint32_t cr3;
@@ -99,7 +125,7 @@ void sched_init(void)
         gdt_set_entry(TSS_GDT_INDEX + n, (uint32_t)&tss[n], sizeof(struct tss) - 1, TSS_ACCESS, 0);
     }
     init_task(1, task_main, cr3);
-    init_task(2, task_main, cr3);
+    init_user_task(2, user_main, (uint32_t)&user_stack[USER_STACK_SIZE], cr3);
 
     /* 把 kmain 登记为任务 0：第一次切换时，CPU 才知道把当前寄存器存到哪个 TSS。 */
     __asm__ volatile("ltr %w0" : : "r"(TSS_SEL(0)));

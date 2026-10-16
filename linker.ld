@@ -9,13 +9,30 @@ SECTIONS
 {
     . = 0x10000;                    /* 与 loader.asm 的 KERNEL_ADDR 一致 */
 
+    /*
+     * 内核自己的段。EXCLUDE_FILE 把用户程序 user.o 排除在外，它单独放进后面的 .user 段。
+     * EXCLUDE_FILE 只作用于紧跟其后的一个段名，所以每个段名前都要写一次。
+     */
     .text : {
         *(.text.entry)              /* entry.asm 的入口代码放在最前面 */
-        *(.text .text.*)
+        *(EXCLUDE_FILE(*user.o) .text EXCLUDE_FILE(*user.o) .text.*)
     }
 
-    .rodata : { *(.rodata .rodata.*) }   /* 字符串常量等只读数据 */
-    .data   : { *(.data .data.*) }       /* 有初值的全局变量 */
+    .rodata : { *(EXCLUDE_FILE(*user.o) .rodata EXCLUDE_FILE(*user.o) .rodata.*) }
+    .data   : { *(EXCLUDE_FILE(*user.o) .data EXCLUDE_FILE(*user.o) .data.*) }
+
+    /*
+     * 用户程序：代码、只读数据、数据和用户栈都在这里，首尾按 4 KB 对齐，
+     * paging.c 只给 __user_start～__user_end 之间的页打开用户位。
+     * 其中的 .bss（用户栈）也写进 kernel.bin，以零的形式占用文件空间。
+     */
+    . = ALIGN(4096);
+    .user : {
+        __user_start = .;
+        *user.o(.text .text.* .rodata .rodata.* .data .data.* .bss .bss.* COMMON)
+        . = ALIGN(4096);
+        __user_end = .;
+    }
 
     /* .bss 不写进 kernel.bin，由 entry.asm 在运行时清零 */
     .bss : {
@@ -29,3 +46,5 @@ SECTIONS
 }
 
 ASSERT(_start == 0x10000, "_start must be at 0x10000, the address loader jumps to")
+ASSERT(__user_end > __user_start, "user program must not be empty")
+ASSERT(__user_end <= 0x400000, "paging.c only sets user bits in the first 4 MB page table")

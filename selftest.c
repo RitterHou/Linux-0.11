@@ -3,17 +3,9 @@
  * 检验异常处理是否正确。正常构建时没有定义 SELFTEST，selftest_run() 什么也不做。
  */
 #include "kernel.h"
+#include "selftest.h"
 #include "syscall.h"
 
-#define SELFTEST_DIVIDE_ERROR 1     /* 除以零：期望 0 号 #DE */
-#define SELFTEST_BAD_GATE     2     /* int 0x30：IDT 第 48 项为空，期望 13 号 #GP */
-#define SELFTEST_UNMAPPED     3     /* 读未映射的 0xD0000000：期望 14 号 #PF，错误码 0 */
-#define SELFTEST_NULL_WRITE   4     /* 写空指针：第 0 页未映射，期望 14 号 #PF，错误码 2 */
-#define SELFTEST_CLOBBER_LOADER 5   /* 清零 loader 所在内存：内核有自己的 GDT，期望照常运行 */
-#define SELFTEST_OTHER_SEGMENTS 6   /* DS 等换成基址 1 MB 的段后空转：中断入口要换段并恢复 */
-#define SELFTEST_BIG_KERNEL     7   /* 内核撑到约 90 个扇区，跨越多个磁道和柱面：期望完整读入 */
-#define SELFTEST_REGISTER_DUMP  8   /* 寄存器设为已知值后执行 ud2：期望 6 号 #UD，面板显示这些值 */
-#define SELFTEST_SYSCALLS       9   /* 依次调用各个系统调用，把返回值写到第 7 行 */
 
 #if defined(SELFTEST) && SELFTEST == SELFTEST_SYSCALLS
 static int report_col;
@@ -62,18 +54,18 @@ void selftest_run(void)
     /* 0x8000～0x81FF 是 loader.bin，其中有它的 GDT。之后每次中断都要按选择子查 GDT。 */
     for (volatile uint8_t *p = (volatile uint8_t *)0x8000; p < (volatile uint8_t *)0x8200; p++)
         *p = 0;
-    vga_write_at(0, 8, "Z", VGA_GRAY);   /* 清零完成的标记 */
+    vga_write_at(0, 9, "Z", VGA_GRAY);   /* 清零完成的标记 */
 #elif SELFTEST == SELFTEST_OTHER_SEGMENTS
     /*
-     * 在 GDT 第 7 项（选择子 0x38）建一个基址为 1 MB 的数据段，把 DS、ES、FS、GS 换成它，
+     * 在 GDT 第 9 项（选择子 0x48）建一个基址为 1 MB 的数据段，把 DS、ES、FS、GS 换成它，
      * 然后只用 hlt 空转。中断处理代码若不换回内核数据段，访问的每个地址都会偏移 1 MB：
      * 显存写到了别处，屏幕上的 ticks 不再变化。换了但不恢复，空闲时看到的 DS 就会变成 0x10。
      * （不用空选择子测试：QEMU 的 TCG 模拟不检查通过空选择子访问内存。）
      */
-    vga_write_at(0, 8, "N", VGA_GRAY);
-    gdt_set_entry(7, 0x100000, 0xFFFFF, 0x92, 0xC);
+    vga_write_at(0, 9, "N", VGA_GRAY);
+    gdt_set_entry(9, 0x100000, 0xFFFFF, 0x92, 0xC);
     __asm__ volatile(
-        "movw $0x38, %%ax\n\t"
+        "movw $0x48, %%ax\n\t"
         "movw %%ax, %%ds\n\t"
         "movw %%ax, %%es\n\t"
         "movw %%ax, %%fs\n\t"
@@ -82,7 +74,7 @@ void selftest_run(void)
         "jmp 1b" ::: "eax", "memory");
 #elif SELFTEST == SELFTEST_BIG_KERNEL
     const volatile uint8_t *data = big_data;
-    vga_write_at(0, 8, data[BIG_SIZE - 1] == 'Y' ? "Y" : "X", VGA_GRAY);
+    vga_write_at(0, 9, data[BIG_SIZE - 1] == 'Y' ? "Y" : "X", VGA_GRAY);
 #elif SELFTEST == SELFTEST_REGISTER_DUMP
     /*
      * 不声明被改写的寄存器：ud2 之后不会再回到这里，编译器之后的假设无关紧要。
@@ -115,6 +107,8 @@ void selftest_run(void)
     report("write", (uint32_t)written, 10);
     report("badfd", (uint32_t)bad_fd, 16);
     report("slept", slept, 10);
+#elif SELFTEST_IN_USER(SELFTEST)
+    /* 用户态的自检写在 user.c 中，这里不用做什么 */
 #else
 #error "未知的 SELFTEST"
 #endif

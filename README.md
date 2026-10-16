@@ -21,11 +21,11 @@ QEMU 打开窗口后应看到：
 
 | 行 | 内容 | 来源 |
 | --- | --- | --- |
-| 0 | `ABPKCVIT` | `A` 第一阶段；`B` 第二阶段在实模式下调用 BIOS；`P` 第二阶段进入保护模式后写显存；`K` 内核汇编入口 `entry.asm`；`C` C 函数 `kmain()`；`V` 打开分页后通过虚拟地址 `0xC0000000` 写入；`I` 打开中断之后；`T` 开始任务调度之后 |
+| 0 | `ABPKCVITU` | `A` 第一阶段；`B` 第二阶段在实模式下调用 BIOS；`P` 第二阶段进入保护模式后写显存；`K` 内核汇编入口 `entry.asm`；`C` C 函数 `kmain()`；`V` 打开分页后通过虚拟地址 `0xC0000000` 写入；`I` 打开中断之后；`T` 开始任务调度之后；`U` 内核第一次收到来自用户态的系统调用 |
 | 2 | `Hello from kmain() in C!` | `kmain()` |
 | 4 | `ticks: N` | 定时器中断，每秒加 100 |
 | 5 | `paging: on, 0xC0000000 -> 0xB8000` | 分页已打开 |
-| 6 | `tasks: AAAAAAAAAABBBBBBBBBB…` | 任务 A、B 轮流运行，各写自己的字母，每段约 10 个；写满一行后从行首覆盖 |
+| 6 | `tasks: AAAAAAAAAABBBBBBBBBB…` | 任务 A（内核态）和任务 B（用户态）轮流运行，都通过 `write` 系统调用写自己的字母，每段约 10 个；写满一行后从行首覆盖 |
 | 8～18 | `keyboard: ` 和输入的内容 | 键盘回显窗口：在 QEMU 窗口里打字会回显在这里，写满后整个窗口向上滚动一行，窗口外的内容不受影响 |
 | 19～23 | 平时为空 | 出现 CPU 异常时，红底白字的异常面板，见下文“异常” |
 
@@ -53,6 +53,9 @@ make test
 - 模拟按键后的回显、回车和退格，退格不会删到上一行；左右 Shift 得到大写字母和 `!@_` 等符号，Caps Lock 只影响字母，与 Shift 同时生效时得到小写。
 - 连续输入 13 行后，回显窗口第 8～18 行按顺序向上滚动，第 0～6 行和第 19～24 行不受影响。
 - 任务等待时 CPU 停在 `sleep` 系统调用（`sys_sleep`）的 `hlt` 上，且 IF 为 1。
+- GDT 第 6、7 项是 DPL 3 的用户代码段和数据段；只有用户程序所在的页打开了用户位，内核的代码、数据、IDT、TSS 和显存所在的页都没有。
+- 任务 B 运行在用户态：它的内核栈顶是从特权级 3 进入系统调用时 CPU 压入的现场（CS 为 `0x33`、SS 为 `0x3B`、返回地址在 `user_main` 内、ESP 在用户栈内、IOPL 为 0），TSS 中的 `ss0:esp0` 指向这个内核栈。
+- 用户程序写内核变量显示 `#PF`，错误码 7（页存在、写操作、来自用户态），CR2 是该变量的地址；执行 `cli` 显示 `#GP`；把内核地址交给 `write` 得到 -1。
 - IDT 第 `0x80` 项是指向 `isr_syscall` 的 DPL 3 陷阱门；`getpid`、`write`、`sleep` 和未知调用号的返回值正确，`write` 的内容出现在第 6 行。
 - 两个任务轮流运行：第 6 行只有 A 和 B、多次交替、每段不超过 15 个字母，0.5 秒后内容有变化；TR 在任务 A、B 的 TSS 选择子 `0x20` 和 `0x28` 之间切换。
 - 寄存器设为已知值后执行 `ud2`：异常面板显示 `#UD`，EAX～EBP、EIP（`ud2` 的地址）、各段寄存器、CR3 都与预期一致，ESP 落在内核栈内，EFLAGS 的 IF 为 1。
@@ -83,13 +86,13 @@ make test
 13. `_start` 把 ESP 换成内核自己的 4 KB 栈，把 `.bss` 清零，向 `0xB8006` 写入 `K`，然后 `call kmain`。
 14. `kmain()`（`kernel.c`）从第 0 行第 4 列写入 `C`，再换两行打印 `Hello from kmain() in C!`。
 15. `kmain()` 调用 `gdt_init()` 换上内核自己的 GDT，调用 `idt_init()` 装好 IDT，再调用 `paging_init()` 建立页表并打开分页，然后通过虚拟地址 `0xC0000000` 在第 0 行写入 `V`，在第 5 行写出分页信息。
-16. `kmain()` 调用 `pic_init()`、`timer_init(100)`、`sched_init()`，重新设置 8259、把定时器设为每秒 100 次、建好任务 A 和 B 的 TSS，然后写出第 4、6、8 行的标签。
+16. `kmain()` 调用 `pic_init()`、`timer_init(100)`、`sched_init()`，重新设置 8259、把定时器设为每秒 100 次、建好任务 A（内核态）和任务 B（用户态）的 TSS，然后写出第 4、6、8 行的标签。
 17. `sti` 打开中断，在第 0 行写入 `I`，调用 `selftest_run()`（正常构建中为空）。
-18. `sched_start()` 开始任务调度，在第 0 行写入 `T`。下一个定时器中断就切换到任务 A，此后每 20 个 tick 在 A、B 之间切换一次。任务等待时停在 `hlt`，每来一个中断就醒来处理一次。
+18. `sched_start()` 开始任务调度，在第 0 行写入 `T`。下一个定时器中断就切换到任务 A，此后每 20 个 tick 在 A、B 之间切换一次。第一次切到任务 B 时 CPU 直接进入特权级 3；B 第一次执行系统调用时，内核在第 0 行写入 `U`。任务等待时停在 `hlt`，每来一个中断就醒来处理一次。
 
 内核必须在第 7 步、也就是仍处于实模式时读入：进入保护模式后 BIOS 的 `int 0x13` 就不能再用了，而我们还没有自己的磁盘驱动。Linux 0.11 也是这样做的：`bootsect.s` 在实模式下把内核读到 `0x10000`（`SYSSEG = 0x1000`），`head.s` 设好栈后再跳进 C 的 `main()`。
 
-现在内核已经能响应定时器、键盘中断和 CPU 异常，打开了分页，两个任务在定时器的驱动下轮流运行。路线图上的 6 步到此完成。
+现在内核已经能响应定时器、键盘中断和 CPU 异常，打开了分页；一个内核态任务和一个用户态任务在定时器的驱动下轮流运行，用户态任务只能通过 `int 0x80` 系统调用请内核做事。
 
 ## 内核的构建过程
 
@@ -112,7 +115,8 @@ make test
 | `.text` | `0x10000` 起，约 2.3 KB | `_start` 在最前，后面是 48 个中断入口和各个 C 函数 |
 | `.rodata` | 紧随 `.text` | 中断入口地址表、异常名称、扫描码表、字符串 |
 | `.data` | 紧随 `.rodata` | 有非 0 初值的全局变量，例如回显窗口的最后一行 `window_bottom` |
-| `.bss` | `0x11000` 起，约 41 KB | 4 KB 内核栈、2 KB 的 IDT、页目录和 5 张页表（共 24 KB）、3 个 TSS、任务 A 和 B 各 4 KB 的栈、光标位置、`timer_ticks` 等。页目录和页表要求 4 KB 对齐，所以 `.bss` 从下一个 4 KB 边界开始 |
+| `.user` | 下一个 4 KB 边界起，2 页 | 用户程序 `user.c` 的代码、数据和 4 KB 用户栈，只有这两页打开用户位 |
+| `.bss` | `.user` 之后，约 41 KB | 4 KB 内核栈、2 KB 的 IDT、页目录和 5 张页表（共 24 KB）、3 个 TSS、任务 A 和 B 各 4 KB 的栈、光标位置、`timer_ticks` 等。页目录和页表要求 4 KB 对齐，`.bss` 从 4 KB 边界开始 |
 
 ## 为什么要清零 .bss
 
@@ -182,7 +186,7 @@ DS=0x0010 ES=0x0010 FS=0x0010 GS=0x0010 CR2=0x00000000 CR3=0x00018000
 
 | 调用号 | 函数 | 作用 | 返回值 |
 | --- | --- | --- | --- |
-| 0 | `write(fd, buf, count)` | 目前只支持 `fd` 为 1：把 `count` 个字符写到第 6 行的任务输出区 | 写出的字节数；`fd` 不对时为 -1 |
+| 0 | `write(fd, buf, count)` | 目前只支持 `fd` 为 1：把 `count` 个字符写到第 6 行的任务输出区 | 写出的字节数；`fd` 不对、或用户态传来的 `buf` 不在用户程序的页内时为 -1 |
 | 1 | `getpid()` | 取当前任务号 | 0、1 或 2 |
 | 2 | `sleep(ticks)` | 等待若干个定时器 tick，期间 CPU 停在 `hlt` | 0 |
 | 其他 | | | -1 |
@@ -203,6 +207,38 @@ write(1, &c, 1)                       syscall.h：EAX=0，EBX=1，ECX=&c，EDX=1
 - 第 `0x80` 项用陷阱门而不是中断门：陷阱门进入时不清 IF，系统调用执行期间定时器照常中断，`sleep` 才能等到 tick 增加，也可以在等待时切换到别的任务。
 - 栈上保存的 EAX 就是 `struct interrupt_frame` 中的 `eax`。`syscall_dispatch()` 改写它，中断返回时 `popad` 把它装回 EAX，这是把返回值交给调用方的方法。
 
+## 用户态
+
+x86 有 4 个特权级，这里只用 0（内核态）和 3（用户态）。当前特权级（CPL）就是 CS 的低 2 位。任务 A 在特权级 0 运行内核里的 `task_main()`；任务 B 在特权级 3 运行 `user.c` 中的 `user_main()`，它不能执行 `cli`、`hlt`、`in`、`out` 等特权指令，不能访问内核的内存和显存，要做任何事都只能通过 `int 0x80` 请内核帮忙。
+
+| 机制 | 做法 | Linux 0.11 的对应做法 |
+| --- | --- | --- |
+| 用户段 | GDT 第 6、7 项是 DPL 3 的代码段和数据段，选择子 `0x33`、`0x3B` 的 RPL 也是 3 | 每个进程在 LDT 中有自己的用户段，选择子 `0x0f`、`0x17` |
+| 进入用户态 | 任务 B 的 TSS 中 CS、DS 等都是用户段选择子；硬件任务切换装入这个 TSS 时，CPU 直接进入特权级 3 | `move_to_user_mode()` 在栈上构造一个返回现场，用 `iret` 落到特权级 3 |
+| 内核栈 | TSS 中的 `ss0:esp0` 指向任务 B 的 4 KB 内核栈 | `copy_process()` 把 `esp0` 设为该进程内核栈的顶端 |
+| 内存保护 | 页表项的用户位：只有 `.user` 段的两页可以从特权级 3 访问 | 用户页的页表项是 7（存在、可写、用户） |
+| 检查用户指针 | 来自用户态的 `write`，`buf` 必须完全落在用户程序的页内 | `verify_area()` |
+
+用户态发生中断或系统调用时，CPU 要先换栈：用户栈不可信，内核不能在上面工作。
+
+```text
+用户态（CPL 3）执行 int $0x80
+  1. CPU 从当前 TSS 取出 ss0:esp0，把 SS、ESP 换成任务 B 的内核栈
+  2. 在内核栈上依次压入用户态的 SS、ESP、EFLAGS、CS、EIP
+  3. 从 IDT 第 0x80 项装入 CS=0x08，CPL 变成 0，跳到 isr_syscall
+  4. isr_common 保存寄存器，把 DS 等从用户段 0x3B 换成内核段 0x10
+     ……处理系统调用……
+  5. iretd 弹出 EIP、CS、EFLAGS，发现 CS 的 RPL 是 3，再弹出 ESP、SS，回到用户态
+```
+
+`kernel.h` 中的 `struct interrupt_frame` 末尾因此多了 `user_esp`、`user_ss` 两项，只有从用户态进入时才有效；异常面板据此显示出错时真正的 ESP 和 SS。
+
+页目录项和页表项都有用户位，CPU 取两者的“与”：前 16 MB 的页目录项都打开了用户位，再由页表项逐页决定，内核的页在页表项中不开用户位。用户程序的代码、数据和栈由链接脚本集中放进 `.user` 段，首尾按 4 KB 对齐，`paging_init()` 只给这几页打开用户位。`linker.ld` 用 `EXCLUDE_FILE(*user.o)` 把 `user.o` 排除在内核的 `.text`、`.rodata`、`.data` 之外；`EXCLUDE_FILE` 只作用于紧跟其后的一个段名，所以每个段名前都要写一次。
+
+内核能读写所有内存，所以系统调用不能盲目相信用户传来的指针。若不检查，用户程序把内核地址交给 `write`，内核就会替它把内核内存印出来。`sys_write()` 对来自用户态的调用用 `user_range_ok()` 检查 `buf`～`buf + count` 是否完全落在用户程序的页内，不在就返回 -1。
+
+用户态程序出错时，目前和内核出错一样显示异常面板并停机；面板上的 CS 为 `0x0033`，表示出错时在用户态。
+
 ## 任务切换
 
 `sched.c` 用 x86 的硬件任务切换让任务 A、B 轮流运行，与 Linux 0.11 的做法相同。
@@ -211,7 +247,7 @@ write(1, &c, 1)                       syscall.h：EAX=0，EBX=1，ECX=&c，EDX=1
 - 任务 0 就是 `kmain()` 自己。`sched_init()` 用 `ltr 0x18` 把它登记为当前任务，CPU 第一次切换时才知道把当前寄存器存到哪里。任务 A、B 的 TSS 预先填好入口地址、各自 4 KB 栈的栈顶、`EFLAGS = 0x202`（IF=1）、内核段选择子和当前的 CR3。
 - `switch_to(n)` 执行一条远跳转 `ljmp` 到任务 n 的 TSS 选择子。CPU 把当前寄存器存进当前任务的 TSS，再从目标 TSS 装入全部寄存器，于是目标任务从它上次被切走的地方接着运行；第一次运行的任务从入口开始。Linux 0.11 的 `switch_to` 宏也是一条 `ljmp`。
 - 定时器中断每次调用 `schedule()`，时间片（20 个 tick）用完就切到另一个任务，与 Linux 0.11 的 `do_timer()` 调用 `schedule()` 相同。任务 0 在第一次切换后不再被调度。
-- 任务 A、B 运行同一个函数 `task_main()`：用 `getpid()` 得到任务号，任务 1 写 `A`、任务 2 写 `B`，每写一个字母 `sleep(2)`，所以每段约 10 个。它们只通过系统调用输出和等待，见下文“系统调用”。
+- 任务 A 运行内核里的 `task_main()`，任务 B 运行用户程序 `user.c` 里的 `user_main()`，两者做同样的事：用 `getpid()` 得到任务号，任务 1 写 `A`、任务 2 写 `B`，每写一个字母 `sleep(2)`，所以每段约 10 个。它们只通过系统调用输出和等待，见上文“系统调用”和下文“用户态”。
 - 两个任务共用输出位置。`task_write_char()` 写之前关中断、写完恢复原来的中断状态，保证“读位置、写字符、位置加一”不被切换打断。
 
 两个顺序上的要求：
@@ -235,7 +271,7 @@ CR3 → 页目录第 768 项 → alias_table → 第 0 项 → 物理页 0xB8000
 | 虚拟地址 | 物理地址 | 说明 |
 | --- | --- | --- |
 | `0x00000000`～`0x00000FFF` | 未映射 | 第 0 页，用来捕获空指针 |
-| `0x00001000`～`0x00FFFFFF` | 与虚拟地址相同 | 前 16 MB 一一对应，4 张页表 |
+| `0x00001000`～`0x00FFFFFF` | 与虚拟地址相同 | 前 16 MB 一一对应，4 张页表；其中只有 `.user` 段的两页打开用户位 |
 | `0xC0000000`～`0xC0000FFF` | `0xB8000`～`0xB8FFF` | 显存的第二个地址，1 张页表 |
 | 其余 | 未映射 | 访问会触发 14 号缺页异常 |
 
@@ -287,6 +323,9 @@ loader 进入保护模式时用的是写在 `loader.bin` 里的 GDT。进入内�
 | `0x08` | `0x00CF9A000000FFFF` | 代码段：基址 0，界限 4 GB，可执行可读，DPL 0，32 位 |
 | `0x10` | `0x00CF92000000FFFF` | 数据段：基址 0，界限 4 GB，可读写，DPL 0 |
 | `0x18`、`0x20`、`0x28` | 由 `sched_init()` 填写 | 任务 0、A、B 的 TSS：基址为对应 TSS 的地址，界限 103，类型为 32 位可用 TSS |
+| `0x33` | `0x00CFFA000000FFFF` | 用户代码段（第 6 项）：与内核代码段相同，只是 DPL 为 3；选择子的 RPL 也是 3 |
+| `0x3B` | `0x00CFF2000000FFFF` | 用户数据段（第 7 项），DPL 3 |
+| `0x48` | 仅在自检内核中填写 | 第 9 项：自检 `OTHER_SEGMENTS` 用的基址 1 MB 的数据段 |
 
 选择子的低 3 位是 RPL 和 TI，所以第 n 项的选择子是 n × 8。两个段都是平坦段，保护模式下的偏移就等于物理地址，写 `[0xb8004]` 访问的就是物理地址 `0xB8004`，`jmp eax` 跳到的也就是物理地址 `0x10000`。C 代码中的指针值同样直接就是物理地址。
 
@@ -308,6 +347,9 @@ loader 进入保护模式时用的是写在 `loader.bin` 里的 GDT。进入内�
 - 若要亲眼看到除零异常，运行 `make run BUILD=build/selftest/divide_error SELFTEST=DIVIDE_ERROR`。异常面板会出现 `Exception 0 #DE divide error` 和出错指令的 `EIP`，用 `objdump -d build/selftest/divide_error/kernel.elf` 可以看到那个地址正是 `divl`。`selftest.c` 中用的是内联汇编：如果写成 C 的 `1 / zero`，clang 会把它优化成不用除法指令的比较，根本不会触发异常。
 - 若要亲眼看到缺页异常，运行 `make run BUILD=build/selftest/unmapped SELFTEST=UNMAPPED`（读未映射的 `0xD0000000`）或 `make run BUILD=build/selftest/null_write SELFTEST=NULL_WRITE`（写空指针）。异常面板的第 2 行显示错误码，最后一行显示 CR2。
 - 若要亲眼看到完整的寄存器面板，运行 `make run BUILD=build/selftest/register_dump SELFTEST=REGISTER_DUMP`。`selftest.c` 先把 EAX～EBP 设为 `0x11111111`～`0x77777777`，再执行 `ud2`。
+- 若要看用户态程序越权，运行 `make run BUILD=build/selftest/user_write_kernel SELFTEST=USER_WRITE_KERNEL`（写内核变量 `timer_ticks`）或 `make run BUILD=build/selftest/user_privileged SELFTEST=USER_PRIVILEGED`（执行 `cli`）。异常面板上 CS 为 `0x0033`、SS 为 `0x003B`，前者错误码为 7。
+- 若要看内核拒绝用户传来的坏指针，运行 `make run BUILD=build/selftest/user_bad_pointer SELFTEST=USER_BAD_POINTER`。用户程序把内核地址交给 `write`，得到 -1 后写一个 `K`，第 6 行会出现一个 `K`。把 `syscall.c` 中 `sys_write()` 的 `user_range_ok()` 检查删掉再运行，`K` 就变成了 `X`，前面还多出一个内核代码的字节。
+- 若要让任务 B 回到内核态，把 `sched.c` 中的 `init_user_task(2, …)` 改成 `init_task(2, task_main, cr3)`。第 6 行照常交替出现 A、B，但第 0 行不再出现 `U`。
 - 若要换一个位置写 `V`，修改 `kernel.c` 中 `((volatile uint16_t *)VGA_ALIAS)[5]` 的下标，例如改成 `80 * 3`，`V` 就会出现在第 3 行行首。下标超过 2047（一页 4 KB 的范围）时会触发缺页，因为别名只映射了一页。
 - 若要亲眼看到未填写的 IDT 表项被触发，运行 `make run BUILD=build/selftest/bad_gate SELFTEST=BAD_GATE`。`selftest.c` 执行 `int $0x30`，应看到 `Exception 13 #GP general protection`，`error=0x00000182`，即 `0x30 × 8 + 2`。
 
@@ -329,11 +371,12 @@ loader 进入保护模式时用的是写在 `loader.bin` 里的 GDT。进入内�
 | `paging.c` | 页目录和页表，打开分页 | `boot/head.s` 中的 `setup_paging`、`mm/memory.c` |
 | `timer.c` | 8253 定时器 | `kernel/sched.c` 中的 `sched_init()`、`do_timer()` |
 | `syscall.c`、`syscall.h` | 系统调用：内核一侧的分发表，调用方使用的编号和包装函数 | `kernel/system_call.s`、`include/unistd.h` |
+| `user.c` | 用户程序：任务 B 在用户态运行的 `user_main()` 和它的用户栈 | 无（Linux 0.11 的用户程序是磁盘上的可执行文件） |
 | `sched.c` | 两个任务的 TSS 和硬件任务切换 | `kernel/sched.c` 中的 `schedule()`、`include/linux/sched.h` 中的 `switch_to` |
 | `keyboard.c` | 键盘扫描码转字符并回显，支持 Shift 和 Caps Lock | `kernel/chr_drv/keyboard.S` |
 | `vga.c` | 直接写 VGA 显存、移动硬件光标、整数转字符串 | `kernel/chr_drv/console.c` |
 | `kernel.h`、`io.h` | 各模块共用的声明；端口读写 `inb`、`outb` | `include/asm/io.h` |
-| `selftest.c` | 自检代码，只在 `make test` 构建的自检内核中生效 | 无 |
+| `selftest.c`、`selftest.h` | 自检代码和编号，只在 `make test` 构建的自检内核中生效；用户态的自检写在 `user.c` 中 | 无 |
 | `tests/test_kernel.py` | 自动化测试，由 `make test` 调用 | 无 |
 | `linker.ld` | 内核链接脚本：链接地址 `0x10000` 和各段顺序 | `Makefile` 中的链接参数 |
 | `Makefile` | 汇编、编译、链接、检查内核大小、打包和运行 QEMU | `Makefile`、`tools/build.c` |

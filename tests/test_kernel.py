@@ -213,13 +213,13 @@ def in_function(table, name, addr):
 # ---------------------------------------------------------------- 测试用例
 
 def boot_ready(m):
-    return m.screen(1)[0].startswith("ABPKCVIT")
+    return m.screen(1)[0].startswith("ABPKCVITU")
 
 
 def test_boot_screen(m, elf):
     """启动后各行的输出"""
     rows = m.screen(9)
-    check(rows[0] == "ABPKCVIT", f"第 0 行应为 'ABPKCVIT'，实际是 {rows[0]!r}")
+    check(rows[0] == "ABPKCVITU", f"第 0 行应为 'ABPKCVITU'，实际是 {rows[0]!r}")
     check(rows[2] == "Hello from kmain() in C!", f"第 2 行不对：{rows[2]!r}")
     check(re.fullmatch(r"ticks: \d+", rows[4]) is not None, f"第 4 行不对：{rows[4]!r}")
     check(rows[5] == "paging: on, 0xC0000000 -> 0xB8000", f"第 5 行不对：{rows[5]!r}")
@@ -331,6 +331,50 @@ def test_idle_in_hlt(m, elf):
             return
         time.sleep(0.1)
     raise TestFailure("10 次采样都没有停在 sys_sleep 的 hlt 上")
+
+
+def read_u32(m, addr):
+    return int.from_bytes(m.read_memory(addr, 4), "little")
+
+
+def test_user_setup(m, elf):
+    """GDT 有 DPL 3 的用户段；只有用户程序的页打开了用户位"""
+    table = symbols(elf)
+    gdt_base, _ = m.registers()["GDT"]
+    for index, expected, what in ((6, 0x00CFFA000000FFFF, "用户代码段"), (7, 0x00CFF2000000FFFF, "用户数据段")):
+        desc = int.from_bytes(m.read_memory(gdt_base + index * 8, 8), "little")
+        desc &= ~(1 << 40)          # “已访问”位：CPU 装入段选择子时会自动置 1
+        check(desc == expected, f"GDT 第 {index} 项（{what}）应为 {expected:#018x}，实际是 {desc:#018x}")
+    pde0 = read_u32(m, table["page_directory"][0])
+    check(pde0 & 0x4, f"第 0 个页目录项应打开用户位：{pde0:#x}")
+    tables = table["identity_tables"][0]
+    user_start, user_end = table["__user_start"][0], table["__user_end"][0]
+    for addr in range(user_start, user_end, 4096):
+        pte = read_u32(m, tables + (addr >> 12) * 4)
+        check(pte & 0x4, f"用户程序的页 {addr:#x} 应打开用户位：{pte:#x}")
+    for name in ("kmain", "timer_ticks", "idt", "tss"):
+        addr = table[name][0]
+        pte = read_u32(m, tables + (addr >> 12) * 4)
+        check(not pte & 0x4, f"内核的 {name}（{addr:#x}）所在页不应打开用户位：{pte:#x}")
+    vga_pte = read_u32(m, tables + (0xB8000 >> 12) * 4)
+    check(not vga_pte & 0x4, f"显存所在页不应打开用户位：{vga_pte:#x}")
+
+
+def test_user_task(m, elf):
+    """任务 B 运行在用户态：它的内核栈顶是从特权级 3 进入系统调用时 CPU 压入的现场"""
+    table = symbols(elf)
+    stacks, size = table["task_stacks"]
+    top = stacks + size                 # 任务 B 的内核栈（第二个 4 KB）的顶端
+    eip, cs, eflags, esp, ss = (read_u32(m, top - 20 + 4 * i) for i in range(5))
+    check(cs == 0x33, f"任务 B 进入内核前的 CS 应为用户代码段 0x33，实际是 {cs:#x}")
+    check(ss == 0x3B, f"任务 B 进入内核前的 SS 应为用户数据段 0x3B，实际是 {ss:#x}")
+    check(in_function(table, "user_main", eip), f"返回地址 {eip:#x} 应在 user_main 内")
+    user_stack, stack_size = table["user_stack"]
+    check(user_stack < esp <= user_stack + stack_size, f"用户态 ESP {esp:#x} 应在用户栈内")
+    check(eflags & 0x200 and not eflags & 0x3000, f"用户态 EFLAGS 应 IF=1、IOPL=0：{eflags:#x}")
+    tss_b = table["tss"][0] + 2 * 104
+    esp0, ss0 = read_u32(m, tss_b + 4), read_u32(m, tss_b + 8)
+    check(esp0 == top and ss0 == 0x10, f"任务 B 的 TSS 中 ss0:esp0 应为 0x10:{top:#x}，实际是 {ss0:#x}:{esp0:#x}")
 
 
 def test_syscall_gate(m, elf):
@@ -461,7 +505,7 @@ def test_other_segments(_m, _elf):
             regs = m.registers()
             if regs["HLT"] == 1 and in_function(table, "selftest_run", regs["EIP"]):
                 for seg in ("DS", "ES", "FS", "GS"):
-                    check(regs[seg] == 0x38, f"中断返回后 {seg} 应恢复为 0x38，实际是 {regs[seg]:#x}")
+                    check(regs[seg] == 0x48, f"中断返回后 {seg} 应恢复为 0x48，实际是 {regs[seg]:#x}")
                 return
             time.sleep(0.1)
         raise TestFailure("10 次采样都没有停在 selftest_run 的 hlt 上")
@@ -475,9 +519,9 @@ def test_big_kernel(_m, _elf):
     sectors = (len(kernel) + 511) // 512
     check(sectors > 2 * 36, f"自检内核应超过 2 个柱面（72 个扇区），实际只有 {sectors} 个")
     with Machine(os.path.join(d, "floppy.img")) as m:
-        m.wait_for(lambda mm: len(mm.screen(1)[0]) > 8, what="第 0 行第 8 列的标记")
+        m.wait_for(lambda mm: len(mm.screen(1)[0]) > 9, what="第 0 行第 9 列的标记")
         row0 = m.screen(1)[0]
-        check(row0[8] == "Y", f"内核末尾的标记应为 Y，第 0 行是 {row0!r}")
+        check(row0[9] == "Y", f"内核末尾的标记应为 Y，第 0 行是 {row0!r}")
         check_kernel_loaded(m, os.path.join(d, "kernel.elf"), os.path.join(d, "kernel.bin"))
 
 
@@ -518,14 +562,52 @@ def test_syscalls(_m, _elf):
         check(rows[6].startswith("tasks: xyz"), f"write 的内容应出现在第 6 行开头：{rows[6]!r}")
 
 
+def test_user_write_kernel(_m, _elf):
+    """用户程序写内核变量：#PF，错误码 7（存在、写、用户态），CS 为用户代码段"""
+    d = build_selftest("USER_WRITE_KERNEL")
+    table = symbols(os.path.join(d, "kernel.elf"))
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        panel = wait_for_panel(m)
+        check(panel[0].startswith("Exception 14 ") and "#PF" in panel[0], f"第 19 行不对：{panel[0]!r}")
+        fields = panel_fields(panel)
+        check(fields.get("error") == 7, f"错误码应为 7：{panel[1]!r}")
+        check(fields.get("CR2") == table["timer_ticks"][0], f"CR2 应为 timer_ticks 的地址：{panel[4]!r}")
+        check(fields.get("CS") == 0x33 and fields.get("SS") == 0x3B, f"出错时应在用户态：{panel[1]!r}")
+        check(in_function(table, "user_main", fields.get("EIP", 0)), f"EIP 应在 user_main 内：{panel[1]!r}")
+
+
+def test_user_privileged(_m, _elf):
+    """用户程序执行 cli：#GP"""
+    d = build_selftest("USER_PRIVILEGED")
+    table = symbols(os.path.join(d, "kernel.elf"))
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        panel = wait_for_panel(m)
+        check(panel[0].startswith("Exception 13 ") and "#GP" in panel[0], f"第 19 行不对：{panel[0]!r}")
+        fields = panel_fields(panel)
+        check(fields.get("CS") == 0x33, f"出错时应在用户态：{panel[1]!r}")
+        check(instruction_at(os.path.join(d, "kernel.elf"), fields.get("EIP", 0)) == "cli",
+              f"EIP 应指向 cli：{panel[1]!r}")
+        check(in_function(table, "user_main", fields["EIP"]), "EIP 应在 user_main 内")
+
+
+def test_user_bad_pointer(_m, _elf):
+    """用户程序把内核地址交给 write：返回 -1"""
+    d = build_selftest("USER_BAD_POINTER")
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        m.wait_for(boot_ready, what="启动完成")
+        m.wait_for(lambda mm: "B" in task_output(mm), what="任务 B 的输出")
+        out = task_output(m)
+        check("K" in out and "X" not in out, f"write 应拒绝内核地址并返回 -1（用户程序写 K），实际输出 {out!r}")
+
+
 # 前几项共用一台正常启动的虚拟机；其余各自启动自检内核。
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_console_scroll,
-                test_idle_in_hlt, test_syscall_gate,
+                test_idle_in_hlt, test_syscall_gate, test_user_setup, test_user_task,
                 test_tasks_alternate]
 SEPARATE_TESTS = [test_syscalls, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,
-                  test_big_kernel]
+                  test_big_kernel, test_user_write_kernel, test_user_privileged, test_user_bad_pointer]
 
 
 def main():
@@ -551,7 +633,7 @@ def main():
 
     with Machine(image) as m:
         try:
-            m.wait_for(boot_ready, what="启动完成（第 0 行出现 ABPKCVIT）")
+            m.wait_for(boot_ready, what="启动完成（第 0 行出现 ABPKCVITU）")
         except TestFailure as e:
             print(f"FAIL  启动：{e}")
             sys.exit(1)
