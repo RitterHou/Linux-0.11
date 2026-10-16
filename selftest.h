@@ -20,6 +20,7 @@
 #define SELFTEST_USER_PRIVILEGED   21   /* 用户程序执行 cli：期望因 #GP 被结束 */
 #define SELFTEST_USER_BAD_POINTER  22   /* 用户程序把内核地址交给 write：期望返回 -1 */
 #define SELFTEST_USER_EXIT         23   /* 用户程序调用 exit(7)：期望只剩任务 A 运行 */
+#define SELFTEST_ALL_EXIT          24   /* 任务 A、B 都调用 exit：期望切回任务 0 空转 */
 
 #define SELFTEST_IN_USER(n) ((n) >= 20)
 
