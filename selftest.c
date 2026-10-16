@@ -30,7 +30,7 @@ void selftest_run(void)
     /* 0x8000～0x81FF 是 loader.bin，其中有它的 GDT。之后每次中断都要按选择子查 GDT。 */
     for (volatile uint8_t *p = (volatile uint8_t *)0x8000; p < (volatile uint8_t *)0x8200; p++)
         *p = 0;
-    vga_write_at(0, 7, "Z", VGA_GRAY);   /* 清零完成的标记 */
+    vga_write_at(0, 8, "Z", VGA_GRAY);   /* 清零完成的标记 */
 #elif SELFTEST == SELFTEST_OTHER_SEGMENTS
     /*
      * 在 GDT 第 7 项（选择子 0x38）建一个基址为 1 MB 的数据段，把 DS、ES、FS、GS 换成它，
@@ -38,7 +38,7 @@ void selftest_run(void)
      * 显存写到了别处，屏幕上的 ticks 不再变化。换了但不恢复，空闲时看到的 DS 就会变成 0x10。
      * （不用空选择子测试：QEMU 的 TCG 模拟不检查通过空选择子访问内存。）
      */
-    vga_write_at(0, 7, "N", VGA_GRAY);
+    vga_write_at(0, 8, "N", VGA_GRAY);
     gdt_set_entry(7, 0x100000, 0xFFFFF, 0x92, 0xC);
     __asm__ volatile(
         "movw $0x38, %%ax\n\t"

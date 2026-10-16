@@ -189,17 +189,18 @@ def in_function(table, name, addr):
 # ---------------------------------------------------------------- 测试用例
 
 def boot_ready(m):
-    return m.screen(1)[0].startswith("ABPKCVI")
+    return m.screen(1)[0].startswith("ABPKCVIT")
 
 
 def test_boot_screen(m, elf):
     """启动后各行的输出"""
-    rows = m.screen(7)
-    check(rows[0] == "ABPKCVI", f"第 0 行应为 'ABPKCVI'，实际是 {rows[0]!r}")
+    rows = m.screen(9)
+    check(rows[0] == "ABPKCVIT", f"第 0 行应为 'ABPKCVIT'，实际是 {rows[0]!r}")
     check(rows[2] == "Hello from kmain() in C!", f"第 2 行不对：{rows[2]!r}")
     check(re.fullmatch(r"ticks: \d+", rows[4]) is not None, f"第 4 行不对：{rows[4]!r}")
     check(rows[5] == "paging: on, 0xC0000000 -> 0xB8000", f"第 5 行不对：{rows[5]!r}")
-    check(rows[6] == "keyboard:", f"第 6 行不对：{rows[6]!r}")
+    check(rows[6].startswith("tasks: "), f"第 6 行不对：{rows[6]!r}")
+    check(rows[8] == "keyboard:", f"第 8 行不对：{rows[8]!r}")
 
 
 def test_kernel_in_memory(m, elf):
@@ -264,22 +265,50 @@ def test_keyboard_echo(m, elf):
     m.sendkeys(["h", "i", "spc", "4", "2", "ret", "o", "k", "x", "backspace",
                 "ret", "a", "b", "backspace", "backspace", "backspace", "backspace"])
     time.sleep(0.3)
-    rows = m.screen(9)
-    check(rows[6] == "keyboard: hi 42", f"第 6 行应为 'keyboard: hi 42'，实际是 {rows[6]!r}")
-    check(rows[7] == "ok", f"第 7 行应为 'ok'（x 被退格删掉），实际是 {rows[7]!r}")
-    check(rows[8] == "", f"第 8 行的 ab 应被退格删光，且不会删到上一行，实际是 {rows[8]!r}")
+    rows = m.screen(11)
+    check(rows[8] == "keyboard: hi 42", f"第 8 行应为 'keyboard: hi 42'，实际是 {rows[8]!r}")
+    check(rows[9] == "ok", f"第 9 行应为 'ok'（x 被退格删掉），实际是 {rows[9]!r}")
+    check(rows[10] == "", f"第 10 行的 ab 应被退格删光，且不会删到上一行，实际是 {rows[10]!r}")
 
 
 def test_idle_in_hlt(m, elf):
-    """空闲时停在 kmain 的 hlt 循环，且中断已打开"""
+    """任务等待时停在 hlt 上，且中断已打开"""
     table = symbols(elf)
     for _ in range(10):
         regs = m.registers()
-        if regs["HLT"] == 1 and in_function(table, "kmain", regs["EIP"]):
+        in_task = in_function(table, "task_a", regs["EIP"]) or in_function(table, "task_b", regs["EIP"])
+        if regs["HLT"] == 1 and in_task:
             check(regs["EFL"] & 0x200, "空闲时 IF 应为 1")
             return
         time.sleep(0.1)
-    raise TestFailure("10 次采样都没有停在 kmain 的 hlt 上")
+    raise TestFailure("10 次采样都没有停在任务 A 或 B 的 hlt 上")
+
+
+def task_output(m):
+    row = m.screen(7)[6]
+    check(row.startswith("tasks: "), f"第 6 行不对：{row!r}")
+    return row[len("tasks: "):]
+
+
+def test_tasks_alternate(m, elf):
+    """两个任务轮流运行：第 6 行 A、B 交替出现，TR 在两个 TSS 之间切换"""
+    out1 = task_output(m)
+    check(set(out1) <= {"A", "B"}, f"任务输出中只应有 A 和 B：{out1!r}")
+    check("A" in out1 and "B" in out1, f"两个任务都应有输出：{out1!r}")
+    runs = re.findall(r"A+|B+", out1)
+    check(len(runs) >= 4, f"A、B 应多次交替，实际只有 {len(runs)} 段：{out1!r}")
+    check(max(len(r) for r in runs) <= 15, f"每段应约 10 个字母（时间片 20 tick、每 2 tick 一个）：{out1!r}")
+    time.sleep(0.5)
+    check(task_output(m) != out1, "0.5 秒后任务输出应有变化")
+
+    tss_a, tss_b = 0x20, 0x28       # GDT 第 4、5 项
+    seen = set()
+    for _ in range(20):
+        seen.add(m.registers()["TR"])
+        if {tss_a, tss_b} <= seen:
+            return
+        time.sleep(0.05)
+    raise TestFailure(f"TR 应在 {tss_a:#x} 和 {tss_b:#x} 之间切换，采样到的是 {sorted(hex(x) for x in seen)}")
 
 
 def exception_screen(m):
@@ -365,7 +394,7 @@ def test_other_segments(_m, _elf):
 
 # 前几项共用一台正常启动的虚拟机；其余各自启动自检内核。
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
-                test_timer_rate, test_keyboard_echo, test_idle_in_hlt]
+                test_timer_rate, test_keyboard_echo, test_idle_in_hlt, test_tasks_alternate]
 SEPARATE_TESTS = [test_divide_error, test_bad_gate, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments]
 
@@ -393,7 +422,7 @@ def main():
 
     with Machine(image) as m:
         try:
-            m.wait_for(boot_ready, what="启动完成（第 0 行出现 ABPKCVI）")
+            m.wait_for(boot_ready, what="启动完成（第 0 行出现 ABPKCVIT）")
         except TestFailure as e:
             print(f"FAIL  启动：{e}")
             sys.exit(1)

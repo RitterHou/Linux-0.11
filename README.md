@@ -21,11 +21,12 @@ QEMU 打开窗口后应看到：
 
 | 行 | 内容 | 来源 |
 | --- | --- | --- |
-| 0 | `ABPKCVI` | `A` 第一阶段；`B` 第二阶段在实模式下调用 BIOS；`P` 第二阶段进入保护模式后写显存；`K` 内核汇编入口 `entry.asm`；`C` C 函数 `kmain()`；`V` 打开分页后通过虚拟地址 `0xC0000000` 写入；`I` 打开中断之后 |
+| 0 | `ABPKCVIT` | `A` 第一阶段；`B` 第二阶段在实模式下调用 BIOS；`P` 第二阶段进入保护模式后写显存；`K` 内核汇编入口 `entry.asm`；`C` C 函数 `kmain()`；`V` 打开分页后通过虚拟地址 `0xC0000000` 写入；`I` 打开中断之后；`T` 开始任务调度之后 |
 | 2 | `Hello from kmain() in C!` | `kmain()` |
 | 4 | `ticks: N` | 定时器中断，每秒加 100 |
 | 5 | `paging: on, 0xC0000000 -> 0xB8000` | 分页已打开 |
-| 6 | `keyboard: ` | 键盘中断，在窗口里打字会回显在这里 |
+| 6 | `tasks: AAAAAAAAAABBBBBBBBBB…` | 任务 A、B 轮流运行，各写自己的字母，每段约 10 个；写满一行后从行首覆盖 |
+| 8 | `keyboard: ` | 键盘中断，在窗口里打字会回显在这里 |
 
 键盘支持字母、数字、常用符号、空格、回车和退格，暂不支持 Shift 等组合键。打字前先点一下 QEMU 窗口，让它获得键盘焦点。
 
@@ -49,7 +50,8 @@ make test
 - 分页已打开，CR3 指向 `page_directory`；用监视器的 `gva2gpa` 逐个检查虚拟地址：`0xC0000000` 映射到 `0xB8000`，第 0 页和 16 MB 以上未映射，其余一一对应。
 - 定时器频率约为 100 Hz（允许 90～110）。
 - 模拟按键后的回显、回车和退格，退格不会删到上一行。
-- 空闲时 CPU 停在 `kmain()` 的 `hlt` 上，且 IF 为 1。
+- 任务等待时 CPU 停在任务 A 或 B 的 `hlt` 上，且 IF 为 1。
+- 两个任务轮流运行：第 6 行只有 A 和 B、多次交替、每段不超过 15 个字母，0.5 秒后内容有变化；TR 在任务 A、B 的 TSS 选择子 `0x20` 和 `0x28` 之间切换。
 - 除以零显示 `#DE`，EIP 正好指向 `div` 指令；触发未填写的 IDT 表项显示 `#GP`，错误码为 `0x182`。
 - 读未映射的 `0xD0000000` 显示 `#PF`，错误码 0，CR2 为该地址；写空指针显示 `#PF`，错误码 2（写操作），CR2 为 0。
 - 把 loader 所在的 `0x8000`～`0x81FF` 清零后，定时器照常工作：内核已不再依赖 loader 的 GDT。
@@ -76,12 +78,13 @@ make test
 13. `_start` 把 ESP 换成内核自己的 4 KB 栈，把 `.bss` 清零，向 `0xB8006` 写入 `K`，然后 `call kmain`。
 14. `kmain()`（`kernel.c`）从第 0 行第 4 列写入 `C`，再换两行打印 `Hello from kmain() in C!`。
 15. `kmain()` 调用 `gdt_init()` 换上内核自己的 GDT，调用 `idt_init()` 装好 IDT，再调用 `paging_init()` 建立页表并打开分页，然后通过虚拟地址 `0xC0000000` 在第 0 行写入 `V`，在第 5 行写出分页信息。
-16. `kmain()` 调用 `pic_init()`、`timer_init(100)`，重新设置 8259、把定时器设为每秒 100 次，然后写出第 4、6 行的标签。
-17. `sti` 打开中断，在第 0 行写入 `I`，然后进入 `hlt` 循环。此后 CPU 平时停在 `hlt`，每来一个定时器或键盘中断就醒来处理一次，处理完又回到循环里。
+16. `kmain()` 调用 `pic_init()`、`timer_init(100)`、`sched_init()`，重新设置 8259、把定时器设为每秒 100 次、建好任务 A 和 B 的 TSS，然后写出第 4、6、8 行的标签。
+17. `sti` 打开中断，在第 0 行写入 `I`，调用 `selftest_run()`（正常构建中为空）。
+18. `sched_start()` 开始任务调度，在第 0 行写入 `T`。下一个定时器中断就切换到任务 A，此后每 20 个 tick 在 A、B 之间切换一次。任务等待时停在 `hlt`，每来一个中断就醒来处理一次。
 
 内核必须在第 7 步、也就是仍处于实模式时读入：进入保护模式后 BIOS 的 `int 0x13` 就不能再用了，而我们还没有自己的磁盘驱动。Linux 0.11 也是这样做的：`bootsect.s` 在实模式下把内核读到 `0x10000`（`SYSSEG = 0x1000`），`head.s` 设好栈后再跳进 C 的 `main()`。
 
-现在内核已经能响应定时器、键盘中断和 CPU 异常，并打开了分页，但始终只有一条执行流。下一步：让两个任务在定时器中断的驱动下轮流运行。
+现在内核已经能响应定时器、键盘中断和 CPU 异常，打开了分页，两个任务在定时器的驱动下轮流运行。路线图上的 6 步到此完成。
 
 ## 内核的构建过程
 
@@ -103,7 +106,7 @@ make test
 | --- | --- | --- |
 | `.text` | `0x10000` 起，约 2.3 KB | `_start` 在最前，后面是 48 个中断入口和各个 C 函数 |
 | `.rodata` | 紧随 `.text` | 中断入口地址表、异常名称、扫描码表、字符串 |
-| `.bss` | `0x11000` 起，约 32 KB | 4 KB 内核栈、2 KB 的 IDT、页目录和 5 张页表（共 24 KB）、光标位置、`timer_ticks` 等。页目录和页表要求 4 KB 对齐，所以 `.bss` 从下一个 4 KB 边界开始 |
+| `.bss` | `0x11000` 起，约 41 KB | 4 KB 内核栈、2 KB 的 IDT、页目录和 5 张页表（共 24 KB）、3 个 TSS、任务 A 和 B 各 4 KB 的栈、光标位置、`timer_ticks` 等。页目录和页表要求 4 KB 对齐，所以 `.bss` 从下一个 4 KB 边界开始 |
 
 ## 为什么要清零 .bss
 
@@ -126,7 +129,7 @@ CPU 异常（除零、#GP 等）──中断号 0～31────────�
 1. CPU 收到中断号 N，在 IDT 中取出第 N 项，跳到对应的入口 `isrN`（`isr.asm`）。中断门会自动清除 IF，处理期间不会再被别的中断打断。CPU 自动压入 EFLAGS、CS、EIP，少数异常还会压入错误码。
 2. `isrN` 对没有错误码的中断补压一个 0，再压入中断号 N，然后跳到公共部分 `isr_common`。这样所有中断的栈布局都相同。
 3. `isr_common` 用 `pushad` 保存通用寄存器，再保存 DS、ES、FS、GS，并把它们换成内核数据段 `0x10`：中断可能打断任何代码，那时的段寄存器不一定是内核的，而 CPU 只自动切换 CS（以及特权级变化时的 SS）。然后把栈顶地址作为参数调用 `interrupt_dispatch()`。栈上的内容就是 `kernel.h` 中的 `struct interrupt_frame`。
-4. `interrupt_dispatch()`（`interrupt.c`）按中断号分发：0～31 号交给 `exception_panic()`，0x20 交给 `timer_handle()`，0x21 交给 `keyboard_handle()`。外设中断处理完后向 8259 发送 EOI。
+4. `interrupt_dispatch()`（`interrupt.c`）按中断号分发：0～31 号交给 `exception_panic()`，0x20 交给 `timer_handle()`，0x21 交给 `keyboard_handle()`。外设中断先向 8259 发送 EOI 再处理，原因见下文“任务切换”。
 5. 回到 `isr_common`，恢复 GS、FS、ES、DS，`popad` 恢复通用寄存器，丢掉中断号和错误码，`iretd` 回到被打断的地方，通常是 `kmain()` 的 `hlt` 循环。
 
 ### IDT
@@ -152,6 +155,23 @@ IDT 有 256 项，每项 8 字节，放在 `.bss` 中。`idt_init()` 把前 48 �
 ### 异常
 
 0～31 号是 CPU 异常，目前都无法恢复。`exception_panic()` 在第 10、11 行用红底白字显示异常号、名称、出错指令的 EIP 和错误码，然后停机。可以用 `objdump -d build/kernel.elf` 按 EIP 找到出错的那条指令。
+
+## 任务切换
+
+`sched.c` 用 x86 的硬件任务切换让任务 A、B 轮流运行，与 Linux 0.11 的做法相同。
+
+- 每个任务有一个 TSS（任务状态段，104 字节），里面存着这个任务的全部寄存器：EIP、ESP、EFLAGS、通用寄存器、段寄存器和 CR3。GDT 第 3、4、5 项是任务 0、A、B 的 TSS 描述符，选择子分别为 `0x18`、`0x20`、`0x28`。
+- 任务 0 就是 `kmain()` 自己。`sched_init()` 用 `ltr 0x18` 把它登记为当前任务，CPU 第一次切换时才知道把当前寄存器存到哪里。任务 A、B 的 TSS 预先填好入口地址、各自 4 KB 栈的栈顶、`EFLAGS = 0x202`（IF=1）、内核段选择子和当前的 CR3。
+- `switch_to(n)` 执行一条远跳转 `ljmp` 到任务 n 的 TSS 选择子。CPU 把当前寄存器存进当前任务的 TSS，再从目标 TSS 装入全部寄存器，于是目标任务从它上次被切走的地方接着运行；第一次运行的任务从入口开始。Linux 0.11 的 `switch_to` 宏也是一条 `ljmp`。
+- 定时器中断每次调用 `schedule()`，时间片（20 个 tick）用完就切到另一个任务，与 Linux 0.11 的 `do_timer()` 调用 `schedule()` 相同。任务 0 在第一次切换后不再被调度。
+- 任务 A、B 每 2 个 tick 写一个字母，所以每段约 10 个。两个任务共用输出位置，写之前 `cli`、写完 `sti`，保证“读位置、写字符、位置加一”不被切换打断。
+
+两个顺序上的要求：
+
+- **先发 EOI 再处理中断。** 切换发生在定时器处理函数里。任务 A 第一次运行时从 `task_a()` 的开头开始，不会回到那个处理函数；若 EOI 留到处理完才发，8259 就再也不会送来定时器中断，屏幕停在一个 `A` 上。中断门已清除 IF，提前发 EOI 也不会导致中断嵌套。Linux 0.11 的 `timer_interrupt` 同样一开始就发 EOI。
+- **自检代码在开始调度之前运行。** 有的自检要让 `kmain()` 一直停在原地，开始调度后它就被切走、不再回来了。
+
+每次硬件任务切换都会置位 CR0 的 TS 位，此后第一次使用 x87/SSE 指令会触发 7 号异常。内核编译时用了 `-mgeneral-regs-only`，不会生成这类指令。
 
 ## 分页
 
@@ -213,6 +233,7 @@ loader 进入保护模式时用的是写在 `loader.bin` 里的 GDT。进入内�
 | `0x00` | `0x0000000000000000` | 空描述符，CPU 规定第 0 项必须为空 |
 | `0x08` | `0x00CF9A000000FFFF` | 代码段：基址 0，界限 4 GB，可执行可读，DPL 0，32 位 |
 | `0x10` | `0x00CF92000000FFFF` | 数据段：基址 0，界限 4 GB，可读写，DPL 0 |
+| `0x18`、`0x20`、`0x28` | 由 `sched_init()` 填写 | 任务 0、A、B 的 TSS：基址为对应 TSS 的地址，界限 103，类型为 32 位可用 TSS |
 
 选择子的低 3 位是 RPL 和 TI，所以第 n 项的选择子是 n × 8。两个段都是平坦段，保护模式下的偏移就等于物理地址，写 `[0xb8004]` 访问的就是物理地址 `0xB8004`，`jmp eax` 跳到的也就是物理地址 `0x10000`。C 代码中的指针值同样直接就是物理地址。
 
@@ -226,7 +247,9 @@ loader 进入保护模式时用的是写在 `loader.bin` 里的 GDT。进入内�
 - 若要观察 BIOS 读盘失败，将 `boot.asm` 中的 `mov cl, 2` 暂时改成 `mov cl, 0`。CHS 扇区 0 无效，应看到 `AE`。实验后改回 2，关闭旧窗口并重新运行。
 - 若要观察读内核失败，将 `loader.asm` 中的 `mov cl, KERNEL_START_SECTOR` 暂时改成 `mov cl, 0`。重试 3 次后应看到 `ABE`。实验后改回。
 - 若要观察三重错误，将 `loader.asm` 中 `protected_mode` 后面的 `mov ax, DATA_SEL` 暂时改成 `mov ax, 0x18`。GDT 只有 3 项，`0x18` 超出界限，装入段寄存器时触发一般保护异常（13 号）；此时还没有 IDT，处理异常再次出错变成双重错误（8 号），最终三重错误。Makefile 带有 `-no-reboot`，QEMU 窗口会直接关闭。用 `make run QEMU_FLAGS="-d int,cpu_reset -D qemu.log"` 运行，可在 `qemu.log` 中看到 `new 0xd`、`new 0x8` 和 `Triple fault`。实验后改回。
-- 若要观察忘记发 EOI 的后果，将 `interrupt.c` 中 `interrupt_dispatch()` 末尾的 `pic_send_eoi(vector);` 暂时注释掉。`ticks` 停在 1，键盘也没有反应：8259 一直等着 CPU 回复，不再送来定时器和优先级更低的键盘中断。实验后改回。
+- 若要观察忘记发 EOI 的后果，将 `interrupt.c` 中 `interrupt_dispatch()` 里的 `pic_send_eoi(vector);` 暂时注释掉。`ticks` 停在 1，键盘也没有反应：8259 一直等着 CPU 回复，不再送来定时器和优先级更低的键盘中断。实验后改回。
+- 若要改变任务切换的快慢，修改 `sched.c` 中的 `TASK_SLICE`。改成 4，每段只有约 2 个字母；改成 60，每段约 30 个。
+- 若要观察 EOI 发晚了的后果，把 `interrupt_dispatch()` 中的 `pic_send_eoi(vector);` 挪到处理函数之后。切到任务 A 后定时器就停了，第 6 行只有一个 `A`，键盘也没有反应。
 - 若要改变时钟频率，修改 `kernel.c` 中的 `TIMER_HZ`。改成 50，`ticks` 每秒加 50。改成 1000 也能明显变快，但在 QEMU 的 TCG 模拟下会丢失部分中断，实测每秒只加约 700。不要小于 19，否则分频值超出 16 位。
 - 若要亲眼看到除零异常，运行 `make run BUILD=build/selftest/divide_error SELFTEST=DIVIDE_ERROR`。第 10、11 行会出现 `Exception 0  #DE divide error` 和出错指令的 `EIP`，用 `objdump -d build/selftest/divide_error/kernel.elf` 可以看到那个地址正是 `divl`。`selftest.c` 中用的是内联汇编：如果写成 C 的 `1 / zero`，clang 会把它优化成不用除法指令的比较，根本不会触发异常。
 - 若要亲眼看到缺页异常，运行 `make run BUILD=build/selftest/unmapped SELFTEST=UNMAPPED`（读未映射的 `0xD0000000`）或 `make run BUILD=build/selftest/null_write SELFTEST=NULL_WRITE`（写空指针）。第 11 行会显示错误码和 CR2。
@@ -250,6 +273,7 @@ loader 进入保护模式时用的是写在 `loader.bin` 里的 GDT。进入内�
 | `interrupt.c` | IDT、8259、中断分发和异常显示 | `kernel/traps.c` |
 | `paging.c` | 页目录和页表，打开分页 | `boot/head.s` 中的 `setup_paging`、`mm/memory.c` |
 | `timer.c` | 8253 定时器 | `kernel/sched.c` 中的 `sched_init()`、`do_timer()` |
+| `sched.c` | 两个任务的 TSS 和硬件任务切换 | `kernel/sched.c` 中的 `schedule()`、`include/linux/sched.h` 中的 `switch_to` |
 | `keyboard.c` | 键盘扫描码转字符并回显 | `kernel/chr_drv/keyboard.S` |
 | `vga.c` | 直接写 VGA 显存、移动硬件光标、整数转字符串 | `kernel/chr_drv/console.c` |
 | `kernel.h`、`io.h` | 各模块共用的声明；端口读写 `inb`、`outb` | `include/asm/io.h` |

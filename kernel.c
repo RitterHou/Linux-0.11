@@ -3,7 +3,7 @@
  *
  * 这里没有标准库，也没有 BIOS。kmain 先接着第 0 行的 ABPK 写 C 和问候语，
  * 然后装好 IDT、打开分页，再设置 8259 和定时器，打开中断，此后的工作都由中断驱动：
- * 定时器每秒 100 次刷新第 4 行的计数，键盘输入回显在第 6 行。
+ * 定时器每秒 100 次刷新第 4 行的计数并轮流运行两个任务，键盘输入回显在第 8 行。
  */
 #include "kernel.h"
 
@@ -28,17 +28,24 @@ void kmain(void)
     /* 顺序很重要：IDT 和 8259 都准备好之后，才能打开中断。 */
     pic_init();
     timer_init(TIMER_HZ);
+    sched_init();                   /* 建好两个任务的 TSS，把 kmain 登记为任务 0 */
 
     vga_write_at(4, 0, "ticks: 0", VGA_GRAY);
-    vga_write_at(6, 0, "keyboard: ", VGA_GRAY);
-    vga_set_cursor(6, 10);          /* 键盘回显从这里开始 */
+    vga_write_at(6, 0, "tasks: ", VGA_GRAY);
+    vga_write_at(8, 0, "keyboard: ", VGA_GRAY);
+    vga_set_cursor(8, 10);          /* 键盘回显从这里开始 */
 
     __asm__ volatile("sti");        /* 打开中断：定时器和键盘从此可以打断下面的循环 */
     vga_write_at(0, 6, "I", VGA_GRAY);
 
-    selftest_run();                 /* 正常构建为空；make test 的自检内核在这里制造异常 */
+    /* 正常构建为空；make test 的自检内核在这里制造异常。必须在开始调度之前：
+       有的自检要让 kmain 一直停在这里，开始调度后 kmain 就被切走、不再回来了。 */
+    selftest_run();
 
-    /* 没事可做就停下，等下一个中断唤醒 CPU；中断处理完又回到这里。 */
+    sched_start();                  /* 下一个定时器中断起，任务 A、B 轮流运行 */
+    vga_write_at(0, 7, "T", VGA_GRAY);
+
+    /* 第一次切换之前在这里等待；切走之后不会再回来。 */
     for (;;)
         __asm__ volatile("hlt");
 }

@@ -48,6 +48,11 @@ extern volatile uint32_t timer_ticks;
 void timer_init(uint32_t hz);
 void timer_handle(void);
 
+/* sched.c：两个任务的硬件任务切换 */
+void sched_init(void);
+void sched_start(void);
+void schedule(void);
+
 /* keyboard.c：键盘 */
 void keyboard_handle(void);
 
