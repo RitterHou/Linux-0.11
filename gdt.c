@@ -8,7 +8,7 @@
  */
 #include "kernel.h"
 
-#define GDT_ENTRIES 3               /* 0 空描述符，1 代码段，2 数据段 */
+#define GDT_ENTRIES 8               /* 0 空描述符，1 代码段，2 数据段，3～7 备用（TSS 等） */
 
 struct gdt_pointer {                /* lgdt 的操作数：界限和基址，共 6 字节 */
     uint16_t limit;
@@ -32,11 +32,17 @@ static uint64_t make_descriptor(uint32_t base, uint32_t limit, uint8_t access, u
          | (uint64_t)(base >> 24) << 56;
 }
 
+/* 填写第 index 项。选择子 = index × 8。 */
+void gdt_set_entry(int index, uint32_t base, uint32_t limit, uint8_t access, uint8_t flags)
+{
+    gdt[index] = make_descriptor(base, limit, access, flags);
+}
+
 void gdt_init(void)
 {
     /* 与 loader.asm 中的两项相同：基址 0、界限 0xFFFFF × 4 KB = 4 GB 的平坦段。 */
-    gdt[1] = make_descriptor(0, 0xFFFFF, 0x9A, 0xC);    /* 代码段：存在、DPL 0、可执行可读 */
-    gdt[2] = make_descriptor(0, 0xFFFFF, 0x92, 0xC);    /* 数据段：存在、DPL 0、可读写 */
+    gdt_set_entry(1, 0, 0xFFFFF, 0x9A, 0xC);    /* 代码段：存在、DPL 0、可执行可读 */
+    gdt_set_entry(2, 0, 0xFFFFF, 0x92, 0xC);    /* 数据段：存在、DPL 0、可读写 */
 
     struct gdt_pointer gdtr = { sizeof(gdt) - 1, (uint32_t)gdt };
     __asm__ volatile("lgdt %0" : : "m"(gdtr));

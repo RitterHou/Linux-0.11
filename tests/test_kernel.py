@@ -342,11 +342,32 @@ def test_clobber_loader(_m, _elf):
         check(not exception_screen(m)[0], f"不应出现异常：{exception_screen(m)[0]!r}")
 
 
+def test_other_segments(_m, _elf):
+    """被打断的代码用别的数据段时，中断入口换成内核段并在返回前恢复"""
+    d = build_selftest("OTHER_SEGMENTS")
+    elf = os.path.join(d, "kernel.elf")
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        m.wait_for(lambda mm: mm.screen(1)[0].endswith("N"), what="标记 N")
+        k1 = ticks_value(m)
+        time.sleep(1.0)
+        k2 = ticks_value(m)
+        check(k2 - k1 >= 50, f"定时器中断应照常处理，1 秒内 ticks 只从 {k1} 变到 {k2}")
+        table = symbols(elf)
+        for _ in range(10):
+            regs = m.registers()
+            if regs["HLT"] == 1 and in_function(table, "selftest_run", regs["EIP"]):
+                for seg in ("DS", "ES", "FS", "GS"):
+                    check(regs[seg] == 0x38, f"中断返回后 {seg} 应恢复为 0x38，实际是 {regs[seg]:#x}")
+                return
+            time.sleep(0.1)
+        raise TestFailure("10 次采样都没有停在 selftest_run 的 hlt 上")
+
+
 # 前几项共用一台正常启动的虚拟机；其余各自启动自检内核。
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_idle_in_hlt]
 SEPARATE_TESTS = [test_divide_error, test_bad_gate, test_unmapped_read, test_null_write,
-                  test_clobber_loader]
+                  test_clobber_loader, test_other_segments]
 
 
 def main():

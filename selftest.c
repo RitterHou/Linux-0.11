@@ -9,6 +9,7 @@
 #define SELFTEST_UNMAPPED     3     /* 读未映射的 0xD0000000：期望 14 号 #PF，错误码 0 */
 #define SELFTEST_NULL_WRITE   4     /* 写空指针：第 0 页未映射，期望 14 号 #PF，错误码 2 */
 #define SELFTEST_CLOBBER_LOADER 5   /* 清零 loader 所在内存：内核有自己的 GDT，期望照常运行 */
+#define SELFTEST_OTHER_SEGMENTS 6   /* DS 等换成基址 1 MB 的段后空转：中断入口要换段并恢复 */
 
 void selftest_run(void)
 {
@@ -30,6 +31,23 @@ void selftest_run(void)
     for (volatile uint8_t *p = (volatile uint8_t *)0x8000; p < (volatile uint8_t *)0x8200; p++)
         *p = 0;
     vga_write_at(0, 7, "Z", VGA_GRAY);   /* 清零完成的标记 */
+#elif SELFTEST == SELFTEST_OTHER_SEGMENTS
+    /*
+     * 在 GDT 第 7 项（选择子 0x38）建一个基址为 1 MB 的数据段，把 DS、ES、FS、GS 换成它，
+     * 然后只用 hlt 空转。中断处理代码若不换回内核数据段，访问的每个地址都会偏移 1 MB：
+     * 显存写到了别处，屏幕上的 ticks 不再变化。换了但不恢复，空闲时看到的 DS 就会变成 0x10。
+     * （不用空选择子测试：QEMU 的 TCG 模拟不检查通过空选择子访问内存。）
+     */
+    vga_write_at(0, 7, "N", VGA_GRAY);
+    gdt_set_entry(7, 0x100000, 0xFFFFF, 0x92, 0xC);
+    __asm__ volatile(
+        "movw $0x38, %%ax\n\t"
+        "movw %%ax, %%ds\n\t"
+        "movw %%ax, %%es\n\t"
+        "movw %%ax, %%fs\n\t"
+        "movw %%ax, %%gs\n"
+        "1:\thlt\n\t"
+        "jmp 1b" ::: "eax", "memory");
 #else
 #error "未知的 SELFTEST"
 #endif
