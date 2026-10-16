@@ -361,21 +361,35 @@ def test_tasks_alternate(m, elf):
     raise TestFailure(f"TR 应在 {tss_a:#x} 和 {tss_b:#x} 之间切换，采样到的是 {sorted(hex(x) for x in seen)}")
 
 
+PANEL_ROW = 19
+
+
 def exception_screen(m):
-    return m.screen(12)[10:12]
+    """异常面板的 5 行（第 19～23 行）。"""
+    return m.screen(PANEL_ROW + 5)[PANEL_ROW:]
+
+
+def panel_fields(panel):
+    """把面板中的“名字=0x十六进制”解析成字典。"""
+    return {name: int(value, 16) for name, value in re.findall(r"(\w+)=0x([0-9A-F]+)", " ".join(panel))}
+
+
+def wait_for_panel(m):
+    m.wait_for(lambda mm: exception_screen(mm)[0].startswith("Exception"), what="异常面板")
+    return exception_screen(m)
 
 
 def test_divide_error(_m, _elf):
     """除以零：显示 #DE，EIP 指向 div 指令"""
     d = build_selftest("DIVIDE_ERROR")
     with Machine(os.path.join(d, "floppy.img")) as m:
-        m.wait_for(lambda mm: exception_screen(mm)[0].startswith("Exception"), what="异常信息")
-        line10, line11 = exception_screen(m)
-        check(line10.startswith("Exception 0") and "#DE" in line10, f"第 10 行不对：{line10!r}")
-        check(m.attribute(10, 0) == 0x4F, "异常信息应为红底白字")
-        eip = re.search(r"EIP=0x([0-9A-F]{8})", line11)
-        check(eip is not None, f"第 11 行没有 EIP：{line11!r}")
-        insn = instruction_at(os.path.join(d, "kernel.elf"), int(eip.group(1), 16))
+        panel = wait_for_panel(m)
+        check(panel[0].startswith("Exception 0 ") and "#DE" in panel[0], f"第 19 行不对：{panel[0]!r}")
+        check(m.attribute(PANEL_ROW, 0) == 0x4F and m.attribute(PANEL_ROW + 4, 79) == 0x4F,
+              "异常面板应是一整块红底白字")
+        fields = panel_fields(panel)
+        check("EIP" in fields, f"面板中没有 EIP：{panel}")
+        insn = instruction_at(os.path.join(d, "kernel.elf"), fields["EIP"])
         check(insn is not None and insn.startswith("div"), f"EIP 处应是 div 指令，实际是 {insn}")
 
 
@@ -383,20 +397,19 @@ def test_bad_gate(_m, _elf):
     """触发未填写的 IDT 表项：显示 #GP，错误码 0x30*8+2"""
     d = build_selftest("BAD_GATE")
     with Machine(os.path.join(d, "floppy.img")) as m:
-        m.wait_for(lambda mm: exception_screen(mm)[0].startswith("Exception"), what="异常信息")
-        line10, line11 = exception_screen(m)
-        check(line10.startswith("Exception 13") and "#GP" in line10, f"第 10 行不对：{line10!r}")
-        check("error=0x00000182" in line11, f"错误码应为 0x182：{line11!r}")
+        panel = wait_for_panel(m)
+        check(panel[0].startswith("Exception 13 ") and "#GP" in panel[0], f"第 19 行不对：{panel[0]!r}")
+        check(panel_fields(panel).get("error") == 0x182, f"错误码应为 0x182：{panel[1]!r}")
 
 
 def page_fault_test(selftest, error_code, cr2):
     d = build_selftest(selftest)
     with Machine(os.path.join(d, "floppy.img")) as m:
-        m.wait_for(lambda mm: exception_screen(mm)[0].startswith("Exception"), what="异常信息")
-        line10, line11 = exception_screen(m)
-        check(line10.startswith("Exception 14") and "#PF" in line10, f"第 10 行不对：{line10!r}")
-        check(f"error=0x{error_code:08X}" in line11, f"错误码应为 {error_code:#x}：{line11!r}")
-        check(f"CR2=0x{cr2:08X}" in line11, f"CR2 应为 {cr2:#x}：{line11!r}")
+        panel = wait_for_panel(m)
+        check(panel[0].startswith("Exception 14 ") and "#PF" in panel[0], f"第 19 行不对：{panel[0]!r}")
+        fields = panel_fields(panel)
+        check(fields.get("error") == error_code, f"错误码应为 {error_code:#x}：{panel[1]!r}")
+        check(fields.get("CR2") == cr2, f"CR2 应为 {cr2:#x}：{panel[4]!r}")
 
 
 def test_unmapped_read(_m, _elf):
@@ -456,12 +469,33 @@ def test_big_kernel(_m, _elf):
         check_kernel_loaded(m, os.path.join(d, "kernel.elf"), os.path.join(d, "kernel.bin"))
 
 
+def test_register_dump(_m, _elf):
+    """异常面板显示出错那一刻的全部寄存器"""
+    d = build_selftest("REGISTER_DUMP")
+    table = symbols(os.path.join(d, "kernel.elf"))
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        panel = wait_for_panel(m)
+        check(panel[0].startswith("Exception 6 ") and "#UD" in panel[0], f"第 19 行不对：{panel[0]!r}")
+        fields = panel_fields(panel)
+        expected = {"EAX": 0x11111111, "EBX": 0x22222222, "ECX": 0x33333333, "EDX": 0x44444444,
+                    "ESI": 0x55555555, "EDI": 0x66666666, "EBP": 0x77777777,
+                    "EIP": table["selftest_ud2"][0], "CS": 0x08,
+                    "DS": 0x10, "ES": 0x10, "FS": 0x10, "GS": 0x10,
+                    "CR3": table["page_directory"][0], "error": 0}
+        for name, value in expected.items():
+            check(fields.get(name) == value, f"{name} 应为 {value:#x}，面板上是 {fields.get(name)}：{panel}")
+        stack_bottom, stack_top = table["stack_bottom"][0], table["stack_top"][0]
+        check(stack_bottom <= fields.get("ESP", 0) < stack_top,
+              f"ESP 应在内核栈 {stack_bottom:#x}～{stack_top:#x} 内，面板上是 {fields.get('ESP')}")
+        check(fields.get("EFLAGS", 0) & 0x200, "出错时中断已打开，EFLAGS 的 IF 位应为 1")
+
+
 # 前几项共用一台正常启动的虚拟机；其余各自启动自检内核。
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_console_scroll,
                 test_idle_in_hlt,
                 test_tasks_alternate]
-SEPARATE_TESTS = [test_divide_error, test_bad_gate, test_unmapped_read, test_null_write,
+SEPARATE_TESTS = [test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,
                   test_big_kernel]
 

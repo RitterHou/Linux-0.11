@@ -27,6 +27,7 @@ QEMU 打开窗口后应看到：
 | 5 | `paging: on, 0xC0000000 -> 0xB8000` | 分页已打开 |
 | 6 | `tasks: AAAAAAAAAABBBBBBBBBB…` | 任务 A、B 轮流运行，各写自己的字母，每段约 10 个；写满一行后从行首覆盖 |
 | 8～18 | `keyboard: ` 和输入的内容 | 键盘回显窗口：在 QEMU 窗口里打字会回显在这里，写满后整个窗口向上滚动一行，窗口外的内容不受影响 |
+| 19～23 | 平时为空 | 出现 CPU 异常时，红底白字的异常面板，见下文“异常” |
 
 键盘支持字母、数字、常用符号、空格、回车、退格、左右 Shift 和 Caps Lock（美式布局），暂不支持方向键、Ctrl、Alt 和小键盘。打字前先点一下 QEMU 窗口，让它获得键盘焦点。
 
@@ -53,6 +54,7 @@ make test
 - 连续输入 13 行后，回显窗口第 8～18 行按顺序向上滚动，第 0～6 行和第 19～24 行不受影响。
 - 任务等待时 CPU 停在任务 A 或 B 的 `hlt` 上，且 IF 为 1。
 - 两个任务轮流运行：第 6 行只有 A 和 B、多次交替、每段不超过 15 个字母，0.5 秒后内容有变化；TR 在任务 A、B 的 TSS 选择子 `0x20` 和 `0x28` 之间切换。
+- 寄存器设为已知值后执行 `ud2`：异常面板显示 `#UD`，EAX～EBP、EIP（`ud2` 的地址）、各段寄存器、CR3 都与预期一致，ESP 落在内核栈内，EFLAGS 的 IF 为 1。
 - 除以零显示 `#DE`，EIP 正好指向 `div` 指令；触发未填写的 IDT 表项显示 `#GP`，错误码为 `0x182`。
 - 读未映射的 `0xD0000000` 显示 `#PF`，错误码 0，CR2 为该地址；写空指针显示 `#PF`，错误码 2（写操作），CR2 为 0。
 - 把 loader 所在的 `0x8000`～`0x81FF` 清零后，定时器照常工作：内核已不再依赖 loader 的 GDT。
@@ -61,7 +63,7 @@ make test
 
 后面几项需要故意制造异常或破坏内存。测试脚本会用 `make BUILD=build/selftest/<名称> SELFTEST=<名称>` 另外构建自检内核：`SELFTEST` 非空时，`selftest.c` 中对应的代码会被编译进去，在打开中断后触发异常。正常构建不定义 `SELFTEST`，`selftest_run()` 是空函数。
 
-全部测试约需 5 秒。任何一项失败时脚本以非 0 状态退出，并打印期望值与实际值。
+全部测试约需 12 秒（自检内核已构建过时）。任何一项失败时脚本以非 0 状态退出，并打印期望值与实际值。
 
 ## 启动过程
 
@@ -157,7 +159,21 @@ IDT 有 256 项，每项 8 字节，放在 `.bss` 中。`idt_init()` 把前 48 �
 
 ### 异常
 
-0～31 号是 CPU 异常，目前都无法恢复。`exception_panic()` 在第 10、11 行用红底白字显示异常号、名称、出错指令的 EIP 和错误码，然后停机。可以用 `objdump -d build/kernel.elf` 按 EIP 找到出错的那条指令。
+0～31 号是 CPU 异常，目前都无法恢复。`exception_panic()` 在第 19～23 行画一块红底白字的面板，显示异常号、名称和出错那一刻的全部寄存器，然后停机。面板在键盘回显窗口下面，滚动时不会被移走。例如自检 `REGISTER_DUMP` 的面板：
+
+```text
+Exception 6 #UD invalid opcode
+EIP=0x00011126 CS=0x0008 EFLAGS=0x00010202 error=0x00000000
+EAX=0x11111111 EBX=0x22222222 ECX=0x33333333 EDX=0x44444444
+ESI=0x55555555 EDI=0x66666666 EBP=0x77777777 ESP=0x00012FF0
+DS=0x0010 ES=0x0010 FS=0x0010 GS=0x0010 CR2=0x00000000 CR3=0x00018000
+```
+
+- 寄存器的值都取自栈上的 `struct interrupt_frame`，也就是中断入口保存下来的、异常发生那一刻的状态。
+- 同一特权级内发生异常时，CPU 不压入 ESP，所以出错时的 ESP 就是栈上 EFLAGS 之后的地址。
+- CR2 只在缺页异常时有意义，是出错的虚拟地址。CR3 是页目录的物理地址。
+- EFLAGS 中的 `0x10000` 是 RF 位，CPU 在这类故障异常时自动置位。
+- 用 `objdump -d build/kernel.elf` 按 EIP 可以找到出错的那条指令。
 
 ## 任务切换
 
@@ -195,7 +211,7 @@ CR3 → 页目录第 768 项 → alias_table → 第 0 项 → 物理页 0xB8000
 | 其余 | 未映射 | 访问会触发 14 号缺页异常 |
 
 - 打开分页的那一刻，下一条指令的地址已经要经过页表翻译。前 16 MB 一一对应，所以代码、栈、显存和 GDT 的地址都不变，内核照常运行。Linux 0.11 的 `head.s` 同样一一对应地映射前 16 MB，不过它把页目录放在物理地址 0，我们放在 `.bss` 里。
-- 页目录项和页表项的低 12 位是标志，这里只用到存在位（1）和可写位（2）。存在位为 0 时访问该地址，CPU 产生 14 号缺页异常，把出错的虚拟地址放进 CR2，错误码的第 0 位表示页是否存在、第 1 位表示是不是写操作。`exception_panic()` 遇到缺页时会额外显示 CR2。
+- 页目录项和页表项的低 12 位是标志，这里只用到存在位（1）和可写位（2）。存在位为 0 时访问该地址，CPU 产生 14 号缺页异常，把出错的虚拟地址放进 CR2，错误码的第 0 位表示页是否存在、第 1 位表示是不是写操作。异常面板的最后一行显示 CR2。
 - 第 0 页不映射后，`*(int *)0 = 1` 这样的空指针写入会立即触发缺页，而不是悄悄改写物理地址 0。
 - 写 `0xC0000000` 和写 `0xB8000` 改的是同一块显存。第 0 行的 `V` 就是 `kmain()` 通过 `0xC0000000` 写进去的。
 
@@ -260,8 +276,9 @@ loader 进入保护模式时用的是写在 `loader.bin` 里的 GDT。进入内�
 - 若要改变任务切换的快慢，修改 `sched.c` 中的 `TASK_SLICE`。改成 4，每段只有约 2 个字母；改成 60，每段约 30 个。
 - 若要观察 EOI 发晚了的后果，把 `interrupt_dispatch()` 中的 `pic_send_eoi(vector);` 挪到处理函数之后。切到任务 A 后定时器就停了，第 6 行只有一个 `A`，键盘也没有反应。
 - 若要改变时钟频率，修改 `kernel.c` 中的 `TIMER_HZ`。改成 50，`ticks` 每秒加 50。改成 1000 也能明显变快，但在 QEMU 的 TCG 模拟下会丢失部分中断，实测每秒只加约 700。不要小于 19，否则分频值超出 16 位。
-- 若要亲眼看到除零异常，运行 `make run BUILD=build/selftest/divide_error SELFTEST=DIVIDE_ERROR`。第 10、11 行会出现 `Exception 0  #DE divide error` 和出错指令的 `EIP`，用 `objdump -d build/selftest/divide_error/kernel.elf` 可以看到那个地址正是 `divl`。`selftest.c` 中用的是内联汇编：如果写成 C 的 `1 / zero`，clang 会把它优化成不用除法指令的比较，根本不会触发异常。
-- 若要亲眼看到缺页异常，运行 `make run BUILD=build/selftest/unmapped SELFTEST=UNMAPPED`（读未映射的 `0xD0000000`）或 `make run BUILD=build/selftest/null_write SELFTEST=NULL_WRITE`（写空指针）。第 11 行会显示错误码和 CR2。
+- 若要亲眼看到除零异常，运行 `make run BUILD=build/selftest/divide_error SELFTEST=DIVIDE_ERROR`。异常面板会出现 `Exception 0 #DE divide error` 和出错指令的 `EIP`，用 `objdump -d build/selftest/divide_error/kernel.elf` 可以看到那个地址正是 `divl`。`selftest.c` 中用的是内联汇编：如果写成 C 的 `1 / zero`，clang 会把它优化成不用除法指令的比较，根本不会触发异常。
+- 若要亲眼看到缺页异常，运行 `make run BUILD=build/selftest/unmapped SELFTEST=UNMAPPED`（读未映射的 `0xD0000000`）或 `make run BUILD=build/selftest/null_write SELFTEST=NULL_WRITE`（写空指针）。异常面板的第 2 行显示错误码，最后一行显示 CR2。
+- 若要亲眼看到完整的寄存器面板，运行 `make run BUILD=build/selftest/register_dump SELFTEST=REGISTER_DUMP`。`selftest.c` 先把 EAX～EBP 设为 `0x11111111`～`0x77777777`，再执行 `ud2`。
 - 若要换一个位置写 `V`，修改 `kernel.c` 中 `((volatile uint16_t *)VGA_ALIAS)[5]` 的下标，例如改成 `80 * 3`，`V` 就会出现在第 3 行行首。下标超过 2047（一页 4 KB 的范围）时会触发缺页，因为别名只映射了一页。
 - 若要亲眼看到未填写的 IDT 表项被触发，运行 `make run BUILD=build/selftest/bad_gate SELFTEST=BAD_GATE`。`selftest.c` 执行 `int $0x30`，应看到 `Exception 13 #GP general protection`，`error=0x00000182`，即 `0x30 × 8 + 2`。
 
