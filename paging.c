@@ -10,7 +10,7 @@
  *   - 第 0 页不映射，访问空指针会触发缺页异常，而不是悄悄读写物理地址 0；
  *   - 虚拟地址 0xC0000000 也映射到显存 0xB8000，同一块物理内存有了两个地址；
  *   - 只有用户程序所在的几页（链接脚本中的 __user_start～__user_end）打开“用户”位，
- *     特权级 3 的代码访问其他页都会触发缺页异常。
+ *     特权级 3 的代码访问其他页都会触发缺页异常；其中代码所在的页对用户态只读。
  */
 #include "kernel.h"
 
@@ -29,7 +29,7 @@ static uint32_t page_directory[ENTRIES] __attribute__((aligned(PAGE_SIZE)));
 static uint32_t identity_tables[IDENTITY_TABLES][ENTRIES] __attribute__((aligned(PAGE_SIZE)));
 static uint32_t alias_table[ENTRIES] __attribute__((aligned(PAGE_SIZE)));
 
-extern uint8_t __user_start[], __user_end[];   /* 链接脚本定义，都按 4 KB 对齐 */
+extern uint8_t __user_start[], __user_data[], __user_end[];   /* 链接脚本定义，都按 4 KB 对齐 */
 
 void paging_init(void)
 {
@@ -46,9 +46,17 @@ void paging_init(void)
     }
     identity_tables[0][0] = 0;      /* 第 0 页不映射，用来捕获空指针 */
 
-    /* 用户程序的页打开用户位。它们在前 4 MB 内，属于第一张页表。 */
-    for (uint32_t addr = (uint32_t)__user_start; addr < (uint32_t)__user_end; addr += PAGE_SIZE)
-        identity_tables[0][addr / PAGE_SIZE] |= PAGE_USER;
+    /*
+     * 用户程序的页打开用户位。它们在前 4 MB 内，属于第一张页表。
+     * 代码页去掉可写位：用户栈溢出或野指针写到代码上，会立刻触发缺页，而不是悄悄改掉代码。
+     * 386 在特权级 0 不理会只读位（CR0.WP 为 0），内核仍可写这些页，但内核从不写用户代码。
+     */
+    for (uint32_t addr = (uint32_t)__user_start; addr < (uint32_t)__user_end; addr += PAGE_SIZE) {
+        uint32_t *pte = &identity_tables[0][addr / PAGE_SIZE];
+        *pte |= PAGE_USER;
+        if (addr < (uint32_t)__user_data)
+            *pte &= ~PAGE_WRITE;
+    }
 
     /* 0xC0000000 的高 10 位是 768，用第 768 个页目录项；它的第 0 页指向显存。 */
     alias_table[0] = VGA_PHYS | PAGE_PRESENT | PAGE_WRITE;
