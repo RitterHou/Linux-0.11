@@ -17,7 +17,8 @@ typedef int32_t (*syscall_fn)(uint32_t a, uint32_t b, uint32_t c, int from_user)
  * write(fd, buf, count)：目前只支持 fd 1，写到第 6 行的任务输出区。
  * 用户态传来的 buf 必须完全落在用户程序的页内：内核能读所有内存，不检查的话，
  * 用户程序把内核地址交给 write，就能让内核替它把内核内存印出来。
- * Linux 0.11 在 sys_write 等处用 verify_area() 检查用户地址。
+ * Linux 0.11 不需要这一步：内核经 FS（用户数据段）用 get_fs_byte() 读用户内存，
+ * 用户给的指针按用户段解释，越界由段界限挡住。这里的段都是平坦的，只能显式检查。
  */
 static int32_t sys_write(uint32_t fd, uint32_t buf, uint32_t count, int from_user)
 {

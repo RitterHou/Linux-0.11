@@ -65,7 +65,7 @@ void idt_init(void)
     idt_set_gate(SYSCALL_VECTOR, (uint32_t)isr_syscall, USER_TRAP_GATE);
 
     /*
-     * 48～255 号表项全为 0，类型字段 0 不是合法的门描述符。万一被触发，CPU 在检查
+     * 其余表项（48～255 号中除 0x80 以外）全为 0，类型字段 0 不是合法的门描述符。万一被触发，CPU 在检查
      * 存在位之前就会产生 13 号一般保护异常，错误码为 中断号 × 8 + 2，同样能显示出来。
      */
     struct idt_pointer idtr = { sizeof(idt) - 1, (uint32_t)idt };
