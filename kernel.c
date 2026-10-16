@@ -27,8 +27,11 @@ void kmain(void)
     ((volatile uint16_t *)VGA_ALIAS)[5] = (uint16_t)(VGA_GRAY << 8 | 'V');
     vga_write_at(5, 0, "paging: on, 0xC0000000 -> 0xB8000", VGA_GRAY);
 
+    selftest_early();               /* 正常构建为空；自检 EARLY_KEY 在这里等一次按键 */
+
     /* 顺序很重要：IDT 和 8259 都准备好之后，才能打开中断。 */
     pic_init();
+    keyboard_init();                /* 读光开中断前就到达的按键，否则键盘中断可能再也不来 */
     timer_init(TIMER_HZ);
     sched_init();                   /* 建好两个任务的 TSS，把 kmain 登记为任务 0 */
 

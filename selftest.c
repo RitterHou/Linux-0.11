@@ -2,6 +2,7 @@
  * 自检：make test 会用 SELFTEST=名称 另外构建几个内核，在打开中断之后故意制造异常，
  * 检验异常处理是否正确。正常构建时没有定义 SELFTEST，selftest_run() 什么也不做。
  */
+#include "io.h"
 #include "kernel.h"
 #include "selftest.h"
 #include "syscall.h"
@@ -107,9 +108,24 @@ void selftest_run(void)
     report("write", (uint32_t)written, 10);
     report("badfd", (uint32_t)bad_fd, 16);
     report("slept", slept, 10);
+#elif SELFTEST == SELFTEST_EARLY_KEY
+    /* 在 selftest_early() 中完成 */
 #elif SELFTEST_IN_USER(SELFTEST)
     /* 用户态的自检写在 user.c 中，这里不用做什么 */
 #else
 #error "未知的 SELFTEST"
+#endif
+}
+
+/*
+ * 在 pic_init() 之前调用。自检 EARLY_KEY：显示 W，一直等到键盘控制器里有一个字节，
+ * 但不读走它，模拟开中断之前就有人按键。
+ */
+void selftest_early(void)
+{
+#if defined(SELFTEST) && SELFTEST == SELFTEST_EARLY_KEY
+    vga_write_at(0, 9, "W", VGA_GRAY);
+    while (!(inb(0x64) & 0x01))
+        ;
 #endif
 }

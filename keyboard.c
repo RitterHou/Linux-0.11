@@ -6,6 +6,8 @@
 #include "kernel.h"
 
 #define KBD_DATA     0x60
+#define KBD_STATUS   0x64
+#define KBD_OUT_FULL 0x01           /* 状态位 0：输出缓冲区里有一个字节等着读 */
 #define KEY_RELEASED 0x80           /* 扫描码最高位为 1 表示松开按键 */
 #define SC_EXTENDED  0xE0           /* 方向键等扩展键先发这个前缀，再发一个字节 */
 #define SC_LSHIFT    0x2A
@@ -40,6 +42,19 @@ static char translate(uint8_t key)
     int is_letter = base >= 'a' && base <= 'z';
     int upper = is_letter ? (shift_held != 0) != caps_lock : shift_held != 0;
     return upper ? shift_map[key] : base;
+}
+
+/*
+ * 在 pic_init() 之后、打开中断之前调用：读光键盘控制器里残留的字节。
+ * 若开中断前就有按键（开机时按住某个键、BIOS 菜单的松键码），这个字节一直没人读，
+ * 键盘控制器就让 IRQ1 保持高电平。8259 是边沿触发，而 ICW1 会重置它的边沿检测，
+ * 之后再也等不到上升沿，键盘中断永远不来，也就永远没人读 0x60。读掉之后电平回落，
+ * 下一次按键就能产生新的上升沿。
+ */
+void keyboard_init(void)
+{
+    while (inb(KBD_STATUS) & KBD_OUT_FULL)
+        inb(KBD_DATA);
 }
 
 void keyboard_handle(void)
