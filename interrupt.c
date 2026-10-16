@@ -113,6 +113,14 @@ static void exception_panic(const struct interrupt_frame *frame)
     vga_write_at(11, 15, "error=0x", VGA_WHITE_RED);
     vga_write_at(11, 23, format_uint(frame->error_code, 16, buf), VGA_WHITE_RED);
 
+    /* 缺页异常时，CPU 把出错的虚拟地址放在 CR2 中。 */
+    if (frame->vector == 14) {
+        uint32_t cr2;
+        __asm__ volatile("movl %%cr2, %0" : "=r"(cr2));
+        vga_write_at(11, 32, "CR2=0x", VGA_WHITE_RED);
+        vga_write_at(11, 38, format_uint(cr2, 16, buf), VGA_WHITE_RED);
+    }
+
     for (;;)
         __asm__ volatile("cli; hlt");
 }
