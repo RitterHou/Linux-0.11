@@ -73,7 +73,7 @@ run: $(BUILD)/floppy.img
 
 # 在无头 QEMU 中运行全部测试；自检内核由测试脚本按需构建到 build/selftest/ 下。
 test: all
-	$(PYTHON) tests/test_kernel.py
+	QEMU="$(QEMU)" $(PYTHON) tests/test_kernel.py
 
 clean:
 	rm -rf build
