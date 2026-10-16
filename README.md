@@ -2,6 +2,8 @@
 
 这是 `learning` 分支上的独立实验。`main` 分支保留 Linux 0.11 原始源码。
 
+`docs/tour.html` 是一个可交互的介绍网页：启动的八个阶段、中断时栈的变化、分页的地址翻译、任务切换和系统调用都配有一步步演示的动画，用浏览器直接打开即可。
+
 ## 运行
 
 需要 NASM、QEMU、系统自带的 clang，以及 Homebrew 的 lld（macOS 自带的 `ld` 不能链接 ELF）：
