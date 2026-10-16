@@ -52,7 +52,8 @@ make test
 - 定时器频率约为 100 Hz（允许 90～110）。
 - 模拟按键后的回显、回车和退格，退格不会删到上一行；左右 Shift 得到大写字母和 `!@_` 等符号，Caps Lock 只影响字母，与 Shift 同时生效时得到小写。
 - 连续输入 13 行后，回显窗口第 8～18 行按顺序向上滚动，第 0～6 行和第 19～24 行不受影响。
-- 任务等待时 CPU 停在任务 A 或 B 的 `hlt` 上，且 IF 为 1。
+- 任务等待时 CPU 停在 `sleep` 系统调用（`sys_sleep`）的 `hlt` 上，且 IF 为 1。
+- IDT 第 `0x80` 项是指向 `isr_syscall` 的 DPL 3 陷阱门；`getpid`、`write`、`sleep` 和未知调用号的返回值正确，`write` 的内容出现在第 6 行。
 - 两个任务轮流运行：第 6 行只有 A 和 B、多次交替、每段不超过 15 个字母，0.5 秒后内容有变化；TR 在任务 A、B 的 TSS 选择子 `0x20` 和 `0x28` 之间切换。
 - 寄存器设为已知值后执行 `ud2`：异常面板显示 `#UD`，EAX～EBP、EIP（`ud2` 的地址）、各段寄存器、CR3 都与预期一致，ESP 落在内核栈内，EFLAGS 的 IF 为 1。
 - 除以零显示 `#DE`，EIP 正好指向 `div` 指令；触发未填写的 IDT 表项显示 `#GP`，错误码为 `0x182`。
@@ -139,7 +140,7 @@ CPU 异常（除零、#GP 等）──中断号 0～31────────�
 
 ### IDT
 
-IDT 有 256 项，每项 8 字节，放在 `.bss` 中。`idt_init()` 把前 48 项填成 32 位中断门，入口地址来自 `isr.asm` 中的地址表，选择子是内核 GDT 的代码段 `0x08`；其余各项保持全 0。最后用 `lidt` 把 IDT 的界限和基址装入 IDTR。
+IDT 有 256 项，每项 8 字节，放在 `.bss` 中。`idt_init()` 把前 48 项填成 32 位中断门，入口地址来自 `isr.asm` 中的地址表，选择子是内核 GDT 的代码段 `0x08`；第 `0x80` 项是系统调用的入口，见下文“系统调用”；其余各项保持全 0。最后用 `lidt` 把 IDT 的界限和基址装入 IDTR。
 
 全 0 的表项类型字段为 0，不是合法的门描述符。若被触发，CPU 在检查存在位之前就产生 13 号一般保护异常，错误码为 `中断号 × 8 + 2`（第 1 位表示错误来自 IDT）。
 
@@ -175,6 +176,33 @@ DS=0x0010 ES=0x0010 FS=0x0010 GS=0x0010 CR2=0x00000000 CR3=0x00018000
 - EFLAGS 中的 `0x10000` 是 RF 位，CPU 在这类故障异常时自动置位。
 - 用 `objdump -d build/kernel.elf` 按 EIP 可以找到出错的那条指令。
 
+## 系统调用
+
+程序执行 `int 0x80` 请求内核服务，约定与 Linux 0.11 相同：EAX 是调用号，EBX、ECX、EDX 依次是第 1～3 个参数，返回值放回 EAX。`syscall.h` 定义调用号和 `write()`、`getpid()`、`sleep()` 等包装函数，相当于 Linux 0.11 `include/unistd.h` 中的 `_syscall3` 等宏；内核一侧在 `syscall.c`。
+
+| 调用号 | 函数 | 作用 | 返回值 |
+| --- | --- | --- | --- |
+| 0 | `write(fd, buf, count)` | 目前只支持 `fd` 为 1：把 `count` 个字符写到第 6 行的任务输出区 | 写出的字节数；`fd` 不对时为 -1 |
+| 1 | `getpid()` | 取当前任务号 | 0、1 或 2 |
+| 2 | `sleep(ticks)` | 等待若干个定时器 tick，期间 CPU 停在 `hlt` | 0 |
+| 其他 | | | -1 |
+
+调用的过程：
+
+```text
+write(1, &c, 1)                       syscall.h：EAX=0，EBX=1，ECX=&c，EDX=1，执行 int $0x80
+  └▶ CPU 查 IDT 第 0x80 项           DPL 3 的陷阱门，跳到 isr_syscall
+      └▶ isr_common                  与其他中断相同：保存寄存器，换成内核数据段
+          └▶ interrupt_dispatch()    中断号 0x80，交给 syscall_dispatch()；不是外设中断，不发 EOI
+              └▶ syscall_dispatch()  按 EAX 查 syscall_table，调用 sys_write(EBX, ECX, EDX)
+                  返回值写进栈上保存的 EAX
+      ◀── isr_common 用 popad 恢复寄存器，EAX 里就是返回值；iretd 回到 int 的下一条指令
+```
+
+- 门的 DPL 决定谁可以用 `int n` 调用它：`int n` 要求当前特权级在数值上不大于门的 DPL。中断门和异常入口都是 DPL 0，用户态程序（特权级 3）执行 `int 0x20` 之类会触发 `#GP`；只有第 `0x80` 项是 DPL 3。Linux 0.11 用 `set_system_gate(0x80, &system_call)` 做同样的设置。
+- 第 `0x80` 项用陷阱门而不是中断门：陷阱门进入时不清 IF，系统调用执行期间定时器照常中断，`sleep` 才能等到 tick 增加，也可以在等待时切换到别的任务。
+- 栈上保存的 EAX 就是 `struct interrupt_frame` 中的 `eax`。`syscall_dispatch()` 改写它，中断返回时 `popad` 把它装回 EAX，这是把返回值交给调用方的方法。
+
 ## 任务切换
 
 `sched.c` 用 x86 的硬件任务切换让任务 A、B 轮流运行，与 Linux 0.11 的做法相同。
@@ -183,7 +211,8 @@ DS=0x0010 ES=0x0010 FS=0x0010 GS=0x0010 CR2=0x00000000 CR3=0x00018000
 - 任务 0 就是 `kmain()` 自己。`sched_init()` 用 `ltr 0x18` 把它登记为当前任务，CPU 第一次切换时才知道把当前寄存器存到哪里。任务 A、B 的 TSS 预先填好入口地址、各自 4 KB 栈的栈顶、`EFLAGS = 0x202`（IF=1）、内核段选择子和当前的 CR3。
 - `switch_to(n)` 执行一条远跳转 `ljmp` 到任务 n 的 TSS 选择子。CPU 把当前寄存器存进当前任务的 TSS，再从目标 TSS 装入全部寄存器，于是目标任务从它上次被切走的地方接着运行；第一次运行的任务从入口开始。Linux 0.11 的 `switch_to` 宏也是一条 `ljmp`。
 - 定时器中断每次调用 `schedule()`，时间片（20 个 tick）用完就切到另一个任务，与 Linux 0.11 的 `do_timer()` 调用 `schedule()` 相同。任务 0 在第一次切换后不再被调度。
-- 任务 A、B 每 2 个 tick 写一个字母，所以每段约 10 个。两个任务共用输出位置，写之前 `cli`、写完 `sti`，保证“读位置、写字符、位置加一”不被切换打断。
+- 任务 A、B 运行同一个函数 `task_main()`：用 `getpid()` 得到任务号，任务 1 写 `A`、任务 2 写 `B`，每写一个字母 `sleep(2)`，所以每段约 10 个。它们只通过系统调用输出和等待，见下文“系统调用”。
+- 两个任务共用输出位置。`task_write_char()` 写之前关中断、写完恢复原来的中断状态，保证“读位置、写字符、位置加一”不被切换打断。
 
 两个顺序上的要求：
 
@@ -299,6 +328,7 @@ loader 进入保护模式时用的是写在 `loader.bin` 里的 GDT。进入内�
 | `interrupt.c` | IDT、8259、中断分发和异常显示 | `kernel/traps.c` |
 | `paging.c` | 页目录和页表，打开分页 | `boot/head.s` 中的 `setup_paging`、`mm/memory.c` |
 | `timer.c` | 8253 定时器 | `kernel/sched.c` 中的 `sched_init()`、`do_timer()` |
+| `syscall.c`、`syscall.h` | 系统调用：内核一侧的分发表，调用方使用的编号和包装函数 | `kernel/system_call.s`、`include/unistd.h` |
 | `sched.c` | 两个任务的 TSS 和硬件任务切换 | `kernel/sched.c` 中的 `schedule()`、`include/linux/sched.h` 中的 `switch_to` |
 | `keyboard.c` | 键盘扫描码转字符并回显，支持 Shift 和 Caps Lock | `kernel/chr_drv/keyboard.S` |
 | `vga.c` | 直接写 VGA 显存、移动硬件光标、整数转字符串 | `kernel/chr_drv/console.c` |

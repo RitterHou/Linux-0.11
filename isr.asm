@@ -7,6 +7,7 @@ bits 32
 
 extern interrupt_dispatch
 global isr_stub_table
+global isr_syscall
 
 ; CPU 只对这几个异常自动压入错误码，其余入口补一个 0，让栈布局保持一致。
 %define HAS_ERROR_CODE(n) ((n) == 8 || ((n) >= 10 && (n) <= 14) || (n) == 17 || (n) == 21 || (n) == 29 || (n) == 30)
@@ -23,6 +24,12 @@ isr%+n:
     jmp isr_common
 %assign n n + 1
 %endrep
+
+; 系统调用入口：IDT 第 0x80 项指向这里。int 指令不压错误码，补一个 0。
+isr_syscall:
+    push dword 0
+    push dword 0x80
+    jmp isr_common
 
 KERNEL_DATA_SEL equ 0x10        ; 与 kernel.h 中的定义一致
 
