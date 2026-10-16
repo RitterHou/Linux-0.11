@@ -16,9 +16,10 @@
 #define SELFTEST_SYSCALLS       9   /* 依次调用各个系统调用，把返回值写到第 7 行 */
 
 /* 20 号起是用户态自检，由任务 B 在特权级 3 执行，见 user.c。 */
-#define SELFTEST_USER_WRITE_KERNEL 20   /* 用户程序写内核的变量：期望 14 号 #PF，错误码 7 */
-#define SELFTEST_USER_PRIVILEGED   21   /* 用户程序执行 cli：期望 13 号 #GP */
+#define SELFTEST_USER_WRITE_KERNEL 20   /* 用户程序写内核的变量：期望因 #PF 被结束，错误码 7 */
+#define SELFTEST_USER_PRIVILEGED   21   /* 用户程序执行 cli：期望因 #GP 被结束 */
 #define SELFTEST_USER_BAD_POINTER  22   /* 用户程序把内核地址交给 write：期望返回 -1 */
+#define SELFTEST_USER_EXIT         23   /* 用户程序调用 exit(7)：期望只剩任务 A 运行 */
 
 #define SELFTEST_IN_USER(n) ((n) >= 20)
 

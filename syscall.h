@@ -15,7 +15,8 @@
 #define SYS_WRITE  0                /* write(fd, buf, count)：fd 1 是第 6 行的任务输出区 */
 #define SYS_GETPID 1                /* getpid()：返回当前任务号 */
 #define SYS_SLEEP  2                /* sleep(ticks)：等待若干个定时器 tick */
-#define SYS_CALLS  3
+#define SYS_EXIT   3                /* exit(code)：结束当前任务，不再返回 */
+#define SYS_CALLS  4
 
 static inline int32_t syscall3(uint32_t nr, uint32_t a, uint32_t b, uint32_t c)
 {
@@ -40,6 +41,13 @@ static inline int32_t getpid(void)
 static inline int32_t sleep(uint32_t ticks)
 {
     return syscall3(SYS_SLEEP, ticks, 0, 0);
+}
+
+static inline void exit(int code)
+{
+    syscall3(SYS_EXIT, (uint32_t)code, 0, 0);
+    for (;;)                        /* 内核不会让它返回；这个循环告诉编译器 exit 不会返回 */
+        ;
 }
 
 #endif

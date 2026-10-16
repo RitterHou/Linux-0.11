@@ -6,6 +6,7 @@
 
 #define VGA_GRAY      0x07          /* 黑底浅灰字 */
 #define VGA_WHITE_RED 0x4F          /* 红底白字，用于异常信息 */
+#define VGA_YELLOW    0x0E          /* 黑底黄字，用于任务结束的消息 */
 
 /* gdt.c：内核自己的 GDT，选择子与 loader 的相同 */
 #define KERNEL_CODE_SEL 0x08
@@ -22,6 +23,17 @@ void vga_putc(char ch);
 void vga_puts(const char *s);
 void vga_write_at(int row, int col, const char *s, uint8_t color);
 char *format_uint(uint32_t value, unsigned base, char buf[12]);
+
+/* vga.c：拼一整行文字再写出 */
+struct text_line {
+    char text[81];
+    int len;
+};
+void line_init(struct text_line *line);
+void line_append(struct text_line *line, const char *s);
+void line_append_dec(struct text_line *line, uint32_t value);
+void line_append_hex(struct text_line *line, const char *name, uint32_t value, int digits);
+void line_show(struct text_line *line, uint8_t color, int row);
 
 /*
  * 中断发生时栈上的内容，从低地址到高地址排列。
@@ -66,6 +78,8 @@ void sched_start(void);
 void schedule(void);
 int current_pid(void);
 void task_write_char(char ch);
+void sched_exit_current(void);
+#define TASK_MESSAGE_ROW 7          /* 任务结束的消息写在第 7 行 */
 
 /* syscall.c：int 0x80 系统调用 */
 void syscall_dispatch(struct interrupt_frame *frame);

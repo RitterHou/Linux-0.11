@@ -45,6 +45,7 @@ static struct tss tss[TASKS];
 static uint8_t task_stacks[TASKS - 1][STACK_SIZE] __attribute__((aligned(16)));
 
 static int current_task;            /* 当前任务号，起始为 0 */
+static int task_alive[TASKS];       /* 任务 1、2 是否还在运行；任务 0 是空闲任务，不在其中 */
 static int scheduling;              /* sched_start() 之后才开始切换 */
 static uint32_t slice_left;
 static int output_pos;              /* 两个任务共用的输出位置 */
@@ -126,6 +127,7 @@ void sched_init(void)
     }
     init_task(1, task_main, cr3);
     init_user_task(2, user_main, (uint32_t)&user_stack[USER_STACK_SIZE], cr3);
+    task_alive[1] = task_alive[2] = 1;
 
     /* 把 kmain 登记为任务 0：第一次切换时，CPU 才知道把当前寄存器存到哪个 TSS。 */
     __asm__ volatile("ltr %w0" : : "r"(TSS_SEL(0)));
@@ -150,11 +152,43 @@ static void switch_to(int next)
     /* 下次切换回本任务时，从这里继续执行。 */
 }
 
-/* 由定时器中断调用。时间片用完就切到另一个任务。 */
+/*
+ * 按 1 → 2 → 1 … 的顺序找下一个还在运行的任务（可能就是当前任务自己）。
+ * 一个都没有时返回 0：任务 0 是 kmain 的 hlt 循环，正好当空闲任务。
+ */
+static int pick_next(void)
+{
+    int n = current_task;
+
+    for (int k = 0; k < TASKS - 1; k++) {
+        n = n % (TASKS - 1) + 1;
+        if (task_alive[n])
+            return n;
+    }
+    return 0;
+}
+
+/* 由定时器中断调用。时间片用完就切到下一个还在运行的任务。 */
 void schedule(void)
 {
     if (!scheduling || --slice_left > 0)
         return;
     slice_left = TASK_SLICE;
-    switch_to(current_task == 1 ? 2 : 1);
+    int next = pick_next();
+    if (next != current_task)       /* 跳到自己的 TSS 会因为它“忙”而触发 #GP */
+        switch_to(next);
+}
+
+/*
+ * 结束当前任务，切到下一个任务，不再返回。用户态程序出错或调用 exit 时由内核调用。
+ * 被结束的任务不会再被调度，它的 TSS 和栈就此闲置。Linux 0.11 的 do_exit() 做的事情更多：
+ * 释放内存页、关闭文件、通知父进程，最后同样调用 schedule() 切走。
+ */
+void sched_exit_current(void)
+{
+    task_alive[current_task] = 0;
+    slice_left = TASK_SLICE;
+    switch_to(pick_next());
+    for (;;)                        /* 不会执行到这里 */
+        __asm__ volatile("hlt");
 }

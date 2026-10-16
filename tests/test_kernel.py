@@ -519,7 +519,9 @@ def test_big_kernel(_m, _elf):
     sectors = (len(kernel) + 511) // 512
     check(sectors > 2 * 36, f"自检内核应超过 2 个柱面（72 个扇区），实际只有 {sectors} 个")
     with Machine(os.path.join(d, "floppy.img")) as m:
-        m.wait_for(lambda mm: len(mm.screen(1)[0]) > 9, what="第 0 行第 9 列的标记")
+        # 等内核写出标记：只看长度不行，SeaBIOS 的版本信息也在第 0 行
+        m.wait_for(lambda mm: mm.screen(1)[0].startswith("ABPKCVIT") and len(mm.screen(1)[0]) > 9,
+                   what="第 0 行第 9 列的标记")
         row0 = m.screen(1)[0]
         check(row0[9] == "Y", f"内核末尾的标记应为 Y，第 0 行是 {row0!r}")
         check_kernel_loaded(m, os.path.join(d, "kernel.elf"), os.path.join(d, "kernel.bin"))
@@ -562,32 +564,56 @@ def test_syscalls(_m, _elf):
         check(rows[6].startswith("tasks: xyz"), f"write 的内容应出现在第 6 行开头：{rows[6]!r}")
 
 
+def message_row(m):
+    return m.screen(8)[7]
+
+
+def check_only_task_a_left(m, what):
+    """任务 B 结束后：没有异常面板，定时器照常走，第 6 行很快被任务 A 的字母写满。"""
+    check(not exception_screen(m)[0], f"{what}后不应出现异常面板：{exception_screen(m)[0]!r}")
+    k1 = ticks_value(m)
+    time.sleep(2.5)                 # 任务 A 每秒写约 50 个字母，2.5 秒足够写满一行
+    check(ticks_value(m) - k1 >= 200, "任务 B 结束后定时器应照常工作")
+    out = task_output(m)
+    check(set(out) == {"A"} and len(out) == 73, f"任务 B 结束后第 6 行应只剩 A：{out!r}")
+    check(m.registers()["TR"] == 0x20, "任务 B 结束后应只剩任务 A（TR=0x20）在运行")
+
+
 def test_user_write_kernel(_m, _elf):
-    """用户程序写内核变量：#PF，错误码 7（存在、写、用户态），CS 为用户代码段"""
+    """用户程序写内核变量：只结束任务 B，消息给出 #PF、错误码 7 和 EIP"""
     d = build_selftest("USER_WRITE_KERNEL")
     table = symbols(os.path.join(d, "kernel.elf"))
     with Machine(os.path.join(d, "floppy.img")) as m:
-        panel = wait_for_panel(m)
-        check(panel[0].startswith("Exception 14 ") and "#PF" in panel[0], f"第 19 行不对：{panel[0]!r}")
-        fields = panel_fields(panel)
-        check(fields.get("error") == 7, f"错误码应为 7：{panel[1]!r}")
-        check(fields.get("CR2") == table["timer_ticks"][0], f"CR2 应为 timer_ticks 的地址：{panel[4]!r}")
-        check(fields.get("CS") == 0x33 and fields.get("SS") == 0x3B, f"出错时应在用户态：{panel[1]!r}")
-        check(in_function(table, "user_main", fields.get("EIP", 0)), f"EIP 应在 user_main 内：{panel[1]!r}")
+        m.wait_for(lambda mm: "killed" in message_row(mm), what="第 7 行的任务结束消息")
+        msg = message_row(m)
+        check(msg.startswith("task 2 killed by #PF page fault"), f"第 7 行不对：{msg!r}")
+        fields = panel_fields([msg])
+        check(fields.get("error") == 7, f"错误码应为 7（存在、写、用户态）：{msg!r}")
+        check(in_function(table, "user_main", fields.get("EIP", 0)), f"EIP 应在 user_main 内：{msg!r}")
+        check(m.attribute(7, 0) == 0x0E, "任务结束的消息应为黄字")
+        check_only_task_a_left(m, "用户程序出错")
 
 
 def test_user_privileged(_m, _elf):
-    """用户程序执行 cli：#GP"""
+    """用户程序执行 cli：只结束任务 B，消息给出 #GP，EIP 指向 cli"""
     d = build_selftest("USER_PRIVILEGED")
-    table = symbols(os.path.join(d, "kernel.elf"))
     with Machine(os.path.join(d, "floppy.img")) as m:
-        panel = wait_for_panel(m)
-        check(panel[0].startswith("Exception 13 ") and "#GP" in panel[0], f"第 19 行不对：{panel[0]!r}")
-        fields = panel_fields(panel)
-        check(fields.get("CS") == 0x33, f"出错时应在用户态：{panel[1]!r}")
-        check(instruction_at(os.path.join(d, "kernel.elf"), fields.get("EIP", 0)) == "cli",
-              f"EIP 应指向 cli：{panel[1]!r}")
-        check(in_function(table, "user_main", fields["EIP"]), "EIP 应在 user_main 内")
+        m.wait_for(lambda mm: "killed" in message_row(mm), what="第 7 行的任务结束消息")
+        msg = message_row(m)
+        check(msg.startswith("task 2 killed by #GP general protection"), f"第 7 行不对：{msg!r}")
+        eip = panel_fields([msg]).get("EIP", 0)
+        check(instruction_at(os.path.join(d, "kernel.elf"), eip) == "cli", f"EIP 应指向 cli：{msg!r}")
+        check_only_task_a_left(m, "用户程序出错")
+
+
+def test_user_exit(_m, _elf):
+    """用户程序调用 exit(7)：任务 B 结束，其余照常"""
+    d = build_selftest("USER_EXIT")
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        m.wait_for(lambda mm: "exited" in message_row(mm), what="第 7 行的任务结束消息")
+        msg = message_row(m)
+        check(msg == "task 2 exited with code 7", f"第 7 行不对：{msg!r}")
+        check_only_task_a_left(m, "exit")
 
 
 def test_user_bad_pointer(_m, _elf):
@@ -607,7 +633,8 @@ SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, te
                 test_tasks_alternate]
 SEPARATE_TESTS = [test_syscalls, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,
-                  test_big_kernel, test_user_write_kernel, test_user_privileged, test_user_bad_pointer]
+                  test_big_kernel, test_user_write_kernel, test_user_privileged,
+                  test_user_bad_pointer, test_user_exit]
 
 
 def main():

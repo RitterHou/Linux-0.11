@@ -26,6 +26,7 @@ QEMU 打开窗口后应看到：
 | 4 | `ticks: N` | 定时器中断，每秒加 100 |
 | 5 | `paging: on, 0xC0000000 -> 0xB8000` | 分页已打开 |
 | 6 | `tasks: AAAAAAAAAABBBBBBBBBB…` | 任务 A（内核态）和任务 B（用户态）轮流运行，都通过 `write` 系统调用写自己的字母，每段约 10 个；写满一行后从行首覆盖 |
+| 7 | 平时为空 | 任务结束时的黄色消息，例如 `task 2 killed by #PF page fault: …` 或 `task 2 exited with code 7` |
 | 8～18 | `keyboard: ` 和输入的内容 | 键盘回显窗口：在 QEMU 窗口里打字会回显在这里，写满后整个窗口向上滚动一行，窗口外的内容不受影响 |
 | 19～23 | 平时为空 | 出现 CPU 异常时，红底白字的异常面板，见下文“异常” |
 
@@ -55,7 +56,7 @@ make test
 - 任务等待时 CPU 停在 `sleep` 系统调用（`sys_sleep`）的 `hlt` 上，且 IF 为 1。
 - GDT 第 6、7 项是 DPL 3 的用户代码段和数据段；只有用户程序所在的页打开了用户位，内核的代码、数据、IDT、TSS 和显存所在的页都没有。
 - 任务 B 运行在用户态：它的内核栈顶是从特权级 3 进入系统调用时 CPU 压入的现场（CS 为 `0x33`、SS 为 `0x3B`、返回地址在 `user_main` 内、ESP 在用户栈内、IOPL 为 0），TSS 中的 `ss0:esp0` 指向这个内核栈。
-- 用户程序写内核变量显示 `#PF`，错误码 7（页存在、写操作、来自用户态），CR2 是该变量的地址；执行 `cli` 显示 `#GP`；把内核地址交给 `write` 得到 -1。
+- 用户程序写内核变量或执行 `cli` 时，只有任务 B 被结束：第 7 行给出 `#PF`（错误码 7：页存在、写操作、来自用户态）或 `#GP` 以及出错指令的 EIP，不出现异常面板，定时器照常走，第 6 行很快只剩 A，TR 停在任务 A；用户程序调用 `exit(7)` 时同样只剩任务 A，第 7 行为 `task 2 exited with code 7`；把内核地址交给 `write` 得到 -1。
 - IDT 第 `0x80` 项是指向 `isr_syscall` 的 DPL 3 陷阱门；`getpid`、`write`、`sleep` 和未知调用号的返回值正确，`write` 的内容出现在第 6 行。
 - 两个任务轮流运行：第 6 行只有 A 和 B、多次交替、每段不超过 15 个字母，0.5 秒后内容有变化；TR 在任务 A、B 的 TSS 选择子 `0x20` 和 `0x28` 之间切换。
 - 寄存器设为已知值后执行 `ud2`：异常面板显示 `#UD`，EAX～EBP、EIP（`ud2` 的地址）、各段寄存器、CR3 都与预期一致，ESP 落在内核栈内，EFLAGS 的 IF 为 1。
@@ -189,6 +190,7 @@ DS=0x0010 ES=0x0010 FS=0x0010 GS=0x0010 CR2=0x00000000 CR3=0x00018000
 | 0 | `write(fd, buf, count)` | 目前只支持 `fd` 为 1：把 `count` 个字符写到第 6 行的任务输出区 | 写出的字节数；`fd` 不对、或用户态传来的 `buf` 不在用户程序的页内时为 -1 |
 | 1 | `getpid()` | 取当前任务号 | 0、1 或 2 |
 | 2 | `sleep(ticks)` | 等待若干个定时器 tick，期间 CPU 停在 `hlt` | 0 |
+| 3 | `exit(code)` | 结束当前任务，在第 7 行写出结束代码 | 不返回 |
 | 其他 | | | -1 |
 
 调用的过程：
@@ -237,7 +239,14 @@ x86 有 4 个特权级，这里只用 0（内核态）和 3（用户态）。当
 
 内核能读写所有内存，所以系统调用不能盲目相信用户传来的指针。若不检查，用户程序把内核地址交给 `write`，内核就会替它把内核内存印出来。`sys_write()` 对来自用户态的调用用 `user_range_ok()` 检查 `buf`～`buf + count` 是否完全落在用户程序的页内，不在就返回 -1。
 
-用户态程序出错时，目前和内核出错一样显示异常面板并停机；面板上的 CS 为 `0x0033`，表示出错时在用户态。
+### 用户态出错只结束出错的任务
+
+内核自己出错时无法恢复，只能显示异常面板并停机；但用户程序出错是用户程序的事，不应该拖垮整个系统。`interrupt_dispatch()` 收到 0～31 号异常时先看栈上保存的 CS：
+
+- 低 2 位是 3，说明出错时在用户态。`user_exception()` 在第 7 行用黄字写出 `task 2 killed by #PF page fault: EIP=… error=…`，然后调用 `sched_exit_current()` 结束这个任务。
+- 否则是内核自己出错，照旧显示异常面板并停机。
+
+`sched_exit_current()` 把当前任务标记为已结束，再切到下一个还在运行的任务，不再返回；被结束的任务不会再被调度，它的 TSS 和栈就此闲置。`exit(code)` 系统调用走的是同一条路，只是第 7 行写 `task 2 exited with code 7`。Linux 0.11 的 `kernel/traps.c` 中，各异常处理函数调用 `die()`：打印寄存器后调用 `do_exit(11)` 结束当前进程（11 是 `SIGSEGV` 的编号）；`do_exit()` 还要释放内存页、关闭文件、通知父进程，最后同样调用 `schedule()` 切走。
 
 ## 任务切换
 
@@ -246,7 +255,8 @@ x86 有 4 个特权级，这里只用 0（内核态）和 3（用户态）。当
 - 每个任务有一个 TSS（任务状态段，104 字节），里面存着这个任务的全部寄存器：EIP、ESP、EFLAGS、通用寄存器、段寄存器和 CR3。GDT 第 3、4、5 项是任务 0、A、B 的 TSS 描述符，选择子分别为 `0x18`、`0x20`、`0x28`。
 - 任务 0 就是 `kmain()` 自己。`sched_init()` 用 `ltr 0x18` 把它登记为当前任务，CPU 第一次切换时才知道把当前寄存器存到哪里。任务 A、B 的 TSS 预先填好入口地址、各自 4 KB 栈的栈顶、`EFLAGS = 0x202`（IF=1）、内核段选择子和当前的 CR3。
 - `switch_to(n)` 执行一条远跳转 `ljmp` 到任务 n 的 TSS 选择子。CPU 把当前寄存器存进当前任务的 TSS，再从目标 TSS 装入全部寄存器，于是目标任务从它上次被切走的地方接着运行；第一次运行的任务从入口开始。Linux 0.11 的 `switch_to` 宏也是一条 `ljmp`。
-- 定时器中断每次调用 `schedule()`，时间片（20 个 tick）用完就切到另一个任务，与 Linux 0.11 的 `do_timer()` 调用 `schedule()` 相同。任务 0 在第一次切换后不再被调度。
+- 定时器中断每次调用 `schedule()`，时间片（20 个 tick）用完就按 1 → 2 → 1 … 的顺序切到下一个还在运行的任务，与 Linux 0.11 的 `do_timer()` 调用 `schedule()` 相同。下一个任务就是自己时不切换：远跳转到自己的 TSS 会因为它处于“忙”状态而触发 `#GP`。
+- 任务 0 在第一次切换后不再被调度，除非任务 A、B 都已结束：那时切回任务 0，它从上次被切走的定时器中断里返回，停在 `kmain()` 的 `hlt` 循环中当空闲任务。Linux 0.11 的任务 0 也是在没有别的进程可运行时才被调度。
 - 任务 A 运行内核里的 `task_main()`，任务 B 运行用户程序 `user.c` 里的 `user_main()`，两者做同样的事：用 `getpid()` 得到任务号，任务 1 写 `A`、任务 2 写 `B`，每写一个字母 `sleep(2)`，所以每段约 10 个。它们只通过系统调用输出和等待，见上文“系统调用”和下文“用户态”。
 - 两个任务共用输出位置。`task_write_char()` 写之前关中断、写完恢复原来的中断状态，保证“读位置、写字符、位置加一”不被切换打断。
 
@@ -347,7 +357,8 @@ loader 进入保护模式时用的是写在 `loader.bin` 里的 GDT。进入内�
 - 若要亲眼看到除零异常，运行 `make run BUILD=build/selftest/divide_error SELFTEST=DIVIDE_ERROR`。异常面板会出现 `Exception 0 #DE divide error` 和出错指令的 `EIP`，用 `objdump -d build/selftest/divide_error/kernel.elf` 可以看到那个地址正是 `divl`。`selftest.c` 中用的是内联汇编：如果写成 C 的 `1 / zero`，clang 会把它优化成不用除法指令的比较，根本不会触发异常。
 - 若要亲眼看到缺页异常，运行 `make run BUILD=build/selftest/unmapped SELFTEST=UNMAPPED`（读未映射的 `0xD0000000`）或 `make run BUILD=build/selftest/null_write SELFTEST=NULL_WRITE`（写空指针）。异常面板的第 2 行显示错误码，最后一行显示 CR2。
 - 若要亲眼看到完整的寄存器面板，运行 `make run BUILD=build/selftest/register_dump SELFTEST=REGISTER_DUMP`。`selftest.c` 先把 EAX～EBP 设为 `0x11111111`～`0x77777777`，再执行 `ud2`。
-- 若要看用户态程序越权，运行 `make run BUILD=build/selftest/user_write_kernel SELFTEST=USER_WRITE_KERNEL`（写内核变量 `timer_ticks`）或 `make run BUILD=build/selftest/user_privileged SELFTEST=USER_PRIVILEGED`（执行 `cli`）。异常面板上 CS 为 `0x0033`、SS 为 `0x003B`，前者错误码为 7。
+- 若要看用户态程序越权，运行 `make run BUILD=build/selftest/user_write_kernel SELFTEST=USER_WRITE_KERNEL`（写内核变量 `timer_ticks`）或 `make run BUILD=build/selftest/user_privileged SELFTEST=USER_PRIVILEGED`（执行 `cli`）。第 7 行出现黄色的结束消息，任务 B 不再运行，第 6 行很快只剩 A；内核和任务 A 照常运行，不出现异常面板。
+- 若要看用户程序正常退出，运行 `make run BUILD=build/selftest/user_exit SELFTEST=USER_EXIT`。用户程序写出 `bye` 后调用 `exit(7)`，第 7 行为 `task 2 exited with code 7`。
 - 若要看内核拒绝用户传来的坏指针，运行 `make run BUILD=build/selftest/user_bad_pointer SELFTEST=USER_BAD_POINTER`。用户程序把内核地址交给 `write`，得到 -1 后写一个 `K`，第 6 行会出现一个 `K`。把 `syscall.c` 中 `sys_write()` 的 `user_range_ok()` 检查删掉再运行，`K` 就变成了 `X`，前面还多出一个内核代码的字节。
 - 若要让任务 B 回到内核态，把 `sched.c` 中的 `init_user_task(2, …)` 改成 `init_task(2, task_main, cr3)`。第 6 行照常交替出现 A、B，但第 0 行不再出现 `U`。
 - 若要换一个位置写 `V`，修改 `kernel.c` 中 `((volatile uint16_t *)VGA_ALIAS)[5]` 的下标，例如改成 `80 * 3`，`V` 就会出现在第 3 行行首。下标超过 2047（一页 4 KB 的范围）时会触发缺页，因为别名只映射了一页。
@@ -372,7 +383,7 @@ loader 进入保护模式时用的是写在 `loader.bin` 里的 GDT。进入内�
 | `timer.c` | 8253 定时器 | `kernel/sched.c` 中的 `sched_init()`、`do_timer()` |
 | `syscall.c`、`syscall.h` | 系统调用：内核一侧的分发表，调用方使用的编号和包装函数 | `kernel/system_call.s`、`include/unistd.h` |
 | `user.c` | 用户程序：任务 B 在用户态运行的 `user_main()` 和它的用户栈 | 无（Linux 0.11 的用户程序是磁盘上的可执行文件） |
-| `sched.c` | 两个任务的 TSS 和硬件任务切换 | `kernel/sched.c` 中的 `schedule()`、`include/linux/sched.h` 中的 `switch_to` |
+| `sched.c` | 两个任务的 TSS、硬件任务切换和结束任务 | `kernel/sched.c` 中的 `schedule()`、`include/linux/sched.h` 中的 `switch_to`、`kernel/exit.c` 中的 `do_exit()` |
 | `keyboard.c` | 键盘扫描码转字符并回显，支持 Shift 和 Caps Lock | `kernel/chr_drv/keyboard.S` |
 | `vga.c` | 直接写 VGA 显存、移动硬件光标、整数转字符串 | `kernel/chr_drv/console.c` |
 | `kernel.h`、`io.h` | 各模块共用的声明；端口读写 `inb`、`outb` | `include/asm/io.h` |

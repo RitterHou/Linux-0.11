@@ -31,6 +31,9 @@ void user_main(void)
     /* 把内核代码的地址交给 write：内核必须拒绝，否则用户程序就能借 write 读出内核内存 */
     int32_t ret = write(1, (const void *)0x10000, 1);
     write(1, ret == -1 ? "K" : "X", 1);
+#elif SELFTEST == SELFTEST_USER_EXIT
+    write(1, "bye", 3);
+    exit(7);
 #else
 #error "未知的用户态 SELFTEST"
 #endif

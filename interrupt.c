@@ -111,42 +111,8 @@ static const char *const exception_names[20] = {
 /* 异常面板占第 19～23 行，在键盘回显窗口（第 8～18 行）下面，滚动时不会被移走。 */
 #define PANEL_ROW 19
 
-/* 拼一行面板文字。不用 = { 0 } 初始化，因为编译器可能为此生成对 memset 的调用，而内核里没有 memset。 */
-struct panel_line {
-    char text[81];
-    int len;
-};
-
-static void line_append(struct panel_line *line, const char *s)
-{
-    while (*s && line->len < 80)
-        line->text[line->len++] = *s++;
-    line->text[line->len] = '\0';
-}
-
-/* 追加 "名字=0x十六进制 "。digits 为 8 或 4（段寄存器只有 16 位）。 */
-static void line_append_hex(struct panel_line *line, const char *name, uint32_t value, int digits)
-{
-    char buf[12];
-
-    line_append(line, name);
-    line_append(line, "=0x");
-    line_append(line, format_uint(value, 16, buf) + (8 - digits));
-    line_append(line, " ");
-}
-
-/* 补空格到 80 列再写出，让面板成为一整块红底。 */
-static void line_flush(struct panel_line *line, int row)
-{
-    while (line->len < 80)
-        line_append(line, " ");
-    vga_write_at(row, 0, line->text, VGA_WHITE_RED);
-    line->len = 0;
-    line->text[0] = '\0';
-}
-
 /*
- * CPU 异常目前都无法恢复：在第 19～23 行用红底白字显示异常号和出错时的全部寄存器，然后停机。
+ * 内核态发生的 CPU 异常无法恢复：在第 19～23 行用红底白字显示异常号和出错时的全部寄存器，然后停机。
  * 寄存器的值来自栈上的 struct interrupt_frame，也就是异常发生那一刻的状态。
  */
 static void exception_panic(const struct interrupt_frame *frame)
@@ -154,7 +120,7 @@ static void exception_panic(const struct interrupt_frame *frame)
     char buf[12];
     const char *name = frame->vector < 20 ? exception_names[frame->vector] : "reserved";
     uint32_t cr2, cr3;
-    struct panel_line line;
+    struct text_line line;
 
     __asm__ volatile("movl %%cr2, %0" : "=r"(cr2));     /* 缺页时 CPU 把出错的虚拟地址放在这里 */
     __asm__ volatile("movl %%cr3, %0" : "=r"(cr3));
@@ -171,32 +137,31 @@ static void exception_panic(const struct interrupt_frame *frame)
         __asm__ volatile("movl %%ss, %0" : "=r"(ss));
     }
 
-    line.len = 0;
-    line.text[0] = '\0';
+    line_init(&line);
     line_append(&line, "Exception ");
     line_append(&line, format_uint(frame->vector, 10, buf));
     line_append(&line, " ");
     line_append(&line, name);
-    line_flush(&line, PANEL_ROW);
+    line_show(&line, VGA_WHITE_RED, PANEL_ROW);
 
     line_append_hex(&line, "EIP", frame->eip, 8);
     line_append_hex(&line, "CS", frame->cs, 4);
     line_append_hex(&line, "EFLAGS", frame->eflags, 8);
     line_append_hex(&line, "error", frame->error_code, 8);
     line_append_hex(&line, "SS", ss, 4);
-    line_flush(&line, PANEL_ROW + 1);
+    line_show(&line, VGA_WHITE_RED, PANEL_ROW + 1);
 
     line_append_hex(&line, "EAX", frame->eax, 8);
     line_append_hex(&line, "EBX", frame->ebx, 8);
     line_append_hex(&line, "ECX", frame->ecx, 8);
     line_append_hex(&line, "EDX", frame->edx, 8);
-    line_flush(&line, PANEL_ROW + 2);
+    line_show(&line, VGA_WHITE_RED, PANEL_ROW + 2);
 
     line_append_hex(&line, "ESI", frame->esi, 8);
     line_append_hex(&line, "EDI", frame->edi, 8);
     line_append_hex(&line, "EBP", frame->ebp, 8);
     line_append_hex(&line, "ESP", esp, 8);
-    line_flush(&line, PANEL_ROW + 3);
+    line_show(&line, VGA_WHITE_RED, PANEL_ROW + 3);
 
     line_append_hex(&line, "DS", frame->ds, 4);
     line_append_hex(&line, "ES", frame->es, 4);
@@ -204,10 +169,31 @@ static void exception_panic(const struct interrupt_frame *frame)
     line_append_hex(&line, "GS", frame->gs, 4);
     line_append_hex(&line, "CR2", cr2, 8);
     line_append_hex(&line, "CR3", cr3, 8);
-    line_flush(&line, PANEL_ROW + 4);
+    line_show(&line, VGA_WHITE_RED, PANEL_ROW + 4);
 
     for (;;)
         __asm__ volatile("cli; hlt");
+}
+
+/*
+ * 用户态程序出错：只结束出错的任务，内核和其他任务照常运行。
+ * 在第 7 行写一条消息，说明哪个任务因为什么异常、在哪条指令被结束。
+ */
+static void user_exception(const struct interrupt_frame *frame)
+{
+    struct text_line line;
+    const char *name = frame->vector < 20 ? exception_names[frame->vector] : "reserved";
+
+    line_init(&line);
+    line_append(&line, "task ");
+    line_append_dec(&line, (uint32_t)current_pid());
+    line_append(&line, " killed by ");
+    line_append(&line, name);
+    line_append(&line, ": ");
+    line_append_hex(&line, "EIP", frame->eip, 8);
+    line_append_hex(&line, "error", frame->error_code, 8);
+    line_show(&line, VGA_YELLOW, TASK_MESSAGE_ROW);
+    sched_exit_current();
 }
 
 void interrupt_dispatch(struct interrupt_frame *frame)
@@ -215,7 +201,9 @@ void interrupt_dispatch(struct interrupt_frame *frame)
     uint32_t vector = frame->vector;
 
     if (vector < IRQ_BASE) {
-        exception_panic(frame);
+        if (from_user_mode(frame))
+            user_exception(frame);  /* 不会返回 */
+        exception_panic(frame);     /* 内核自己出错，无法恢复 */
         return;
     }
     if (vector == SYSCALL_VECTOR) {
