@@ -392,11 +392,26 @@ def test_other_segments(_m, _elf):
         raise TestFailure("10 次采样都没有停在 selftest_run 的 hlt 上")
 
 
+def test_big_kernel(_m, _elf):
+    """内核跨越多个磁道和柱面时，loader 也能完整读入"""
+    d = build_selftest("BIG_KERNEL")
+    with open(os.path.join(d, "kernel.bin"), "rb") as f:
+        kernel = f.read()
+    sectors = (len(kernel) + 511) // 512
+    check(sectors > 2 * 36, f"自检内核应超过 2 个柱面（72 个扇区），实际只有 {sectors} 个")
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        m.wait_for(lambda mm: len(mm.screen(1)[0]) > 8, what="第 0 行第 8 列的标记")
+        row0 = m.screen(1)[0]
+        check(row0[8] == "Y", f"内核末尾的标记应为 Y，第 0 行是 {row0!r}")
+        check(m.read_memory(0x10000, len(kernel)) == kernel, f"0x10000 处的 {len(kernel)} 字节与 kernel.bin 不一致")
+
+
 # 前几项共用一台正常启动的虚拟机；其余各自启动自检内核。
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_idle_in_hlt, test_tasks_alternate]
 SEPARATE_TESTS = [test_divide_error, test_bad_gate, test_unmapped_read, test_null_write,
-                  test_clobber_loader, test_other_segments]
+                  test_clobber_loader, test_other_segments,
+                  test_big_kernel]
 
 
 def main():
