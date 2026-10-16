@@ -28,7 +28,7 @@ KERNEL_CFLAGS += -DSELFTEST=SELFTEST_$(SELFTEST)
 endif
 
 KERNEL_OBJS := $(addprefix $(BUILD)/, entry.o isr.o kernel.o vga.o \
-	interrupt.o timer.o keyboard.o selftest.o)
+	interrupt.o paging.o timer.o keyboard.o selftest.o)
 KERNEL_HEADERS := kernel.h io.h
 
 .PHONY: all run test clean

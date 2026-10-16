@@ -1,4 +1,4 @@
-# 两阶段引导与 C 内核：从 A 到中断
+# 两阶段引导与 C 内核
 
 这是 `learning` 分支上的独立实验。`main` 分支保留 Linux 0.11 原始源码。
 
@@ -21,9 +21,10 @@ QEMU 打开窗口后应看到：
 
 | 行 | 内容 | 来源 |
 | --- | --- | --- |
-| 0 | `ABPKCI` | `A` 第一阶段；`B` 第二阶段在实模式下调用 BIOS；`P` 第二阶段进入保护模式后写显存；`K` 内核汇编入口 `entry.asm`；`C` C 函数 `kmain()`；`I` 打开中断之后 |
+| 0 | `ABPKCVI` | `A` 第一阶段；`B` 第二阶段在实模式下调用 BIOS；`P` 第二阶段进入保护模式后写显存；`K` 内核汇编入口 `entry.asm`；`C` C 函数 `kmain()`；`V` 打开分页后通过虚拟地址 `0xC0000000` 写入；`I` 打开中断之后 |
 | 2 | `Hello from kmain() in C!` | `kmain()` |
 | 4 | `ticks: N` | 定时器中断，每秒加 100 |
+| 5 | `paging: on, 0xC0000000 -> 0xB8000` | 分页已打开 |
 | 6 | `keyboard: ` | 键盘中断，在窗口里打字会回显在这里 |
 
 键盘支持字母、数字、常用符号、空格、回车和退格，暂不支持 Shift 等组合键。打字前先点一下 QEMU 窗口，让它获得键盘焦点。
@@ -45,10 +46,12 @@ make test
 `tests/test_kernel.py` 只用 Python 标准库。它在后台启动没有窗口的 QEMU，通过 QEMU 监视器读取显存和寄存器、模拟按键，再用系统自带的 `objdump` 查符号地址和反汇编。目前检查：
 
 - 启动后各行的输出；`0x10000` 处的内存与 `kernel.bin` 一致；处于保护模式，代码段为 `0x08`。
+- 分页已打开，CR3 指向 `page_directory`；用监视器的 `gva2gpa` 逐个检查虚拟地址：`0xC0000000` 映射到 `0xB8000`，第 0 页和 16 MB 以上未映射，其余一一对应。
 - 定时器频率约为 100 Hz（允许 90～110）。
 - 模拟按键后的回显、回车和退格，退格不会删到上一行。
 - 空闲时 CPU 停在 `kmain()` 的 `hlt` 上，且 IF 为 1。
 - 除以零显示 `#DE`，EIP 正好指向 `div` 指令；触发未填写的 IDT 表项显示 `#GP`，错误码为 `0x182`。
+- 读未映射的 `0xD0000000` 显示 `#PF`，错误码 0，CR2 为该地址；写空指针显示 `#PF`，错误码 2（写操作），CR2 为 0。
 
 最后两项需要故意制造异常。测试脚本会用 `make BUILD=build/selftest/<名称> SELFTEST=<名称>` 另外构建自检内核：`SELFTEST` 非空时，`selftest.c` 中对应的代码会被编译进去，在打开中断后触发异常。正常构建不定义 `SELFTEST`，`selftest_run()` 是空函数。
 
@@ -70,20 +73,21 @@ make test
 12. 执行 `jmp eax` 跳到 `0x10000`，即内核入口 `_start`（`entry.asm`）。
 13. `_start` 把 ESP 换成内核自己的 4 KB 栈，把 `.bss` 清零，向 `0xB8006` 写入 `K`，然后 `call kmain`。
 14. `kmain()`（`kernel.c`）从第 0 行第 4 列写入 `C`，再换两行打印 `Hello from kmain() in C!`。
-15. `kmain()` 依次调用 `idt_init()`、`pic_init()`、`timer_init(100)`，装好 IDT、重新设置 8259、把定时器设为每秒 100 次，然后写出第 4、6 行的标签。
-16. `sti` 打开中断，在第 0 行写入 `I`，然后进入 `hlt` 循环。此后 CPU 平时停在 `hlt`，每来一个定时器或键盘中断就醒来处理一次，处理完又回到循环里。
+15. `kmain()` 调用 `idt_init()` 装好 IDT，再调用 `paging_init()` 建立页表并打开分页，然后通过虚拟地址 `0xC0000000` 在第 0 行写入 `V`，在第 5 行写出分页信息。
+16. `kmain()` 调用 `pic_init()`、`timer_init(100)`，重新设置 8259、把定时器设为每秒 100 次，然后写出第 4、6 行的标签。
+17. `sti` 打开中断，在第 0 行写入 `I`，然后进入 `hlt` 循环。此后 CPU 平时停在 `hlt`，每来一个定时器或键盘中断就醒来处理一次，处理完又回到循环里。
 
 内核必须在第 7 步、也就是仍处于实模式时读入：进入保护模式后 BIOS 的 `int 0x13` 就不能再用了，而我们还没有自己的磁盘驱动。Linux 0.11 也是这样做的：`bootsect.s` 在实模式下把内核读到 `0x10000`（`SYSSEG = 0x1000`），`head.s` 设好栈后再跳进 C 的 `main()`。
 
-现在内核已经能响应定时器、键盘中断和 CPU 异常，但还没有建立分页。下一步：建立页目录和页表，一一对应映射物理内存，打开 CR0 的 PG 位。
+现在内核已经能响应定时器、键盘中断和 CPU 异常，并打开了分页，但始终只有一条执行流。下一步：让两个任务在定时器中断的驱动下轮流运行。
 
 ## 内核的构建过程
 
 ```text
 entry.asm、isr.asm ──nasm -f elf32──▶ *.o ─┐
                                           ├─ ld.lld + linker.ld ─▶ kernel.bin（写进软盘）
-kernel.c、vga.c、interrupt.c、            │                    └─▶ kernel.elf（带符号，供调试）
-timer.c、keyboard.c ──clang -c─────▶ *.o ─┘
+kernel.c、vga.c、interrupt.c、paging.c、 │                    └─▶ kernel.elf（带符号，供调试）
+timer.c、keyboard.c、selftest.c ─clang -c─▶ *.o ─┘
 ```
 
 - `clang --target=i386-elf` 让系统自带的 clang 生成 32 位 x86 的 ELF 目标文件，而不是 macOS 程序。其他编译选项的作用写在 `Makefile` 的注释里，核心是 `-ffreestanding`：没有标准库，不能用 `printf`，也没有 `main` 入口。
@@ -96,17 +100,17 @@ timer.c、keyboard.c ──clang -c─────▶ *.o ─┘
 
 | 段 | 地址 | 内容 |
 | --- | --- | --- |
-| `.text` | `0x10000` 起，约 2 KB | `_start` 在最前，后面是 48 个中断入口和各个 C 函数 |
+| `.text` | `0x10000` 起，约 2.3 KB | `_start` 在最前，后面是 48 个中断入口和各个 C 函数 |
 | `.rodata` | 紧随 `.text` | 中断入口地址表、异常名称、扫描码表、字符串 |
-| `.bss` | 紧随其后，约 6 KB | 4 KB 内核栈、2 KB 的 IDT、光标位置、`timer_ticks` 等 |
+| `.bss` | `0x11000` 起，约 32 KB | 4 KB 内核栈、2 KB 的 IDT、页目录和 5 张页表（共 24 KB）、光标位置、`timer_ticks` 等。页目录和页表要求 4 KB 对齐，所以 `.bss` 从下一个 4 KB 边界开始 |
 
 ## 为什么要清零 .bss
 
 C 语言规定，没有初值的全局变量和 `static` 变量初值为 0。编译器把它们放进 `.bss` 段，`kernel.bin` 里不存它们的内容，以节省空间。在普通程序里，由操作系统在加载时清零；我们的内核没有人帮忙，只能在 `_start` 中自己用 `rep stosb` 清零。
 
-现在依赖这一点的有 `timer_ticks`（ticks 从 0 开始数）、`keyboard.c` 中的 `line_length`，以及 IDT 中没有填写的 48～255 号表项（全 0 才是确定的“非法门”）。
+现在依赖这一点的有 `timer_ticks`（ticks 从 0 开始数）、`keyboard.c` 中的 `line_length`、IDT 中没有填写的 48～255 号表项（全 0 才是确定的“非法门”），以及页目录中没有用到的 1019 项：它们的存在位必须是 0，否则 CPU 会把垃圾当成页表地址，访问那些虚拟地址时读写到任意物理内存。
 
-在 QEMU 中去掉清零，目前看不出差别：SeaBIOS 开机自检时会把常规内存清零，开机前写进内存的值到内核运行时都已变成 0；`timer_ticks` 和 `line_length` 位于 `0x12000` 之后，不在 loader 从磁盘读入的范围内；IDT 中未填写的表项即使变成垃圾，目前也不会被触发。第 3 步（提交 `a716a38`）的 README 中有一个能看到效果的实验：当时光标变量没有被显式赋值，又位于读入范围内，往镜像里写入垃圾后输出就乱了。在真实硬件上，或由别的引导程序加载时，内存不一定是 0，所以清零不能省。
+在 QEMU 中去掉清零，目前看不出差别：SeaBIOS 开机自检时会把常规内存清零，开机前写进内存的值到内核运行时都已变成 0；这些变量和表都位于 `0x12000` 之后，不在 loader 从磁盘读入的范围内。第 3 步（提交 `a716a38`）的 README 中有一个能看到效果的实验：当时光标变量没有被显式赋值，又位于读入范围内，往镜像里写入垃圾后输出就乱了。在真实硬件上，或由别的引导程序加载时，内存不一定是 0，所以清零不能省。
 
 ## 中断
 
@@ -147,6 +151,29 @@ IDT 有 256 项，每项 8 字节，放在 `.bss` 中。`idt_init()` 把前 48 �
 ### 异常
 
 0～31 号是 CPU 异常，目前都无法恢复。`exception_panic()` 在第 10、11 行用红底白字显示异常号、名称、出错指令的 EIP 和错误码，然后停机。可以用 `objdump -d build/kernel.elf` 按 EIP 找到出错的那条指令。
+
+## 分页
+
+`paging.c` 中的 `paging_init()` 建立两级页表，装入 CR3，再打开 CR0 的 PG 位。此后 CPU 访问的每个地址都是虚拟地址，要查表才能得到物理地址：
+
+```text
+虚拟地址 0xC0000004 = 1100000000 0000000000 000000000100
+                       └ 高 10 位 ┘ └ 中 10 位 ┘ └ 低 12 位 ┘
+                         768          0            4
+CR3 → 页目录第 768 项 → alias_table → 第 0 项 → 物理页 0xB8000 → + 4 = 0xB8004
+```
+
+| 虚拟地址 | 物理地址 | 说明 |
+| --- | --- | --- |
+| `0x00000000`～`0x00000FFF` | 未映射 | 第 0 页，用来捕获空指针 |
+| `0x00001000`～`0x00FFFFFF` | 与虚拟地址相同 | 前 16 MB 一一对应，4 张页表 |
+| `0xC0000000`～`0xC0000FFF` | `0xB8000`～`0xB8FFF` | 显存的第二个地址，1 张页表 |
+| 其余 | 未映射 | 访问会触发 14 号缺页异常 |
+
+- 打开分页的那一刻，下一条指令的地址已经要经过页表翻译。前 16 MB 一一对应，所以代码、栈、显存和 GDT 的地址都不变，内核照常运行。Linux 0.11 的 `head.s` 同样一一对应地映射前 16 MB，不过它把页目录放在物理地址 0，我们放在 `.bss` 里。
+- 页目录项和页表项的低 12 位是标志，这里只用到存在位（1）和可写位（2）。存在位为 0 时访问该地址，CPU 产生 14 号缺页异常，把出错的虚拟地址放进 CR2，错误码的第 0 位表示页是否存在、第 1 位表示是不是写操作。`exception_panic()` 遇到缺页时会额外显示 CR2。
+- 第 0 页不映射后，`*(int *)0 = 1` 这样的空指针写入会立即触发缺页，而不是悄悄改写物理地址 0。
+- 写 `0xC0000000` 和写 `0xB8000` 改的是同一块显存。第 0 行的 `V` 就是 `kmain()` 通过 `0xC0000000` 写进去的。
 
 ## 磁盘与内存布局
 
@@ -199,6 +226,8 @@ CHS 的扇区号从 1 开始。镜像写入命令中的 `seek=1` 跳过一个 51
 - 若要观察忘记发 EOI 的后果，将 `interrupt.c` 中 `interrupt_dispatch()` 末尾的 `pic_send_eoi(vector);` 暂时注释掉。`ticks` 停在 1，键盘也没有反应：8259 一直等着 CPU 回复，不再送来定时器和优先级更低的键盘中断。实验后改回。
 - 若要改变时钟频率，修改 `kernel.c` 中的 `TIMER_HZ`。改成 50，`ticks` 每秒加 50。改成 1000 也能明显变快，但在 QEMU 的 TCG 模拟下会丢失部分中断，实测每秒只加约 700。不要小于 19，否则分频值超出 16 位。
 - 若要亲眼看到除零异常，运行 `make run BUILD=build/selftest/divide_error SELFTEST=DIVIDE_ERROR`。第 10、11 行会出现 `Exception 0  #DE divide error` 和出错指令的 `EIP`，用 `objdump -d build/selftest/divide_error/kernel.elf` 可以看到那个地址正是 `divl`。`selftest.c` 中用的是内联汇编：如果写成 C 的 `1 / zero`，clang 会把它优化成不用除法指令的比较，根本不会触发异常。
+- 若要亲眼看到缺页异常，运行 `make run BUILD=build/selftest/unmapped SELFTEST=UNMAPPED`（读未映射的 `0xD0000000`）或 `make run BUILD=build/selftest/null_write SELFTEST=NULL_WRITE`（写空指针）。第 11 行会显示错误码和 CR2。
+- 若要换一个位置写 `V`，修改 `kernel.c` 中 `((volatile uint16_t *)VGA_ALIAS)[5]` 的下标，例如改成 `80 * 3`，`V` 就会出现在第 3 行行首。下标超过 2047（一页 4 KB 的范围）时会触发缺页，因为别名只映射了一页。
 - 若要亲眼看到未填写的 IDT 表项被触发，运行 `make run BUILD=build/selftest/bad_gate SELFTEST=BAD_GATE`。`selftest.c` 执行 `int $0x30`，应看到 `Exception 13 #GP general protection`，`error=0x00000182`，即 `0x30 × 8 + 2`。
 
 读取成功只表示扇区读取完成；这个最小实验尚未检查第二阶段和内核的内容或校验和。
@@ -215,6 +244,7 @@ CHS 的扇区号从 1 开始。镜像写入命令中的 `seek=1` 跳过一个 51
 | `isr.asm` | 48 个中断入口和公共保存、恢复代码 | `kernel/asm.s`、`kernel/system_call.s` |
 | `kernel.c` | `kmain()`：初始化各模块，打开中断 | `init/main.c` |
 | `interrupt.c` | IDT、8259、中断分发和异常显示 | `kernel/traps.c` |
+| `paging.c` | 页目录和页表，打开分页 | `boot/head.s` 中的 `setup_paging`、`mm/memory.c` |
 | `timer.c` | 8253 定时器 | `kernel/sched.c` 中的 `sched_init()`、`do_timer()` |
 | `keyboard.c` | 键盘扫描码转字符并回显 | `kernel/chr_drv/keyboard.S` |
 | `vga.c` | 直接写 VGA 显存、移动硬件光标、整数转字符串 | `kernel/chr_drv/console.c` |

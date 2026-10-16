@@ -31,6 +31,11 @@ void idt_init(void);
 void pic_init(void);
 void interrupt_dispatch(struct interrupt_frame *frame);
 
+/* paging.c：页目录与页表 */
+#define VGA_PHYS  0x000B8000u       /* 显存的物理地址 */
+#define VGA_ALIAS 0xC0000000u       /* 打开分页后，这个虚拟地址也指向显存 */
+void paging_init(void);
+
 /* timer.c：8253 定时器 */
 extern volatile uint32_t timer_ticks;
 void timer_init(uint32_t hz);

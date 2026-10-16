@@ -110,6 +110,15 @@ class Machine:
         regs["HLT"] = int(m.group(1)) if m else None
         return regs
 
+    def gva2gpa(self, addr):
+        """把虚拟地址翻译成物理地址；未映射时返回 None。"""
+        out = self.cmd(f"gva2gpa {addr:#x}")
+        if "Unmapped" in out:
+            return None
+        m = re.search(r"gpa: (0x[0-9a-f]+)", out)
+        check(m is not None, f"gva2gpa 输出无法解析：{out!r}")
+        return int(m.group(1), 16)
+
     def sendkeys(self, keys, delay=0.05):
         for key in keys:
             self.cmd(f"sendkey {key}")
@@ -180,15 +189,16 @@ def in_function(table, name, addr):
 # ---------------------------------------------------------------- 测试用例
 
 def boot_ready(m):
-    return m.screen(1)[0].startswith("ABPKCI")
+    return m.screen(1)[0].startswith("ABPKCVI")
 
 
 def test_boot_screen(m, elf):
     """启动后各行的输出"""
     rows = m.screen(7)
-    check(rows[0] == "ABPKCI", f"第 0 行应为 'ABPKCI'，实际是 {rows[0]!r}")
+    check(rows[0] == "ABPKCVI", f"第 0 行应为 'ABPKCVI'，实际是 {rows[0]!r}")
     check(rows[2] == "Hello from kmain() in C!", f"第 2 行不对：{rows[2]!r}")
     check(re.fullmatch(r"ticks: \d+", rows[4]) is not None, f"第 4 行不对：{rows[4]!r}")
+    check(rows[5] == "paging: on, 0xC0000000 -> 0xB8000", f"第 5 行不对：{rows[5]!r}")
     check(rows[6] == "keyboard:", f"第 6 行不对：{rows[6]!r}")
 
 
@@ -205,6 +215,27 @@ def test_protected_mode(m, elf):
     regs = m.registers()
     check(regs["CR0"] & 1, f"CR0.PE 应为 1，CR0={regs['CR0']:#x}")
     check(regs["CS"] == 0x08, f"CS 应为 0x08，实际是 {regs['CS']:#x}")
+
+
+def test_paging(m, elf):
+    """分页已打开：CR3 指向页目录，各地址按设计映射"""
+    regs = m.registers()
+    check(regs["CR0"] & 0x80000000, f"CR0.PG 应为 1，CR0={regs['CR0']:#x}")
+    page_directory = symbols(elf)["page_directory"][0]
+    check(regs["CR3"] == page_directory, f"CR3 应为 page_directory {page_directory:#x}，实际是 {regs['CR3']:#x}")
+    expected = {
+        0xC0000000: 0xB8000,        # 显存的第二个地址
+        0xC0000004: 0xB8004,
+        0xC0001000: None,           # 别名只映射了一页
+        0x00000000: None,           # 第 0 页不映射，捕获空指针
+        0x00001000: 0x1000,         # 其余前 16 MB 一一对应
+        0x00010000: 0x10000,
+        0x00FFFFFF: 0xFFFFFF,
+        0x01000000: None,           # 16 MB 以上未映射
+    }
+    for virt, phys in expected.items():
+        actual = m.gva2gpa(virt)
+        check(actual == phys, f"虚拟地址 {virt:#x} 应映射到 {phys if phys is None else hex(phys)}，实际是 {actual if actual is None else hex(actual)}")
 
 
 def ticks_value(m):
@@ -273,10 +304,30 @@ def test_bad_gate(_m, _elf):
         check("error=0x00000182" in line11, f"错误码应为 0x182：{line11!r}")
 
 
-# 前几项共用一台正常启动的虚拟机；最后两项各自启动自检内核。
-SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode,
+def page_fault_test(selftest, error_code, cr2):
+    d = build_selftest(selftest)
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        m.wait_for(lambda mm: exception_screen(mm)[0].startswith("Exception"), what="异常信息")
+        line10, line11 = exception_screen(m)
+        check(line10.startswith("Exception 14") and "#PF" in line10, f"第 10 行不对：{line10!r}")
+        check(f"error=0x{error_code:08X}" in line11, f"错误码应为 {error_code:#x}：{line11!r}")
+        check(f"CR2=0x{cr2:08X}" in line11, f"CR2 应为 {cr2:#x}：{line11!r}")
+
+
+def test_unmapped_read(_m, _elf):
+    """读未映射的 0xD0000000：#PF，错误码 0，CR2 为该地址"""
+    page_fault_test("UNMAPPED", 0, 0xD0000000)
+
+
+def test_null_write(_m, _elf):
+    """写空指针：#PF，错误码 2（写操作），CR2 为 0"""
+    page_fault_test("NULL_WRITE", 2, 0)
+
+
+# 前几项共用一台正常启动的虚拟机；其余各自启动自检内核。
+SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_idle_in_hlt]
-SEPARATE_TESTS = [test_divide_error, test_bad_gate]
+SEPARATE_TESTS = [test_divide_error, test_bad_gate, test_unmapped_read, test_null_write]
 
 
 def main():
@@ -302,7 +353,7 @@ def main():
 
     with Machine(image) as m:
         try:
-            m.wait_for(boot_ready, what="启动完成（第 0 行出现 ABPKCI）")
+            m.wait_for(boot_ready, what="启动完成（第 0 行出现 ABPKCVI）")
         except TestFailure as e:
             print(f"FAIL  启动：{e}")
             sys.exit(1)
