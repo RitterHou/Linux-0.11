@@ -133,10 +133,15 @@ void interrupt_dispatch(struct interrupt_frame *frame)
         return;
     }
 
+    /*
+     * 先发 EOI 再处理：定时器处理函数可能切换任务，而新任务第一次运行时从任务入口开始，
+     * 不会回到这里。若 EOI 留到处理完才发，8259 就再也不会送来定时器中断。
+     * 中断门已清除 IF，提前发 EOI 也不会让中断嵌套进来。Linux 0.11 的 timer_interrupt 同样先发 EOI。
+     */
+    pic_send_eoi(vector);
+
     if (vector == IRQ_TIMER)
         timer_handle();
     else if (vector == IRQ_KEYBOARD)
         keyboard_handle();
-
-    pic_send_eoi(vector);
 }

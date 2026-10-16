@@ -31,4 +31,5 @@ void timer_handle(void)
 
     timer_ticks++;
     vga_write_at(TICKS_ROW, TICKS_COL, format_uint(timer_ticks, 10, buf), VGA_GRAY);
+    schedule();                     /* 时间片用完时切换任务，与 Linux 0.11 的 do_timer() 相同 */
 }
