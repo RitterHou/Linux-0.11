@@ -85,6 +85,7 @@ void sched_exit_current(void);
 void syscall_dispatch(struct interrupt_frame *frame);
 
 /* keyboard.c：键盘 */
+void keyboard_init(void);
 void keyboard_handle(void);
 
 /* user.c：任务 B 在用户态运行的程序 */
@@ -94,5 +95,6 @@ extern uint8_t user_stack[];
 
 /* selftest.c：make test 构建的自检内核在这里故意制造异常 */
 void selftest_run(void);
+void selftest_early(void);
 
 #endif

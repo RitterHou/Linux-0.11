@@ -647,12 +647,25 @@ def test_all_tasks_exit(_m, _elf):
         check(regs["CR3"] == table["page_directory"][0], f"CR3 应仍是页目录，实际是 {regs['CR3']:#x}")
 
 
+def test_early_key(_m, _elf):
+    """初始化 8259 之前就有按键：键盘之后仍能正常回显"""
+    d = build_selftest("EARLY_KEY")
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        m.wait_for(lambda mm: mm.screen(1)[0][9:10] == "W", what="等待按键的标记 W")
+        m.sendkeys(["x"])
+        m.wait_for(boot_ready, what="启动完成")
+        m.sendkeys(["h", "i"])
+        time.sleep(0.3)
+        row = m.screen(9)[8]
+        check(row == "keyboard: hi", f"开中断前的按键被丢弃后，键盘应照常回显：第 8 行是 {row!r}")
+
+
 # 前几项共用一台正常启动的虚拟机；其余各自启动自检内核。
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_console_scroll,
                 test_idle_in_hlt, test_syscall_gate, test_user_setup, test_user_task,
                 test_tasks_alternate]
-SEPARATE_TESTS = [test_syscalls, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
+SEPARATE_TESTS = [test_syscalls, test_early_key, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,
                   test_big_kernel, test_user_write_kernel, test_user_privileged,
                   test_user_bad_pointer, test_user_exit, test_all_tasks_exit]
