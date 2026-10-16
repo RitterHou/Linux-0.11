@@ -1,0 +1,1205 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>从上电到用户态</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=VT323&display=swap">
+<style>
+/* 版式：一栏长文，像一本硬件手册的章节；交互图都放在白底“仪器面板”里，VGA 屏幕永远是黑底。 */
+:root {
+  --paper: #eef1f4;
+  --panel: #ffffff;
+  --ink: #16202b;
+  --muted: #586473;
+  --line: #d3dae2;
+  --accent: #0a6c75;
+  --accent-soft: #d9eef0;
+  --fault: #b3261e;
+  --fault-soft: #fbe3e1;
+  --note: #8a5d00;
+  --note-soft: #fbf0d6;
+  --cpu: #3a55a4;
+  --cpu-soft: #e1e7f7;
+  --vga-bg: #000000;
+  --vga-07: #aaaaaa;
+  --vga-0e: #ffff55;
+  --vga-red: #aa0000;
+  --vga-white: #ffffff;
+  --font-body: "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --font-vga: "VT323", ui-monospace, Menlo, monospace;
+  --radius: 10px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #0e1318; --panel: #151c23; --ink: #e5eaf0; --muted: #96a3b2; --line: #26313d;
+    --accent: #52c3cc; --accent-soft: #123338; --fault: #ff7b70; --fault-soft: #3a1a18;
+    --note: #e3b54a; --note-soft: #33280f; --cpu: #8ea6f0; --cpu-soft: #1c2440;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #0e1318; --panel: #151c23; --ink: #e5eaf0; --muted: #96a3b2; --line: #26313d;
+  --accent: #52c3cc; --accent-soft: #123338; --fault: #ff7b70; --fault-soft: #3a1a18;
+  --note: #e3b54a; --note-soft: #33280f; --cpu: #8ea6f0; --cpu-soft: #1c2440;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 16px;
+  line-height: 1.75;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+.page { max-width: 960px; margin: 0 auto; padding-block: 48px 96px; display: flex; flex-direction: column; gap: 72px; }
+h1, h2, h3 { text-wrap: balance; line-height: 1.3; margin: 0; }
+h1 { font-size: clamp(34px, 6vw, 56px); font-weight: 700; letter-spacing: 0.01em; }
+h2 { font-size: clamp(24px, 3.4vw, 32px); font-weight: 700; }
+h3 { font-size: 19px; font-weight: 700; }
+p { margin: 0; max-width: 68ch; }
+code, .mono { font-family: var(--font-mono); font-size: 0.88em; }
+p code, li code, td code { background: var(--accent-soft); color: var(--ink); padding: 1px 5px; border-radius: 4px; }
+a { color: var(--accent); }
+:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+
+.eyebrow { font-family: var(--font-mono); font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); }
+.section { display: flex; flex-direction: column; gap: 20px; }
+.section > header { display: flex; flex-direction: column; gap: 8px; }
+.lede { color: var(--muted); font-size: 17px; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 20px; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.muted { color: var(--muted); }
+.small { font-size: 14px; }
+ul.plain { margin: 0; padding-left: 1.2em; display: flex; flex-direction: column; gap: 6px; }
+
+button, select, input[type="text"] {
+  font: inherit; font-size: 14px; color: var(--ink); background: var(--panel);
+  border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; min-height: 36px;
+}
+button { cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button[aria-pressed="true"], button.primary { background: var(--accent); color: var(--panel); border-color: var(--accent); }
+input[type="text"] { font-family: var(--font-mono); width: 13ch; }
+
+/* ---------- VGA 屏幕 ---------- */
+.vga-wrap { background: var(--vga-bg); border-radius: 8px; padding: 12px 14px; overflow: hidden; container-type: inline-size; }
+.vga {
+  font-family: var(--font-vga); color: var(--vga-07); background: var(--vga-bg);
+  line-height: 1; white-space: pre; margin: 0; font-size: 2.05cqi;
+  user-select: none; outline: none;
+}
+.vga:focus-visible { box-shadow: 0 0 0 2px var(--vga-0e); }
+.vga .a4F { background: var(--vga-red); color: var(--vga-white); }
+.vga .a0E { color: var(--vga-0e); }
+.vga .cur { background: var(--vga-07); color: var(--vga-bg); }
+@media (prefers-reduced-motion: no-preference) {
+  .vga .cur { animation: blink 1.06s steps(1) infinite; }
+  @keyframes blink { 50% { background: transparent; color: var(--vga-07); } }
+}
+.screen-caption { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; font-size: 13px; color: var(--muted); }
+
+/* ---------- 头图 ---------- */
+.hero { display: grid; grid-template-columns: minmax(0, 1fr); gap: 28px; }
+.hero-text { display: flex; flex-direction: column; gap: 16px; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.stat { border-top: 2px solid var(--ink); padding-top: 8px; display: flex; flex-direction: column; }
+.stat b { font-family: var(--font-mono); font-size: 24px; font-variant-numeric: tabular-nums; }
+.stat span { font-size: 13px; color: var(--muted); }
+
+/* ---------- 架构 ---------- */
+.layers { display: flex; flex-direction: column; gap: 10px; }
+.layer { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 12px; align-items: stretch; }
+.layer-name { font-weight: 700; display: flex; flex-direction: column; justify-content: center; font-size: 15px; }
+.layer-name small { font-weight: 400; color: var(--muted); font-family: var(--font-mono); font-size: 12px; }
+.blocks { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+.block { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--paper); min-width: 0; }
+.block b { display: block; font-family: var(--font-mono); font-size: 13px; }
+.block span { font-size: 13px; color: var(--muted); line-height: 1.5; display: block; }
+.layer.user .block { border-color: var(--note); background: var(--note-soft); }
+.layer.hw .block { border-style: dashed; }
+@media (max-width: 560px) { .layer { grid-template-columns: minmax(0, 1fr); } }
+
+/* ---------- 启动播放器 ---------- */
+.boot { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 16px; }
+@media (max-width: 760px) { .boot { grid-template-columns: minmax(0, 1fr); } }
+.stage-list { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.stage-list button { width: 100%; text-align: left; display: grid; grid-template-columns: 26px 1fr; gap: 8px; align-items: baseline; padding: 8px 10px; line-height: 1.4; }
+.stage-list button .n { font-family: var(--font-mono); color: var(--muted); font-size: 13px; }
+.stage-list button[aria-current="step"] { background: var(--accent-soft); border-color: var(--accent); }
+.stage-list button .where { display: block; font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
+.stage-detail { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { font-family: var(--font-mono); font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+.chip.on { background: var(--cpu-soft); border-color: var(--cpu); color: var(--cpu); }
+.linux { border-left: 3px solid var(--muted); padding: 4px 0 4px 12px; font-size: 14px; color: var(--muted); border-radius: 0; }
+pre.code { margin: 0; font-family: var(--font-mono); font-size: 13px; line-height: 1.6; background: var(--paper); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; overflow-x: auto; }
+.memmap { display: flex; flex-direction: column; gap: 3px; font-family: var(--font-mono); font-size: 12.5px; }
+.mem { display: grid; grid-template-columns: 9.5ch minmax(0, 1fr); gap: 10px; align-items: center; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--line); color: var(--muted); background: var(--paper); transition: background .25s, color .25s, border-color .25s; }
+.mem.on { background: var(--accent-soft); border-color: var(--accent); color: var(--ink); }
+.mem.new { background: var(--accent); color: var(--panel); border-color: var(--accent); }
+.mem .addr { font-variant-numeric: tabular-nums; }
+.mem .what { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-body); }
+.boot-split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
+@media (max-width: 620px) { .boot-split { grid-template-columns: minmax(0, 1fr); } }
+.progress { height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; }
+.progress i { display: block; height: 100%; background: var(--accent); width: 0; }
+
+/* ---------- 磁盘 ---------- */
+.disk { display: flex; flex-wrap: wrap; gap: 3px; }
+.sector { width: 22px; height: 22px; border-radius: 3px; border: 1px solid var(--line); background: var(--paper); font-family: var(--font-mono); font-size: 9px; display: grid; place-items: center; color: var(--muted); }
+.sector.boot { background: var(--cpu); border-color: var(--cpu); color: var(--panel); }
+.sector.loader { background: var(--note); border-color: var(--note); color: var(--panel); }
+.sector.kernel { background: var(--accent); border-color: var(--accent); color: var(--panel); }
+.sector.hit { outline: 2px solid var(--fault); outline-offset: 1px; }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 13px; color: var(--muted); }
+.legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -1px; margin-right: 6px; }
+.chs { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; }
+.kv { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; display: flex; flex-direction: column; }
+.kv span { font-size: 12px; color: var(--muted); }
+.kv b { font-family: var(--font-mono); font-size: 18px; font-variant-numeric: tabular-nums; }
+
+/* ---------- 栈动画 ---------- */
+.stackview { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 16px; }
+@media (max-width: 680px) { .stackview { grid-template-columns: minmax(0, 1fr); } }
+.stack { display: flex; flex-direction: column; gap: 3px; font-family: var(--font-mono); font-size: 12.5px; }
+.slot { display: grid; grid-template-columns: 6.5ch minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 4px 8px; border-radius: 6px; border: 1px dashed var(--line); min-height: 30px; color: var(--muted); }
+.slot.filled { border-style: solid; color: var(--ink); }
+.slot.cpu { background: var(--cpu-soft); border-color: var(--cpu); }
+.slot.stub { background: var(--note-soft); border-color: var(--note); }
+.slot.common { background: var(--accent-soft); border-color: var(--accent); }
+.slot.just { box-shadow: 0 0 0 2px var(--ink); }
+.slot .who { font-size: 11px; color: var(--muted); font-family: var(--font-body); }
+.slot .esp { color: var(--fault); font-weight: 600; }
+.step-text { min-height: 7.5em; }
+.step-text b { color: var(--accent); }
+
+/* ---------- 分页 ---------- */
+.bits { display: grid; grid-template-columns: 10fr 10fr 12fr; gap: 4px; font-family: var(--font-mono); font-size: 13px; text-align: center; }
+.bits div { border-radius: 6px; padding: 6px 4px; overflow-wrap: anywhere; }
+.bits .d { background: var(--cpu-soft); color: var(--cpu); }
+.bits .t { background: var(--note-soft); color: var(--note); }
+.bits .o { background: var(--accent-soft); color: var(--accent); }
+.walk { display: flex; flex-direction: column; gap: 8px; }
+.walk-step { display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 10px; align-items: start; }
+.walk-step .dot { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font-family: var(--font-mono); font-size: 12px; background: var(--paper); border: 1px solid var(--line); }
+.walk-step.ok .dot { background: var(--accent); color: var(--panel); border-color: var(--accent); }
+.walk-step.bad .dot { background: var(--fault); color: var(--panel); border-color: var(--fault); }
+.walk-step .body { font-size: 14px; min-width: 0; }
+.walk-step .body .mono { overflow-wrap: anywhere; }
+.result { border-radius: 8px; padding: 10px 14px; font-weight: 500; }
+.result.ok { background: var(--accent-soft); color: var(--ink); border: 1px solid var(--accent); }
+.result.bad { background: var(--fault-soft); color: var(--ink); border: 1px solid var(--fault); }
+.presets { display: flex; flex-wrap: wrap; gap: 6px; }
+.presets button { font-family: var(--font-mono); font-size: 12.5px; padding: 4px 9px; min-height: 30px; }
+
+/* ---------- 任务切换 ---------- */
+.tss-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+@media (max-width: 640px) { .tss-grid { grid-template-columns: minmax(0, 1fr); } }
+.tss { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; font-family: var(--font-mono); font-size: 12.5px; display: flex; flex-direction: column; gap: 2px; transition: background .3s, border-color .3s; }
+.tss h4 { margin: 0 0 4px; font-family: var(--font-body); font-size: 14px; }
+.tss.current { border-color: var(--accent); background: var(--accent-soft); }
+.tss.saving { border-color: var(--fault); background: var(--fault-soft); }
+.tss.dead { opacity: .5; }
+.timeline { display: grid; grid-template-columns: repeat(60, minmax(0, 1fr)); gap: 1px; }
+.timeline i { height: 16px; border-radius: 2px; background: var(--line); }
+.timeline i.A { background: var(--cpu); }
+.timeline i.B { background: var(--note); }
+.timeline i.now { outline: 2px solid var(--ink); }
+.outrow { font-family: var(--font-vga); font-size: 20px; background: var(--vga-bg); color: var(--vga-07); padding: 6px 10px; border-radius: 6px; overflow-x: auto; white-space: pre; line-height: 1; }
+
+/* ---------- 系统调用时序 ---------- */
+.seq { display: flex; flex-direction: column; gap: 6px; }
+.seq-head, .seq-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.seq-head div { font-size: 13px; font-weight: 700; padding: 6px 8px; border-radius: 6px; text-align: center; }
+.seq-head .u { background: var(--note-soft); color: var(--note); }
+.seq-head .c { background: var(--cpu-soft); color: var(--cpu); }
+.seq-head .k { background: var(--accent-soft); color: var(--accent); }
+.seq-row div { font-size: 13.5px; padding: 7px 10px; border-radius: 6px; border: 1px solid transparent; line-height: 1.5; min-width: 0; overflow-wrap: anywhere; }
+.seq-row div.on { border-color: var(--line); background: var(--paper); }
+.seq-row.cur div.on { border-color: var(--ink); background: var(--panel); box-shadow: 0 1px 0 var(--line); }
+.seq-row.cur div.on.fault { border-color: var(--fault); background: var(--fault-soft); }
+.seq-row.future div.on { opacity: .35; }
+.regs { display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 6px; font-family: var(--font-mono); font-size: 12.5px; }
+.regs div { border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; }
+.regs div.changed { border-color: var(--accent); background: var(--accent-soft); }
+@media (max-width: 560px) { .seq-row div { font-size: 12.5px; padding: 6px; } }
+
+/* ---------- 表格、历史 ---------- */
+.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+table { border-collapse: collapse; width: 100%; font-size: 14px; min-width: 560px; }
+th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 13px; color: var(--muted); font-weight: 500; }
+tr:last-child td { border-bottom: none; }
+.history { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.history li { display: grid; grid-template-columns: 7.5ch minmax(0, 1fr); gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.history li:last-child { border-bottom: none; }
+.history .h { font-family: var(--font-mono); font-size: 13px; color: var(--muted); }
+.history .s { display: flex; flex-direction: column; }
+.history .s span { font-family: var(--font-mono); font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+.tests { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; }
+.test-group { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; }
+.test-group h4 { margin: 0; font-size: 14px; }
+.test-group ul { margin: 0; padding-left: 1.1em; font-size: 13.5px; color: var(--muted); display: flex; flex-direction: column; gap: 3px; }
+.term { font-family: var(--font-mono); font-size: 12.5px; background: var(--vga-bg); color: var(--vga-07); border-radius: 8px; padding: 12px 14px; overflow-x: auto; white-space: pre; line-height: 1.55; margin: 0; }
+.term .p { color: #55ff55; }
+footer { color: var(--muted); font-size: 13px; border-top: 1px solid var(--line); padding-top: 16px; }
+</style>
+
+<main class="page">
+
+<!-- ===================== 头图 ===================== -->
+<section class="hero" aria-labelledby="title">
+  <div class="hero-text">
+    <span class="eyebrow">learning 分支 · x86 · 照着 Linux 0.11 写</span>
+    <h1 id="title">从上电到用户态</h1>
+    <p class="lede">一个从零写出来的 32 位 x86 小内核。它从一张 1.44 MB 软盘启动，经过两段引导程序进入保护模式，再一步步加上中断、分页、任务切换、系统调用和用户态。每一步都对照 Linux 0.11 的同名机制，并由自动化测试在 QEMU 中验证。</p>
+    <div class="stats">
+      <div class="stat"><b data-fact="loc">1,904</b><span>行汇编、C 和链接脚本</span></div>
+      <div class="stat"><b data-fact="kernelKB">16 KB</b><span>kernel.bin（含 8 KB 用户程序）</span></div>
+      <div class="stat"><b data-fact="commits">26</b><span>个提交，每步一个</span></div>
+      <div class="stat"><b data-fact="tests">31</b><span>项 make test 自动化测试</span></div>
+    </div>
+  </div>
+  <div class="panel" style="gap:10px">
+    <div class="vga-wrap"><pre class="vga" id="hero-screen" tabindex="0" aria-label="模拟的 VGA 文本屏幕，点击后可以打字"></pre></div>
+    <div class="screen-caption">
+      <span>这是内核运行时的屏幕（浏览器中的模拟）。点一下屏幕就能打字，和在 QEMU 里一样会回显在第 8 行起的窗口中。</span>
+      <span class="row" style="gap:6px">
+        <button type="button" id="hero-replay">重新启动</button>
+        <button type="button" id="hero-slow" aria-pressed="false">慢放 ×10</button>
+      </span>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== 屏幕上每一行 ===================== -->
+<section class="section" aria-labelledby="s-screen">
+  <header>
+    <span class="eyebrow">读懂屏幕</span>
+    <h2 id="s-screen">每一行都是一个里程碑</h2>
+    <p class="lede">内核没有 printf，也没有 BIOS 可用，所有输出都是直接写显存 <code>0xB8000</code>：每个字符格 2 字节，低字节是字符，高字节是颜色。第 0 行的每个字母由不同阶段写入，出现了就说明这一阶段走通了。</p>
+  </header>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>字母 / 行</th><th>谁写的</th><th>说明走通了什么</th></tr></thead>
+      <tbody>
+        <tr><td><code>A</code></td><td><code>boot.asm</code></td><td>BIOS 把第一个扇区读到 <code>0x7C00</code> 并执行它</td></tr>
+        <tr><td><code>B</code></td><td><code>loader.asm</code>（实模式）</td><td>第一阶段从磁盘读入第二阶段并跳过去</td></tr>
+        <tr><td><code>P</code></td><td><code>loader.asm</code>（保护模式）</td><td>GDT、A20、CR0.PE 都设对了，32 位代码开始执行</td></tr>
+        <tr><td><code>K</code></td><td><code>entry.asm</code></td><td>内核被完整读到 <code>0x10000</code>，入口换好栈、清零 <code>.bss</code></td></tr>
+        <tr><td><code>C</code></td><td><code>kmain()</code></td><td>C 代码能运行</td></tr>
+        <tr><td><code>V</code></td><td><code>kmain()</code>，经虚拟地址 <code>0xC0000000</code></td><td>分页已打开：同一块显存有了第二个地址</td></tr>
+        <tr><td><code>I</code></td><td><code>kmain()</code></td><td>IDT、8259、定时器就绪，<code>sti</code> 打开了中断</td></tr>
+        <tr><td><code>T</code></td><td><code>kmain()</code></td><td>任务调度开始</td></tr>
+        <tr><td><code>U</code></td><td><code>syscall_dispatch()</code></td><td>内核第一次收到来自特权级 3 的系统调用</td></tr>
+        <tr><td>第 4 行 <code>ticks</code></td><td>定时器中断</td><td>每秒 100 次，与 Linux 0.11 的 HZ 相同</td></tr>
+        <tr><td>第 5 行 <code>paging</code></td><td><code>kmain()</code></td><td>页表的布局</td></tr>
+        <tr><td>第 6 行 <code>tasks</code></td><td>任务 A（内核态）、任务 B（用户态）</td><td>两个任务轮流运行，都只通过 <code>write</code> 系统调用输出</td></tr>
+        <tr><td>第 7 行</td><td>内核</td><td>有任务结束时的黄色消息</td></tr>
+        <tr><td>第 8～18 行</td><td>键盘中断</td><td>回显窗口，写满后向上滚动</td></tr>
+        <tr><td>第 19～23 行</td><td>异常处理</td><td>内核自己出错时的红色寄存器面板</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ===================== 全貌 ===================== -->
+<section class="section" aria-labelledby="s-arch">
+  <header>
+    <span class="eyebrow">全貌</span>
+    <h2 id="s-arch">三层：硬件、内核、用户程序</h2>
+    <p class="lede">内核夹在硬件和用户程序中间。向下，它通过端口和显存直接控制芯片；向上，用户程序只能用 <code>int 0x80</code> 请它帮忙，内核的内存和特权指令都碰不到。</p>
+  </header>
+  <div class="panel">
+    <div class="layers">
+      <div class="layer user">
+        <div class="layer-name">用户程序<small>CPL 3</small></div>
+        <div class="blocks">
+          <div class="block"><b>user.c</b><span>任务 B：取任务号、写字母、睡 2 个 tick，循环</span></div>
+          <div class="block"><b>syscall.h</b><span>write、getpid、sleep、exit：把参数放进寄存器，执行 int 0x80</span></div>
+        </div>
+      </div>
+      <div class="layer">
+        <div class="layer-name">内核<small>CPL 0</small></div>
+        <div class="blocks">
+          <div class="block"><b>entry.asm · kernel.c</b><span>换栈、清零 .bss，按顺序初始化各模块</span></div>
+          <div class="block"><b>gdt.c</b><span>内核段、用户段、3 个 TSS</span></div>
+          <div class="block"><b>isr.asm · interrupt.c</b><span>IDT、8259、统一的中断入口和分发</span></div>
+          <div class="block"><b>paging.c</b><span>页目录、页表、用户位</span></div>
+          <div class="block"><b>sched.c</b><span>TSS 硬件任务切换、时间片、结束任务</span></div>
+          <div class="block"><b>syscall.c</b><span>系统调用表，检查用户指针</span></div>
+          <div class="block"><b>timer.c · keyboard.c</b><span>8253 定时器；键盘扫描码、Shift、Caps Lock</span></div>
+          <div class="block"><b>vga.c</b><span>写显存、滚动窗口、拼行</span></div>
+        </div>
+      </div>
+      <div class="layer hw">
+        <div class="layer-name">硬件<small>QEMU 模拟</small></div>
+        <div class="blocks">
+          <div class="block"><b>CPU</b><span>i386：分段、分页、特权级、TSS</span></div>
+          <div class="block"><b>8259 × 2</b><span>中断控制器，IRQ 映射到 0x20～0x2F</span></div>
+          <div class="block"><b>8253</b><span>定时器，1.193180 MHz 分频到 100 Hz</span></div>
+          <div class="block"><b>键盘控制器</b><span>端口 0x60，扫描码</span></div>
+          <div class="block"><b>VGA</b><span>文本显存 0xB8000，80 × 25</span></div>
+          <div class="block"><b>软驱</b><span>1.44 MB，BIOS int 0x13 读取</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== 启动全程 ===================== -->
+<section class="section" aria-labelledby="s-boot">
+  <header>
+    <span class="eyebrow">启动全程</span>
+    <h2 id="s-boot">八个阶段，从 BIOS 到用户态</h2>
+    <p class="lede">点左边的阶段，或按“播放”自动走一遍。右边同时显示 CPU 的状态、内存里此时有什么，以及屏幕第 0 行写到了哪个字母。</p>
+  </header>
+  <div class="panel">
+    <div class="row">
+      <button type="button" id="boot-prev" aria-label="上一个阶段">上一步</button>
+      <button type="button" id="boot-play" class="primary">播放</button>
+      <button type="button" id="boot-next" aria-label="下一个阶段">下一步</button>
+      <span class="muted small" id="boot-pos"></span>
+    </div>
+    <div class="progress" aria-hidden="true"><i id="boot-bar"></i></div>
+    <div class="boot">
+      <ol class="stage-list" id="stage-list"></ol>
+      <div class="stage-detail" id="stage-detail" aria-live="polite"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== 磁盘与内存 ===================== -->
+<section class="section" aria-labelledby="s-disk">
+  <header>
+    <span class="eyebrow">软盘与读盘</span>
+    <h2 id="s-disk">LBA 换算成柱面、磁头、扇区</h2>
+    <p class="lede">软盘没有文件系统，三段程序按扇区紧挨着放。BIOS 只认 CHS 地址，loader 先用 <code>int 0x13 AH=08h</code> 问出每道扇区数和磁头数，再把连续编号的 LBA 逐个换算。点下面任意一个扇区，看它在哪个柱面、哪个磁头。</p>
+  </header>
+  <div class="panel">
+    <div class="legend">
+      <span><i style="background:var(--cpu)"></i>LBA 0：boot.bin</span>
+      <span><i style="background:var(--note)"></i>LBA 1：loader.bin</span>
+      <span><i style="background:var(--accent)"></i>LBA 2 起：kernel.bin（<span data-fact="kernelSectors">32</span> 个扇区）</span>
+    </div>
+    <div class="disk" id="disk" role="group" aria-label="软盘前 108 个扇区"></div>
+    <div class="chs">
+      <div class="kv"><span>LBA</span><b id="chs-lba">20</b></div>
+      <div class="kv"><span>柱面 = LBA ÷ 18 ÷ 2</span><b id="chs-c">0</b></div>
+      <div class="kv"><span>磁头 = (LBA ÷ 18) mod 2</span><b id="chs-h">1</b></div>
+      <div class="kv"><span>扇区 = LBA mod 18 + 1</span><b id="chs-s">3</b></div>
+      <div class="kv"><span>读到的内存地址</span><b id="chs-addr">0x12400</b></div>
+    </div>
+    <p class="small muted">每次只读一个 512 字节的扇区，目标地址按 512 对齐，所以永远不会跨过 64 KB 边界（软驱 DMA 的限制）。Linux 0.11 的 <code>bootsect.s</code> 一次读一整条磁道以加快速度，原理相同。</p>
+  </div>
+</section>
+
+<!-- ===================== 中断与栈 ===================== -->
+<section class="section" aria-labelledby="s-irq">
+  <header>
+    <span class="eyebrow">中断与栈</span>
+    <h2 id="s-irq">一次中断，栈上被压了什么</h2>
+    <p class="lede">无论是定时器、键盘、CPU 异常还是系统调用，都走同一条路：CPU 压一部分，入口代码补齐，<code>isr_common</code> 再保存其余寄存器，栈上就成了 C 语言里的 <code>struct interrupt_frame</code>。从用户态进入时，CPU 还要先换栈。</p>
+  </header>
+  <div class="panel">
+    <div class="row">
+      <button type="button" id="stk-ring0" aria-pressed="true">定时器打断任务 A（内核态）</button>
+      <button type="button" id="stk-ring3" aria-pressed="false">任务 B 执行 int 0x80（用户态）</button>
+    </div>
+    <div class="row">
+      <button type="button" id="stk-reset">从头开始</button>
+      <button type="button" id="stk-prev">上一步</button>
+      <button type="button" id="stk-next" class="primary">下一步</button>
+      <span class="muted small" id="stk-pos"></span>
+    </div>
+    <div class="stackview">
+      <div class="stack" id="stack" aria-label="内核栈，上方是高地址"></div>
+      <div class="step-text" id="stk-text" aria-live="polite"></div>
+    </div>
+    <div class="legend">
+      <span><i style="background:var(--cpu)"></i>CPU 自动压入</span>
+      <span><i style="background:var(--note)"></i>入口 isrN 压入</span>
+      <span><i style="background:var(--accent)"></i>isr_common 压入</span>
+    </div>
+  </div>
+  <div class="panel">
+    <h3>8259 与 EOI</h3>
+    <ul class="plain">
+      <li>BIOS 把主片的 IRQ0～7 放在中断号 0x08～0x0F，正好与 CPU 异常 8～15 重叠，不改的话定时器中断会被当成双重错误。<code>pic_init()</code> 重新初始化两片 8259，把 IRQ 挪到 0x20～0x2F，和 Linux 0.11 的 <code>setup.s</code> 一样。</li>
+      <li>8259 送出一个中断后，要等 CPU 回 EOI 才送下一个。这里先发 EOI 再调用处理函数：定时器处理函数可能切换任务，新任务第一次运行时从入口开始，不会回到原来的处理函数，EOI 留到最后就永远发不出去了。</li>
+      <li>第 0x80 项是 DPL 3 的<strong>陷阱门</strong>，其余是 DPL 0 的中断门。陷阱门进入时不关中断，系统调用执行期间定时器照常工作，<code>sleep</code> 才等得到 tick。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ===================== 分页 ===================== -->
+<section class="section" aria-labelledby="s-paging">
+  <header>
+    <span class="eyebrow">分页</span>
+    <h2 id="s-paging">一个虚拟地址的两级查表</h2>
+    <p class="lede">打开分页后，CPU 发出的每个地址都要查表：高 10 位选页目录项，中间 10 位选页表项，低 12 位是页内偏移。页表项上的“存在”和“用户”两个位，决定了这次访问是成功、还是触发 14 号缺页异常。选一个地址试试。</p>
+  </header>
+  <div class="panel">
+    <div class="row">
+      <label for="va-input" class="small">虚拟地址</label>
+      <input type="text" id="va-input" value="0xC0000004" spellcheck="false" autocomplete="off">
+      <span class="row" style="gap:6px">
+        <button type="button" id="pg-kernel" aria-pressed="true">内核态访问</button>
+        <button type="button" id="pg-user" aria-pressed="false">用户态访问</button>
+      </span>
+      <span class="row" style="gap:6px">
+        <button type="button" id="pg-read" aria-pressed="true">读</button>
+        <button type="button" id="pg-write" aria-pressed="false">写</button>
+      </span>
+    </div>
+    <div class="presets" id="pg-presets"></div>
+    <div class="bits" id="pg-bits" aria-hidden="true"></div>
+    <div class="walk" id="pg-walk" aria-live="polite"></div>
+    <div class="result" id="pg-result"></div>
+  </div>
+</section>
+
+<!-- ===================== 任务切换 ===================== -->
+<section class="section" aria-labelledby="s-tasks">
+  <header>
+    <span class="eyebrow">任务切换</span>
+    <h2 id="s-tasks">一条 ljmp，CPU 换了一整套寄存器</h2>
+    <p class="lede">每个任务有一个 104 字节的 TSS，存着它的全部寄存器。定时器每 20 个 tick 让 <code>schedule()</code> 远跳转到下一个任务的 TSS 选择子：CPU 把当前寄存器存进当前任务的 TSS，再从目标 TSS 装入，目标任务就从上次停下的地方接着跑。Linux 0.11 的 <code>switch_to</code> 也是这一条指令。</p>
+  </header>
+  <div class="panel">
+    <div class="row">
+      <button type="button" id="ts-play" class="primary">播放</button>
+      <button type="button" id="ts-step">走一个 tick</button>
+      <button type="button" id="ts-kill">让任务 B 越权写内核</button>
+      <button type="button" id="ts-reset">重来</button>
+      <span class="small muted" id="ts-status"></span>
+    </div>
+    <div class="timeline" id="ts-timeline" aria-hidden="true"></div>
+    <div class="tss-grid" id="ts-cards"></div>
+    <div class="outrow" id="ts-out" aria-label="屏幕第 6 行"></div>
+    <div class="vga-wrap" style="padding:6px 10px"><pre class="vga" id="ts-msg" aria-label="屏幕第 7 行" style="font-size:2.4cqi"></pre></div>
+    <p class="small muted">CR3 只装入、不保存：CPU 从目标 TSS 装入 CR3，却不会把当前 CR3 存回旧 TSS，所以每个 TSS（包括任务 0 的）都要预先填好页目录地址。注意保存下来的值：切换总是发生在定时器中断处理函数里，所以无论任务 A 还是任务 B，被切走时 CS 都是内核的 <code>0x08</code>，EIP 在 <code>switch_to()</code> 里。任务 B 在用户态的 CS、EIP、ESP 不在 TSS 里，而在它内核栈顶 CPU 压入的那几项中，中断返回时才恢复。</p>
+  </div>
+</section>
+
+<!-- ===================== 系统调用与用户态 ===================== -->
+<section class="section" aria-labelledby="s-syscall">
+  <header>
+    <span class="eyebrow">系统调用与用户态</span>
+    <h2 id="s-syscall">用户程序怎样请内核帮忙，又被挡在哪里</h2>
+    <p class="lede">任务 B 运行在特权级 3：它能执行的代码和能访问的内存，只有链接脚本放进 <code>.user</code> 段的那两页。想输出一个字母，只能把参数放进寄存器、执行 <code>int 0x80</code>，由内核检查之后替它去写。</p>
+  </header>
+  <div class="panel">
+    <div class="row" id="sc-scenarios"></div>
+    <div class="row">
+      <button type="button" id="sc-reset">从头开始</button>
+      <button type="button" id="sc-prev">上一步</button>
+      <button type="button" id="sc-next" class="primary">下一步</button>
+      <span class="muted small" id="sc-pos"></span>
+    </div>
+    <div class="regs" id="sc-regs"></div>
+    <div class="seq">
+      <div class="seq-head"><div class="u">用户程序（CPL 3）</div><div class="c">CPU</div><div class="k">内核（CPL 0）</div></div>
+      <div id="sc-rows" class="seq"></div>
+    </div>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>机制</th><th>这里的做法</th><th>Linux 0.11 的做法</th></tr></thead>
+      <tbody>
+        <tr><td>用户段</td><td>GDT 第 6、7 项：DPL 3 的代码段 <code>0x33</code>、数据段 <code>0x3B</code></td><td>每个进程 LDT 中的 <code>0x0f</code>、<code>0x17</code></td></tr>
+        <tr><td>进入用户态</td><td>任务 B 的 TSS 中段选择子都是用户段，硬件任务切换装入时直接进入特权级 3</td><td><code>move_to_user_mode()</code> 构造返回现场后执行 <code>iret</code></td></tr>
+        <tr><td>内核栈</td><td>TSS 的 <code>ss0:esp0</code> 指向任务 B 的 4 KB 内核栈</td><td><code>copy_process()</code> 把 <code>esp0</code> 设为进程内核栈顶</td></tr>
+        <tr><td>内存保护</td><td>只有 <code>.user</code> 的页打开页表项的用户位，其中代码页只读</td><td>不靠页表：<code>head.s</code> 把前 16 MB（内核在内）都映射成 7（存在、可写、用户）；用户程序的段基址为 进程号 × 64 MB、界限有限，形成的地址落不到内核那里</td></tr>
+        <tr><td>检查用户指针</td><td><code>user_range_ok()</code> 显式检查</td><td>经 FS（用户数据段）用 <code>get_fs_byte()</code> 读写，越界由段界限挡住；<code>verify_area()</code> 是写用户内存前处理写时复制</td></tr>
+        <tr><td>用户程序出错</td><td>只结束该任务，第 7 行写黄色消息；NMI、双重错误、机器检查例外，照样显示异常面板</td><td><code>die()</code> 调用 <code>do_exit(11)</code></td></tr>
+        <tr><td>内核态抢占</td><td>会：任务 A 和系统调用都可能在内核里被切走，共享数据要关中断保护</td><td>不会：<code>do_timer()</code> 中 <code>if (!cpl) return;</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ===================== 验证 ===================== -->
+<section class="section" aria-labelledby="s-tests">
+  <header>
+    <span class="eyebrow">怎么知道它是对的</span>
+    <h2 id="s-tests">make test：<span data-fact="tests">31</span> 项，在无头 QEMU 里逐项核对</h2>
+    <p class="lede">测试脚本只用 Python 标准库：在后台启动没有窗口的 QEMU，通过它的监视器读显存、读寄存器、翻译虚拟地址、模拟按键，再用 <code>objdump</code> 查符号地址和反汇编。需要故意出错的测试，用 <code>SELFTEST=名称</code> 另外构建一个自检内核。</p>
+  </header>
+  <pre class="term"><span class="p">$</span> make test
+PASS  启动后各行的输出
+PASS  内存中内核的代码和只读数据与 kernel.bin 一致
+PASS  处于 32 位保护模式，GDTR 指向内核自己的 GDT
+PASS  分页已打开：CR3 指向页目录，各地址按设计映射
+PASS  定时器约 100 Hz
+PASS  键盘回显、回车和退格
+  …
+PASS  用户程序写内核变量：只结束任务 B，消息给出 #PF、错误码 7 和 EIP
+PASS  用户程序调用 exit(7)：任务 B 结束，其余照常
+
+<span data-fact="tests">31</span>/<span data-fact="tests">31</span> 项通过</pre>
+  <div class="tests" id="test-groups"></div>
+  <div class="panel">
+    <h3>一次独立代码审查</h3>
+    <p>功能做完后，另请一个代理只读地通读全部代码。它找到的问题都先复现、再修复，并补上能抓住它的测试：</p>
+    <ul class="plain">
+      <li><b>所有任务结束时会三重错误。</b>任务切换时 CPU 从新 TSS 装入 CR3，但不会把当前 CR3 存回旧 TSS；任务 0 的 TSS 里 CR3 一直是 0，切回去时页目录就成了物理地址 0。补上 <code>tss[0].cr3</code>，新测试让任务 A、B 都 exit。</li>
+      <li><b>开中断前的按键会让键盘永久失灵。</b>没人读的字节让 IRQ1 一直是高电平，8259 是边沿触发，再也等不到上升沿。<code>keyboard_init()</code> 先读光缓冲区。</li>
+      <li><b>NMI 被算成用户程序的错。</b>任务 B 在用户态时来了 NMI，会被“结束”；现在硬件类异常一律显示面板。测试先用监视器 <code>stop</code> 暂停、确认在用户态，再注入 NMI。</li>
+      <li>引导读盘不重试、软驱马达不关、几何参数可能除以零；按住 Caps Lock 的自动重复会来回切换；换行后的退格对不上；测试脚本超时后会读错位。</li>
+      <li>README 里几处与 Linux 0.11 的对照写错了：Linux 0.11 靠段而不是页表隔离内核，<code>verify_area()</code> 是写时复制而不是范围检查，<code>do_timer()</code> 不抢占内核态。</li>
+    </ul>
+  </div>
+  <div class="panel">
+    <h3>每个测试都先证明自己能失败</h3>
+    <p>新加一项测试时，都在临时副本里故意把代码改坏，确认这项测试真的会报错，再提交。这个习惯抓到过好几处“测试永远通过”的问题：</p>
+    <ul class="plain">
+      <li>QEMU 的 TCG 模拟不检查通过空选择子访问内存，用空选择子测“中断入口换段”永远通过；改用基址为 1 MB 的段后才测得出来。</li>
+      <li>clang 会把 <code>1 / zero</code> 优化成不含除法的比较，除零自检根本不触发异常；改用内联汇编。</li>
+      <li>SeaBIOS 开机时会把常规内存清零，所以在 QEMU 里看不出 <code>.bss</code> 没清零的后果。</li>
+      <li>远跳转到自己的 TSS 会因为它处于“忙”状态触发 <code>#GP</code>：去掉 <code>schedule()</code> 里的判断后，只剩一个任务时立刻出现错误码 <code>0x20</code> 的异常面板。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ===================== 历史 ===================== -->
+<section class="section" aria-labelledby="s-history">
+  <header>
+    <span class="eyebrow">一路走来</span>
+    <h2 id="s-history">每一步一个提交</h2>
+    <p class="lede">从屏幕上只有一个 <code>A</code> 开始，每加一个机制就单独验证、单独提交，随时可以回到上一个能运行的版本。</p>
+  </header>
+  <div class="panel"><ol class="history" id="history"></ol></div>
+</section>
+
+<!-- ===================== 文件对照 ===================== -->
+<section class="section" aria-labelledby="s-files">
+  <header>
+    <span class="eyebrow">源码地图</span>
+    <h2 id="s-files">每个文件对应 Linux 0.11 的哪里</h2>
+  </header>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>文件</th><th>作用</th><th>Linux 0.11</th></tr></thead>
+      <tbody id="file-map"></tbody>
+    </table>
+  </div>
+</section>
+
+<footer>源码在仓库的 <code>learning</code> 分支；<code>main</code> 分支是 Linux 0.11 原始源码。页面中的地址取自最新一次构建的 <code>kernel.elf</code>（提交 <span data-fact="head" class="mono">ed9baf1</span>），代码改动后会略有变化。在仓库里运行 <code>make run</code> 可以在 QEMU 中看到真实的屏幕。</footer>
+</main>
+
+<script>
+/* ===================== 构建事实：来自 objdump -h / -t build/kernel.elf ===================== */
+const FACTS = {
+  head: "ed9baf1", loc: "1,904", kernelKB: "16 KB", kernelSectors: 32, commits: 26, tests: 31,
+  text: 0x10000, rodata: 0x11608, data: 0x119c4, user: 0x12000, userEnd: 0x14000,
+  bss: 0x14000, bssEnd: 0x1e188, stackTop: 0x15000, gdt: 0x15010, idt: 0x15060,
+  identity: 0x16000, pageDir: 0x1a000, alias: 0x1b000, ticks: 0x1c000, tss: 0x1c018,
+  taskStacks: 0x1c170, userMain: 0x12000, userStack: 0x13000, kmain: 0x101c0,
+  userData: 0x13000, userCodeWritable: false,
+};
+const hex = (n, w = 5) => "0x" + (n >>> 0).toString(16).toUpperCase().padStart(w, "0");
+const hex8 = n => "0x" + (n >>> 0).toString(16).toUpperCase().padStart(8, "0");
+const $ = id => document.getElementById(id);
+const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+document.querySelectorAll("[data-fact]").forEach(el => { const v = FACTS[el.dataset.fact]; if (v !== undefined) el.textContent = String(v); });
+
+/* ===================== VGA 屏幕 ===================== */
+const COLS = 80, ROWS = 25;
+class Screen {
+  constructor(el, rows = ROWS) { this.el = el; this.rows = rows; this.clear(); this.cursor = null; }
+  clear() { this.cells = Array.from({ length: this.rows * COLS }, () => [" ", "07"]); }
+  put(r, c, ch, attr = "07") { if (r < 0 || r >= this.rows || c < 0 || c >= COLS) return; this.cells[r * COLS + c] = [ch, attr]; }
+  write(r, c, s, attr = "07") { for (let i = 0; i < s.length; i++) this.put(r, c + i, s[i], attr); }
+  line(r, s, attr = "07") { this.write(r, 0, s.padEnd(COLS, " "), attr); }
+  rowText(r) { return this.cells.slice(r * COLS, (r + 1) * COLS).map(c => c[0]).join(""); }
+  render() {
+    const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const out = [];
+    for (let r = 0; r < this.rows; r++) {
+      let html = "", run = "", attr = null;
+      const flush = () => { if (run) html += attr === "07" ? esc(run) : `<span class="a${attr}">${esc(run)}</span>`; run = ""; };
+      for (let c = 0; c < COLS; c++) {
+        const [ch, a] = this.cells[r * COLS + c];
+        if (this.cursor && this.cursor[0] === r && this.cursor[1] === c) { flush(); html += `<span class="cur">${esc(ch)}</span>`; attr = null; continue; }
+        if (a !== attr) { flush(); attr = a; }
+        run += ch;
+      }
+      flush();
+      out.push(html);
+    }
+    this.el.innerHTML = out.join("\n");
+  }
+}
+
+/* ===================== 头图：在浏览器里模拟内核的屏幕 ===================== */
+const hero = (() => {
+  const scr = new Screen($("hero-screen"));
+  const CONSOLE_TOP = 8, CONSOLE_BOTTOM = 18, OUT_COL = 7, OUT_W = 73, SLICE = 20;
+  let st, timers = [], raf = 0, slow = false;
+  const bootSteps = [
+    [0, s => { s.clear(); s.write(0, 0, "A"); }],
+    [260, s => s.write(0, 1, "B")],
+    [560, s => s.write(0, 2, "P")],
+    [720, s => s.write(0, 3, "K")],
+    [860, s => { s.write(0, 4, "C"); s.write(2, 0, "Hello from kmain() in C!"); }],
+    [1020, s => { s.write(0, 5, "V"); s.write(5, 0, "paging: on, 0xC0000000 -> 0xB8000"); }],
+    [1160, s => { s.write(4, 0, "ticks: 0"); s.write(6, 0, "tasks: "); s.write(8, 0, "keyboard: "); st.cur = [8, 10]; }],
+    [1260, s => s.write(0, 6, "I")],
+    [1360, s => { s.write(0, 7, "T"); st.running = true; st.last = performance.now(); }],
+  ];
+  function reset() {
+    timers.forEach(clearTimeout); timers = []; cancelAnimationFrame(raf);
+    st = { ticks: 0, running: false, acc: 0, last: 0, cur: null, lineLen: 0, current: 0, slice: 1, wake: [0, 0, 0], pos: 0, userSeen: false };
+    scr.clear();
+    if (reduceMotion) { bootSteps.forEach(([, f]) => f(scr)); for (let i = 0; i < 300; i++) tick(); st.running = false; draw(); return; }
+    bootSteps.forEach(([t, f]) => timers.push(setTimeout(() => { f(scr); draw(); }, t)));
+    raf = requestAnimationFrame(loop);
+  }
+  function tick() {
+    st.ticks++;
+    scr.write(4, 7, String(st.ticks));
+    if (--st.slice <= 0) { st.slice = SLICE; st.current = st.current === 1 ? 2 : 1; }
+    const t = st.current;
+    if (t && st.wake[t] <= st.ticks) {
+      scr.put(6, OUT_COL + st.pos, t === 1 ? "A" : "B");
+      st.pos = (st.pos + 1) % OUT_W;
+      st.wake[t] = st.ticks + 2;
+      if (t === 2 && !st.userSeen) { st.userSeen = true; scr.write(0, 8, "U"); }
+    }
+  }
+  function loop(now) {
+    if (st.running) {
+      const ms = slow ? 100 : 10;
+      st.acc += now - st.last; st.last = now;
+      let n = 0;
+      while (st.acc >= ms && n < 50) { st.acc -= ms; tick(); n++; }
+      if (st.acc > 1000) st.acc = 0;
+      draw();
+    }
+    raf = requestAnimationFrame(loop);
+  }
+  function draw() { scr.cursor = st.cur; scr.render(); }
+  function newline() {
+    st.cur = [st.cur[0] + 1, 0];
+    if (st.cur[0] > CONSOLE_BOTTOM) {
+      for (let r = CONSOLE_TOP; r < CONSOLE_BOTTOM; r++) for (let c = 0; c < COLS; c++) scr.cells[r * COLS + c] = scr.cells[(r + 1) * COLS + c].slice();
+      for (let c = 0; c < COLS; c++) scr.put(CONSOLE_BOTTOM, c, " ");
+      st.cur = [CONSOLE_BOTTOM, 0];
+    }
+  }
+  $("hero-screen").addEventListener("keydown", e => {
+    if (!st.cur || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key === "Backspace") { e.preventDefault(); if (st.lineLen > 0) { st.lineLen--; st.cur = [st.cur[0], st.cur[1] - 1]; scr.put(st.cur[0], st.cur[1], " "); } }
+    else if (e.key === "Enter") { e.preventDefault(); newline(); st.lineLen = 0; }
+    else if (e.key.length === 1 && e.key >= " " && e.key <= "~") {
+      e.preventDefault();
+      scr.put(st.cur[0], st.cur[1], e.key);
+      st.lineLen++;
+      if (st.cur[1] + 1 >= COLS) newline(); else st.cur = [st.cur[0], st.cur[1] + 1];
+    } else return;
+    draw();
+  });
+  $("hero-screen").addEventListener("click", () => $("hero-screen").focus());
+  $("hero-replay").addEventListener("click", reset);
+  $("hero-slow").addEventListener("click", e => { slow = !slow; e.currentTarget.setAttribute("aria-pressed", String(slow)); });
+  reset();
+  return { reset };
+})();
+
+/* 让 80 列正好放满屏幕框：量出当前字号下一行的实际宽度，再按比例缩放。 */
+function fitVGA(el) {
+  const wrap = el.parentElement;
+  const avail = wrap.clientWidth - parseFloat(getComputedStyle(wrap).paddingLeft) - parseFloat(getComputedStyle(wrap).paddingRight);
+  const probe = document.createElement("span");
+  probe.textContent = "M".repeat(COLS);
+  probe.style.cssText = "position:absolute;visibility:hidden;white-space:pre;font-family:var(--font-vga);font-size:20px";
+  document.body.appendChild(probe);
+  const w = probe.getBoundingClientRect().width;
+  probe.remove();
+  if (w > 0 && avail > 0) el.style.fontSize = (20 * avail / w * 0.995) + "px";
+}
+const fitHero = () => fitVGA($("hero-screen"));
+fitHero();
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(fitHero);
+window.addEventListener("resize", fitHero);
+
+/* ===================== 启动播放器 ===================== */
+const MEM = [
+  { id: "ivt", addr: 0x00000, what: "中断向量表、BIOS 数据区（实模式用）" },
+  { id: "boot", addr: 0x07c00, what: "boot.bin（512 B）；它下方是 loader 用的栈" },
+  { id: "loader", addr: 0x08000, what: "loader.bin（512 B），含临时 GDT" },
+  { id: "ktext", addr: FACTS.text, what: "内核 .text / .rodata / .data" },
+  { id: "kuser", addr: FACTS.user, what: ".user：用户代码（用户态只读）、用户栈（打开用户位）" },
+  { id: "kstack", addr: FACTS.bss, what: ".bss：内核栈（栈顶 " + hex(FACTS.stackTop) + "）" },
+  { id: "tables", addr: FACTS.gdt, what: ".bss：GDT、IDT" },
+  { id: "paging", addr: FACTS.identity, what: ".bss：4 张页表、页目录 " + hex(FACTS.pageDir) + "、别名页表" },
+  { id: "tasks", addr: FACTS.tss, what: ".bss：3 个 TSS、任务 A/B 的内核栈" },
+  { id: "vga", addr: 0xb8000, what: "VGA 文本显存（也映射在 0xC0000000）" },
+];
+const STAGES = [
+  { t: "BIOS 上电自检", where: "ROM", mode: ["16 位实模式"], row0: "",
+    mem: ["ivt", "boot"], newMem: ["boot"],
+    text: "CPU 复位后在实模式下执行 BIOS。BIOS 自检、初始化硬件，把软盘的第一个扇区（LBA 0）读到物理地址 <code>0x7C00</code>，检查末尾的 <code>55 AA</code> 签名后跳过去。",
+    code: "; 扇区最后两个字节\ndw 0xaa55        ; 小端存储为 55 AA",
+    linux: "Linux 0.11：BIOS 同样把 bootsect.s 读到 0x7C00。" },
+  { t: "第一阶段 boot.asm", where: "0x7C00", mode: ["16 位实模式"], row0: "A",
+    mem: ["ivt", "boot", "loader"], newMem: ["loader"],
+    text: "先用远跳转把 CS:IP 统一成 <code>0000:7C00</code>，关中断设好段寄存器和栈（SP = 0x7C00，向下长），保存 BIOS 用 DL 传来的启动盘号。清屏打印 <code>A</code>，用 <code>int 0x13 AH=02h</code> 把扇区 2 读到 <code>0x8000</code>。读失败时先复位磁盘系统再试（真实软驱刚上电时第一次读常常失败），3 次都失败才显示 <code>AE</code> 停机。",
+    code: "mov bx, 0x8000     ; ES:BX = 0000:8000\nmov ax, 0x0201     ; 读 1 个扇区\nmov cx, 0x0002     ; 柱面 0，扇区 2\nint 0x13\njmp 0x0000:0x8000",
+    linux: "Linux 0.11 的 bootsect.s 先把自己搬到 0x90000，再把 setup 读到 0x90200。" },
+  { t: "第二阶段：读入内核", where: "loader.asm（实模式）", mode: ["16 位实模式"], row0: "AB",
+    mem: ["ivt", "boot", "loader", "ktext", "kuser"], newMem: ["ktext", "kuser"],
+    text: "打印 <code>B</code>，用 <code>AH=08h</code> 问出软盘几何参数，再从 LBA 2 起逐个扇区把 kernel.bin 读到 <code>0x10000</code>。必须趁现在读：进入保护模式后 BIOS 就不能用了。扇区数由 Makefile 按 kernel.bin 的大小算出，通过 <code>-DKERNEL_SECTORS</code> 传进来。查询结果里每道扇区数为 0 时改用 18，免得除以零；读完后向端口 <code>0x3F2</code> 写 0 关掉软驱马达，因为之后 BIOS 靠定时器关马达的逻辑不会再运行。",
+    code: "; LBA → CHS\ndiv bx         ; AX = LBA / 每道扇区数，DX = 余数\ninc dl         ; 扇区号从 1 开始\ndiv bx         ; AX = 柱面，DX = 磁头\nint 0x13       ; 读 1 个扇区到 ES:0，ES += 0x20",
+    linux: "Linux 0.11：bootsect.s 在实模式下把内核读到 0x10000（SYSSEG = 0x1000）。" },
+  { t: "进入保护模式", where: "loader.asm（32 位）", mode: ["32 位保护模式", "CPL 0"], row0: "ABP",
+    mem: ["boot", "loader", "ktext", "kuser", "vga"], newMem: ["vga"],
+    text: "<code>cli</code>，经端口 0x92 打开 A20，<code>lgdt</code> 装入 loader 里的临时 GDT，置 CR0 的 PE 位，再用远跳转 <code>jmp 0x08:protected_mode</code> 重新装载 CS。从这里开始是 32 位代码，BIOS 不能用了，直接往显存 <code>0xB8004</code> 写 <code>P</code>，然后跳到 <code>0x10000</code>。",
+    code: "mov eax, cr0\nor  eax, 1           ; PE\nmov cr0, eax\njmp CODE_SEL:protected_mode",
+    linux: "Linux 0.11：setup.s 开 A20、重设 8259、置 PE，跳到 head.s。" },
+  { t: "内核入口 entry.asm", where: "_start @ 0x10000", mode: ["32 位保护模式", "CPL 0"], row0: "ABPK",
+    mem: ["ktext", "kuser", "kstack", "tables", "paging", "tasks", "vga"], newMem: ["kstack", "tables", "paging", "tasks"],
+    text: "链接脚本保证 <code>_start</code> 是 kernel.bin 的第一个字节。它把 ESP 换成内核自己的 4 KB 栈，用 <code>rep stosb</code> 把 <code>.bss</code> 清零（C 语言要求未初始化的全局变量为 0，而 .bss 不在文件里），写 <code>K</code>，调用 <code>kmain()</code>。",
+    code: "mov esp, stack_top\nmov edi, __bss_start\nmov ecx, __bss_end\nsub ecx, edi\nxor eax, eax\nrep stosb\ncall kmain",
+    linux: "Linux 0.11：head.s 设好栈，建 IDT、GDT 和页表，再“返回”进 main()。" },
+  { t: "kmain() 初始化", where: "kernel.c", mode: ["32 位保护模式", "CPL 0", "分页"], row0: "ABPKCV",
+    mem: ["ktext", "kuser", "kstack", "tables", "paging", "tasks", "vga"], newMem: [],
+    text: "写 <code>C</code> 和问候语，然后依次：<code>gdt_init()</code> 换上内核自己的 GDT；<code>idt_init()</code> 填好 IDT；<code>paging_init()</code> 建页表、装 CR3、置 PG，并通过 <code>0xC0000000</code> 写出 <code>V</code>；<code>pic_init()</code> 把 IRQ 挪到 0x20；<code>keyboard_init()</code> 读光键盘控制器里残留的字节（否则开机时按住的键会让键盘中断再也不来）；<code>timer_init(100)</code>；<code>sched_init()</code> 建 3 个 TSS 并用 <code>ltr</code> 把 kmain 登记为任务 0。",
+    code: "gdt_init();\nidt_init();\npaging_init();\n((volatile uint16_t *)VGA_ALIAS)[5] = 0x0700 | 'V';\npic_init();\nkeyboard_init();\ntimer_init(TIMER_HZ);\nsched_init();",
+    linux: "Linux 0.11 的 main()：trap_init、sched_init 等依次初始化各子系统。" },
+  { t: "打开中断，开始调度", where: "kernel.c", mode: ["32 位保护模式", "CPL 0", "分页", "IF=1"], row0: "ABPKCVIT",
+    mem: ["ktext", "kuser", "kstack", "tables", "paging", "tasks", "vga"], newMem: [],
+    text: "IDT 和 8259 都准备好之后才能 <code>sti</code>，此后定时器每 10 ms 打断一次 CPU。写 <code>I</code>，运行自检（正常构建为空），<code>sched_start()</code> 写 <code>T</code>。kmain 停在 <code>hlt</code> 上等下一个中断：下一个 tick 它就被切走，以后只在所有任务都结束时才回来当空闲任务。",
+    code: "__asm__ volatile(\"sti\");\nselftest_run();\nsched_start();\nfor (;;) __asm__ volatile(\"hlt\");",
+    linux: "Linux 0.11：move_to_user_mode() 之后 fork 出进程 1，进程 0 永远 pause()。" },
+  { t: "任务轮转与用户态", where: "sched.c · user.c", mode: ["32 位保护模式", "分页", "IF=1", "CPL 0 / 3"], row0: "ABPKCVITU",
+    mem: ["ktext", "kuser", "kstack", "tables", "paging", "tasks", "vga"], newMem: [],
+    text: "第一个 tick：<code>ljmp</code> 到任务 A 的 TSS（<code>0x20</code>），A 在内核态写 <code>A</code>。20 个 tick 后切到任务 B（<code>0x28</code>）：它的 TSS 里全是用户段选择子，CPU 直接进入特权级 3。B 第一次执行 <code>int 0x80</code>，内核写出 <code>U</code>。此后 A、B 每 20 个 tick 轮换一次，每段约 10 个字母。",
+    code: "void user_main(void) {\n    char letter = 'A' + getpid() - 1;\n    for (;;) { write(1, &letter, 1); sleep(2); }\n}",
+    linux: "Linux 0.11：schedule() 选出 counter 最大的进程，switch_to 用 ljmp 切过去。" },
+];
+const boot = (() => {
+  let cur = 0, timer = 0, playing = false;
+  const list = $("stage-list");
+  STAGES.forEach((s, i) => {
+    const li = document.createElement("li");
+    li.innerHTML = `<button type="button"><span class="n">${i + 1}</span><span>${s.t}<span class="where">${s.where}</span></span></button>`;
+    li.querySelector("button").addEventListener("click", () => { stop(); show(i); });
+    list.appendChild(li);
+  });
+  function show(i) {
+    cur = i;
+    const s = STAGES[i];
+    list.querySelectorAll("button").forEach((b, j) => { if (j === i) b.setAttribute("aria-current", "step"); else b.removeAttribute("aria-current"); });
+    const allModes = ["16 位实模式", "32 位保护模式", "CPL 0", "CPL 0 / 3", "分页", "IF=1"];
+    const chips = allModes.map(m => `<span class="chip${s.mode.includes(m) ? " on" : ""}">${m}</span>`).join("");
+    const mem = MEM.map(m => `<div class="mem${s.newMem.includes(m.id) ? " new" : s.mem.includes(m.id) ? " on" : ""}"><span class="addr">${hex(m.addr)}</span><span class="what">${m.what}</span></div>`).join("");
+    $("stage-detail").innerHTML = `
+      <h3>${i + 1}. ${s.t}</h3>
+      <div class="chips" aria-label="CPU 状态">${chips}</div>
+      <p>${s.text}</p>
+      <div class="boot-split">
+        <div class="memmap" aria-label="此时内存中有什么">${mem}</div>
+        <div style="display:flex;flex-direction:column;gap:10px;min-width:0">
+          <div class="vga-wrap" style="padding:8px 10px"><pre class="vga" style="font-size:5.4cqi" aria-label="屏幕第 0 行">${(s.row0 || " ").padEnd(14, " ")}</pre></div>
+          <pre class="code">${s.code.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</pre>
+        </div>
+      </div>
+      <p class="linux">${s.linux}</p>`;
+    $("boot-pos").textContent = `第 ${i + 1} / ${STAGES.length} 阶段`;
+    $("boot-bar").style.width = `${((i + 1) / STAGES.length) * 100}%`;
+  }
+  function stop() { playing = false; clearInterval(timer); $("boot-play").textContent = "播放"; }
+  function play() {
+    if (playing) { stop(); return; }
+    playing = true; $("boot-play").textContent = "暂停";
+    if (cur === STAGES.length - 1) show(0);
+    timer = setInterval(() => { if (cur < STAGES.length - 1) show(cur + 1); else stop(); }, 4200);
+  }
+  $("boot-play").addEventListener("click", play);
+  $("boot-prev").addEventListener("click", () => { stop(); show(Math.max(0, cur - 1)); });
+  $("boot-next").addEventListener("click", () => { stop(); show(Math.min(STAGES.length - 1, cur + 1)); });
+  show(0);
+})();
+
+/* ===================== 软盘与 CHS ===================== */
+(() => {
+  const disk = $("disk"), SPT = 18, HEADS = 2;
+  for (let lba = 0; lba < 108; lba++) {
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "sector";
+    b.setAttribute("aria-label", `LBA ${lba}`);
+    if (lba === 0) b.classList.add("boot"); else if (lba === 1) b.classList.add("loader");
+    else if (lba < 2 + FACTS.kernelSectors) b.classList.add("kernel");
+    b.textContent = lba;
+    b.style.minHeight = "0"; b.style.padding = "0";
+    b.addEventListener("click", () => pick(lba));
+    disk.appendChild(b);
+  }
+  function pick(lba) {
+    [...disk.children].forEach((c, i) => c.classList.toggle("hit", i === lba));
+    const c = Math.floor(lba / SPT / HEADS), h = Math.floor(lba / SPT) % HEADS, s = lba % SPT + 1;
+    $("chs-lba").textContent = lba; $("chs-c").textContent = c; $("chs-h").textContent = h; $("chs-s").textContent = s;
+    $("chs-addr").textContent = lba === 0 ? "0x07C00" : lba === 1 ? "0x08000" : lba < 2 + FACTS.kernelSectors ? hex(0x10000 + (lba - 2) * 512) : "不读入";
+  }
+  pick(20);
+})();
+
+/* ===================== 中断时的栈 ===================== */
+const stackDemo = (() => {
+  const RING0 = {
+    init: "任务 A 正在内核态运行，停在 <code>sys_sleep()</code> 的 <code>hlt</code> 上。8259 送来中断号 <code>0x20</code>（定时器）。",
+    steps: [
+      { who: "cpu", label: "EFLAGS", val: "0x00000202", text: "CPU 查 IDT 第 0x20 项：DPL 0 的<b>中断门</b>。特权级没有变化（都是 0），所以<b>不换栈</b>，直接在任务 A 当前的内核栈上压入。先压 EFLAGS，然后清除 IF，处理期间不会再被中断打断。" },
+      { who: "cpu", label: "CS", val: "0x0008", text: "压入被打断代码的 CS：内核代码段 <code>0x08</code>。" },
+      { who: "cpu", label: "EIP", val: "sys_sleep+…", text: "压入返回地址 EIP，然后跳到 IDT 里登记的入口 <code>isr32</code>。" },
+      { who: "stub", label: "错误码", val: "0", text: "定时器中断没有错误码。<code>isr32</code> 补压一个 0，让所有中断的栈布局都一样。" },
+      { who: "stub", label: "中断号", val: "0x20", text: "<code>isr32</code> 压入中断号 0x20，跳到公共部分 <code>isr_common</code>。" },
+      { who: "common", label: "EAX…EDI", val: "pushad", text: "<code>pushad</code> 一次压入 8 个通用寄存器：EAX、ECX、EDX、EBX、原 ESP、EBP、ESI、EDI。" },
+      { who: "common", label: "DS ES FS GS", val: "0x0010 ×4", text: "再压入 4 个段寄存器，然后把它们都换成内核数据段 <code>0x10</code>。被打断的若是用户程序，这时它们是用户段 <code>0x3B</code>。" },
+      { who: "common", label: "ESP → frame", val: "push esp", text: "此刻 ESP 指向的这一块，从低地址到高地址正好是 <code>struct interrupt_frame</code>。把 ESP 作为参数调用 <code>interrupt_dispatch(frame)</code>：先发 EOI，再调用 <code>timer_handle()</code>。时间片到了的话，<code>schedule()</code> 会在这里切到另一个任务。" },
+      { pop: true, text: "处理完毕：依次弹出 GS、FS、ES、DS，<code>popad</code>，丢掉中断号和错误码，<code>iretd</code> 弹出 EIP、CS、EFLAGS，回到 <code>hlt</code> 的下一条指令。栈恢复原样。" },
+    ],
+  };
+  const RING3 = {
+    init: "任务 B 在用户态（CPL 3）执行 <code>int $0x80</code>，ESP 指向用户栈。EAX=0（write），EBX=1，ECX=&amp;letter，EDX=1。",
+    steps: [
+      { who: "cpu", label: "（换栈）", val: "ss0:esp0", text: "CPU 查 IDT 第 0x80 项：DPL 3 的<b>陷阱门</b>，CPL 3 ≤ 3，允许调用。门里的代码段是 DPL 0，特权级要从 3 变成 0，所以 CPU 从当前 TSS 取出 <code>ss0:esp0</code>，把栈<b>换成任务 B 的内核栈</b>。用户栈不可信，内核不能在上面工作。", swap: true },
+      { who: "cpu", label: "用户 SS", val: "0x003B", text: "在新栈上先压入用户态的 SS（用户数据段 0x3B）……" },
+      { who: "cpu", label: "用户 ESP", val: "user_stack+…", text: "……和用户态的 ESP，返回时才能回到用户栈。从内核态进入的中断没有这两项。" },
+      { who: "cpu", label: "EFLAGS", val: "0x00000202", text: "压 EFLAGS。陷阱门不清除 IF：系统调用执行期间中断照常打开，sleep 才能等到 tick。" },
+      { who: "cpu", label: "CS", val: "0x0033", text: "压入用户代码段 <code>0x33</code>，它的低 2 位 3 记录了“刚才在用户态”。装入 CS=0x08，CPL 变成 0。" },
+      { who: "cpu", label: "EIP", val: "user_main+…", text: "压入 int 0x80 下一条指令的地址，跳到 <code>isr_syscall</code>。" },
+      { who: "stub", label: "错误码", val: "0", text: "<code>int</code> 指令不产生错误码，补压 0。" },
+      { who: "stub", label: "中断号", val: "0x80", text: "压入 0x80，跳到 <code>isr_common</code>。" },
+      { who: "common", label: "EAX…EDI", val: "pushad", text: "<code>pushad</code>。保存下来的 EAX=0 就是调用号，EBX、ECX、EDX 是参数。" },
+      { who: "common", label: "DS ES FS GS", val: "0x003B ×4", text: "保存用户的段寄存器 0x3B，换成内核数据段 0x10。" },
+      { who: "common", label: "ESP → frame", val: "push esp", text: "调用 <code>interrupt_dispatch(frame)</code> → <code>syscall_dispatch()</code>。<code>from_user_mode(frame)</code> 看 frame->cs 的低 2 位是 3，于是检查用户传来的指针。返回值写回 frame->eax。" },
+      { pop: true, text: "<code>popad</code> 把改写过的 EAX（返回值）装回寄存器。<code>iretd</code> 弹出 EIP、CS、EFLAGS，发现 CS 的 RPL 是 3，再弹出 ESP 和 SS，回到用户态和用户栈。" },
+    ],
+  };
+  let sc = RING0, pos = 0;
+  function render() {
+    const steps = sc.steps.slice(0, pos);
+    const popped = steps.length && steps[steps.length - 1].pop;
+    const filled = popped ? [] : steps.filter(s => !s.swap);
+    const swapped = sc === RING3 && pos > 0;
+    const capacity = sc === RING3 ? 10 : 8;
+    const slots = [];
+    const base = swapped ? "B 的内核栈顶" : "A 的内核栈";
+    for (let i = 0; i < capacity; i++) {
+      const s = filled[i];
+      const isTop = i === filled.length - 1;
+      const off = i === 0 ? "高地址" : "";
+      if (s) slots.push(`<div class="slot filled ${s.who}${isTop ? " just" : ""}"><span>${s.label}</span><span class="mono">${s.val}</span><span class="who">${isTop ? '<span class="esp">← ESP</span>' : ""}</span></div>`);
+      else slots.push(`<div class="slot"><span>${off}</span><span></span><span class="who">${i === 0 && filled.length === 0 ? '<span class="esp">← ESP</span>' : ""}</span></div>`);
+    }
+    $("stack").innerHTML = `<div class="small muted">${popped ? (sc === RING3 ? "已回到用户栈" : "栈已恢复") : base}（上方是高地址，栈向下长）</div>` + slots.join("");
+    const s = sc.steps[pos - 1];
+    $("stk-text").innerHTML = `<p>${pos === 0 ? sc.init : s.text}</p>`;
+    $("stk-pos").textContent = `${pos} / ${sc.steps.length}`;
+    $("stk-prev").disabled = pos === 0;
+    $("stk-next").disabled = pos === sc.steps.length;
+  }
+  function use(which) {
+    sc = which; pos = 0;
+    $("stk-ring0").setAttribute("aria-pressed", String(which === RING0));
+    $("stk-ring3").setAttribute("aria-pressed", String(which === RING3));
+    render();
+  }
+  $("stk-ring0").addEventListener("click", () => use(RING0));
+  $("stk-ring3").addEventListener("click", () => use(RING3));
+  $("stk-next").addEventListener("click", () => { if (pos < sc.steps.length) { pos++; render(); } });
+  $("stk-prev").addEventListener("click", () => { if (pos > 0) { pos--; render(); } });
+  $("stk-reset").addEventListener("click", () => { pos = 0; render(); });
+  render();
+})();
+
+/* ===================== 分页翻译器 ===================== */
+const paging = (() => {
+  let user = false, write = false;
+  const presets = [
+    ["0xC0000004", "显存别名"], ["0x00012000", "用户代码"], ["0x00013000", "用户栈"], ["0x" + FACTS.ticks.toString(16).toUpperCase().padStart(8, "0"), "timer_ticks"],
+    ["0x00000000", "空指针"], ["0x00FFFFFF", "16 MB 末尾"], ["0x01000000", "16 MB 以上"], ["0xD0000000", "未映射"],
+  ];
+  const userPages = new Set();
+  for (let a = FACTS.user; a < FACTS.userEnd; a += 4096) userPages.add(a >>> 12);
+  function pde(dir) {
+    if (dir < 4) return { p: 1, w: 1, u: 1, table: `identity_tables[${dir}]`, at: FACTS.identity + dir * 4096 };
+    if (dir === 768) return { p: 1, w: 1, u: 0, table: "alias_table", at: FACTS.alias };
+    return { p: 0, w: 0, u: 0 };
+  }
+  function pte(dir, idx) {
+    if (dir < 4) {
+      const page = dir * 1024 + idx;
+      if (page === 0) return { p: 0, w: 0, u: 0, why: "第 0 页故意不映射，用来捕获空指针" };
+      const u = userPages.has(page) ? 1 : 0;
+      const w = u && page < FACTS.userData >>> 12 ? 0 : 1;      /* 用户代码页对用户态只读 */
+      return { p: 1, w, u, frame: page * 4096 };
+    }
+    if (dir === 768) return idx === 0 ? { p: 1, w: 1, u: 0, frame: 0xb8000 } : { p: 0, w: 0, u: 0, why: "别名只映射了一页" };
+    return { p: 0 };
+  }
+  const flags = e => `P=${e.p} W=${e.w} U=${e.u}`;
+  function run() {
+    const raw = $("va-input").value.trim();
+    const va = /^0x[0-9a-f]{1,8}$/i.test(raw) ? parseInt(raw, 16) >>> 0 : /^\d+$/.test(raw) ? Number(raw) >>> 0 : NaN;
+    if (Number.isNaN(va) || va > 0xffffffff) {
+      $("pg-bits").innerHTML = ""; $("pg-walk").innerHTML = "";
+      $("pg-result").className = "result bad"; $("pg-result").textContent = "请输入 32 位十六进制地址，例如 0xC0000004。";
+      return;
+    }
+    const dir = va >>> 22, idx = (va >>> 12) & 0x3ff, off = va & 0xfff;
+    const bin = (n, w) => n.toString(2).padStart(w, "0");
+    $("pg-bits").innerHTML = `<div class="d">高 10 位 ${bin(dir, 10)}<br>页目录第 ${dir} 项</div><div class="t">中 10 位 ${bin(idx, 10)}<br>页表第 ${idx} 项</div><div class="o">低 12 位 ${bin(off, 12)}<br>页内偏移 0x${off.toString(16).toUpperCase()}</div>`;
+    const steps = [];
+    const errBase = (write ? 2 : 0) | (user ? 4 : 0);
+    let fault = null, phys = null;
+    const d = pde(dir);
+    steps.push({ ok: d.p, html: `CR3 = <span class="mono">${hex(FACTS.pageDir)}</span>（page_directory）→ 第 ${dir} 项：${d.p ? `<span class="mono">${flags(d)}</span>，指向 <span class="mono">${d.table}</span>` : "存在位为 0"}` });
+    if (!d.p) fault = { err: errBase, why: "页目录项不存在" };
+    else {
+      const e = pte(dir, idx);
+      steps.push({ ok: e.p, html: `<span class="mono">${d.table}</span> 第 ${idx} 项：${e.p ? `<span class="mono">${flags(e)}</span>，物理页 <span class="mono">${hex(e.frame)}</span>` : `存在位为 0${e.why ? "（" + e.why + "）" : ""}`}` });
+      if (!e.p) fault = { err: errBase, why: "页表项不存在" };
+      else if (user && !(d.u && e.u)) {
+        steps.push({ ok: 0, html: `用户态访问：页目录项 U=${d.u}，页表项 U=${e.u}，两者取“与”为 0，只有内核能访问这一页` });
+        fault = { err: errBase | 1, why: "用户态访问了没有用户位的页" };
+      } else if (user && write && !(d.w && e.w)) {
+        steps.push({ ok: 0, html: `用户态写入：这一页的 W=0，只读` });
+        fault = { err: errBase | 1, why: "用户态写了只读页" };
+      } else {
+        if (user) steps.push({ ok: 1, html: `用户态访问：页目录项和页表项的 U 都是 1，允许${write ? "，W=1 允许写" : ""}` });
+        else steps.push({ ok: 1, html: `内核态访问：不看 U 位${write ? "；CR0.WP=0，内核写只读页也不受限" : ""}` });
+        phys = e.frame + off;
+      }
+    }
+    $("pg-walk").innerHTML = steps.map((s, i) => `<div class="walk-step ${s.ok ? "ok" : "bad"}"><span class="dot">${i + 1}</span><div class="body">${s.html}</div></div>`).join("");
+    const r = $("pg-result");
+    if (fault) {
+      r.className = "result bad";
+      r.innerHTML = `14 号缺页异常（#PF）：${fault.why}。CR2 = <span class="mono">${hex8(va)}</span>，错误码 = <span class="mono">${fault.err}</span>（P=${fault.err & 1} 表示${fault.err & 1 ? "页存在但权限不够" : "页不存在"}，W=${(fault.err >> 1) & 1}，U=${(fault.err >> 2) & 1}）。${user ? "来自用户态：内核只结束这个任务。" : "来自内核态：显示异常面板并停机。"}`;
+    } else {
+      r.className = "result ok";
+      r.innerHTML = `物理地址 <span class="mono">${hex8(phys)}</span>${va >>> 0 === phys ? "（一一对应）" : ""}${phys >= 0xb8000 && phys < 0xc0000 ? "：显存" : ""}`;
+    }
+  }
+  const pre = $("pg-presets");
+  presets.forEach(([v, name]) => {
+    const b = document.createElement("button"); b.type = "button"; b.textContent = `${v} ${name}`;
+    b.addEventListener("click", () => { $("va-input").value = v; run(); });
+    pre.appendChild(b);
+  });
+  const setMode = u => { user = u; $("pg-kernel").setAttribute("aria-pressed", String(!u)); $("pg-user").setAttribute("aria-pressed", String(u)); run(); };
+  const setRW = w => { write = w; $("pg-read").setAttribute("aria-pressed", String(!w)); $("pg-write").setAttribute("aria-pressed", String(w)); run(); };
+  $("pg-kernel").addEventListener("click", () => setMode(false));
+  $("pg-user").addEventListener("click", () => setMode(true));
+  $("pg-read").addEventListener("click", () => setRW(false));
+  $("pg-write").addEventListener("click", () => setRW(true));
+  $("va-input").addEventListener("input", run);
+  run();
+  return { run };
+})();
+
+/* ===================== 任务切换动画 ===================== */
+const tasks = (() => {
+  const SLICE = 20, WIDTH = 73, TICK_MS = 120;
+  let s, timer = 0, playing = false;
+  const msgScr = new Screen($("ts-msg"), 1);
+  function fresh() {
+    return {
+      tick: 0, current: 0, slice: 1, pos: 0, out: Array(WIDTH).fill(" "), wake: [0, 0, 0], alive: [true, true, true],
+      hist: [], saving: -1, msg: "", killAt: -1, userSeen: false,
+      tss: [
+        { name: "任务 0（kmain）", sel: "0x18", cs: "0x0008", eip: "kmain 的 hlt", esp: hex(FACTS.stackTop - 0x40), note: "ltr 登记为当前任务" },
+        { name: "任务 A（内核态）", sel: "0x20", cs: "0x0008", eip: "task_main", esp: "A 的内核栈顶", note: "初始值" },
+        { name: "任务 B（用户态）", sel: "0x28", cs: "0x0033", eip: "user_main", esp: "user_stack 顶", note: "初始值；ss0:esp0 = B 的内核栈" },
+      ],
+    };
+  }
+  function pickNext() {
+    let n = s.current;
+    for (let k = 0; k < 2; k++) { n = n % 2 + 1; if (s.alive[n]) return n; }
+    return 0;
+  }
+  function switchTo(next) {
+    const old = s.tss[s.current];
+    old.cs = "0x0008"; old.eip = "switch_to()"; old.esp = "内核栈中"; old.note = "在定时器中断里被切走时保存";
+    s.saving = s.current;
+    s.current = next;
+  }
+  function step() {
+    s.tick++;
+    s.saving = -1;
+    if (--s.slice <= 0) { s.slice = SLICE; const n = pickNext(); if (n !== s.current) switchTo(n); }
+    const t = s.current;
+    if (t && s.alive[t] && s.wake[t] <= s.tick) {
+      if (t === 2 && s.killAt === 0) {
+        s.alive[2] = false; s.msg = `task 2 killed by #PF page fault: EIP=0x${(FACTS.userMain + 0x10).toString(16).toUpperCase().padStart(8, "0")} error=0x00000007`;
+        s.killAt = -2; s.tss[2].note = "已结束，不再调度";
+        const n = pickNext(); s.slice = SLICE; switchTo(n);
+      } else {
+        s.out[s.pos] = t === 1 ? "A" : "B"; s.pos = (s.pos + 1) % WIDTH; s.wake[t] = s.tick + 2;
+      }
+    }
+    s.hist.push(s.current === 1 ? "A" : s.current === 2 ? "B" : "");
+    if (s.hist.length > 60) s.hist.shift();
+    render();
+  }
+  function render() {
+    const tl = s.hist.concat(Array(Math.max(0, 60 - s.hist.length)).fill(null));
+    $("ts-timeline").innerHTML = tl.map((h, i) => `<i class="${h || ""}${i === s.hist.length - 1 ? " now" : ""}"></i>`).join("");
+    $("ts-cards").innerHTML = s.tss.map((t, i) => `<div class="tss${i === s.current ? " current" : ""}${i === s.saving ? " saving" : ""}${!s.alive[i] && i ? " dead" : ""}">
+      <h4>${t.name}</h4><span>TSS 选择子 ${t.sel}</span><span>CS  ${t.cs}</span><span>EIP ${t.eip}</span><span>ESP ${t.esp}</span>
+      <span class="muted" style="font-family:var(--font-body);font-size:12px">${i === s.current ? "← TR 指向这里，正在运行" : t.note}</span></div>`).join("");
+    $("ts-out").textContent = "tasks: " + s.out.join("");
+    msgScr.clear(); if (s.msg) msgScr.line(0, s.msg, "0E"); msgScr.render();
+    const names = ["任务 0", "任务 A（CPL 0）", "任务 B（CPL 3）"];
+    $("ts-status").textContent = `tick ${s.tick} · 当前 ${names[s.current]} · 时间片还剩 ${s.slice}`;
+  }
+  function stop() { playing = false; clearInterval(timer); $("ts-play").textContent = "播放"; }
+  function play() {
+    if (playing) { stop(); return; }
+    playing = true; $("ts-play").textContent = "暂停";
+    timer = setInterval(step, TICK_MS);
+  }
+  $("ts-play").addEventListener("click", play);
+  $("ts-step").addEventListener("click", () => { stop(); step(); });
+  $("ts-reset").addEventListener("click", () => { stop(); s = fresh(); render(); });
+  $("ts-kill").addEventListener("click", () => { if (s.alive[2] && s.killAt === -1) { s.killAt = 0; if (!playing) play(); } });
+  s = fresh();
+  for (let i = 0; i < 46; i++) step();
+  render();
+})();
+
+/* ===================== 系统调用时序 ===================== */
+(() => {
+  const SCEN = {
+    ok: { name: "正常的 write", steps: [
+      ["u", "user_main：<code>write(1, &letter, 1)</code>，syscall.h 把 EAX=0、EBX=1、ECX=&letter、EDX=1 放好，执行 <code>int $0x80</code>", { EAX: "0", EBX: "1", ECX: "&letter", EDX: "1", CS: "0x0033", SS: "0x003B" }],
+      ["c", "查 IDT 第 0x80 项：DPL 3 的陷阱门，CPL 3 允许调用", {}],
+      ["c", "特权级 3 → 0：从 TSS 取 ss0:esp0 换到 B 的内核栈，压入 SS、ESP、EFLAGS、CS、EIP", { CS: "0x0008", SS: "0x0010" }],
+      ["k", "isr_syscall → isr_common：保存寄存器，DS 等换成 0x10 → interrupt_dispatch() → syscall_dispatch()", {}],
+      ["k", "frame->cs 低 2 位是 3：from_user = 1。第一次来自用户态的调用，在第 0 行写 <code>U</code>", {}],
+      ["k", "sys_write：<code>user_range_ok(&letter, 1)</code>：在 .user 段内，通过", {}],
+      ["k", "task_write_char('B')：关中断写第 6 行，再恢复中断状态；frame->eax = 1", {}],
+      ["c", "isr_common 恢复寄存器，<code>iretd</code>：CS 的 RPL 是 3，再弹出 ESP、SS", { EAX: "1", CS: "0x0033", SS: "0x003B" }],
+      ["u", "write 返回 1，接着调用 <code>sleep(2)</code>，又是一次 int 0x80", {}],
+    ] },
+    bad: { name: "传入内核地址", steps: [
+      ["u", "用户程序试图让内核替它读内核内存：<code>write(1, (void *)0x10000, 1)</code>", { EAX: "0", EBX: "1", ECX: "0x00010000", EDX: "1", CS: "0x0033", SS: "0x003B" }],
+      ["c", "和正常调用一样：换到内核栈，进入 isr_syscall", { CS: "0x0008", SS: "0x0010" }],
+      ["k", "sys_write：调用方在用户态，<code>user_range_ok(0x10000, 1)</code>：不在 .user 段内", {}],
+      ["k", "拒绝：不读 0x10000，frame->eax = -1", {}],
+      ["c", "<code>iretd</code> 回到用户态", { EAX: "-1", CS: "0x0033", SS: "0x003B" }],
+      ["u", "write 返回 -1。如果内核不检查，就会把内核代码的字节写到屏幕上（测试 USER_BAD_POINTER 的反向对照中确实出现过）", {}],
+    ] },
+    kill: { name: "越权写内核变量", steps: [
+      ["u", "用户程序执行 <code>timer_ticks = 0</code>：往内核的变量写", { CS: "0x0033", SS: "0x003B" }],
+      ["c", "查页表：页目录项 U=1，但 timer_ticks 所在页的页表项 U=0", {}, "fault"],
+      ["c", "14 号缺页异常：CR2 = timer_ticks 的地址，错误码 7（存在、写、用户态）；换到内核栈，进入 isr14", { CS: "0x0008", SS: "0x0010" }],
+      ["k", "interrupt_dispatch：vector &lt; 32 且 frame->cs 低 2 位是 3 → user_exception()", {}],
+      ["k", "第 7 行写黄字：<code>task 2 killed by #PF page fault: EIP=… error=0x00000007</code>", {}],
+      ["k", "sched_exit_current()：标记任务 B 已结束，ljmp 切到任务 A，永不返回", {}],
+      ["k", "此后 schedule() 只找到任务 A：下一个任务就是自己时不切换（跳到自己的 TSS 会触发 #GP）", {}],
+    ] },
+  };
+  let sc = "ok", pos = 1;
+  const wrap = $("sc-scenarios");
+  Object.entries(SCEN).forEach(([k, v]) => {
+    const b = document.createElement("button"); b.type = "button"; b.textContent = v.name; b.dataset.k = k;
+    b.addEventListener("click", () => { sc = k; pos = 1; render(); });
+    wrap.appendChild(b);
+  });
+  function regsAt(n) {
+    const regs = { EAX: "?", EBX: "?", ECX: "?", EDX: "?", CS: "?", SS: "?" };
+    const changed = new Set();
+    SCEN[sc].steps.slice(0, n).forEach(([, , r], i) => Object.entries(r).forEach(([k, v]) => { regs[k] = v; if (i === n - 1) changed.add(k); }));
+    return { regs, changed };
+  }
+  function render() {
+    wrap.querySelectorAll("button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.k === sc)));
+    const steps = SCEN[sc].steps;
+    $("sc-rows").innerHTML = steps.map(([lane, text, , kind], i) => {
+      const cls = i + 1 === pos ? "cur" : i + 1 > pos ? "future" : "";
+      const cell = l => l === lane ? `<div class="on${kind ? " " + kind : ""}">${i + 1}. ${text}</div>` : "<div></div>";
+      return `<div class="seq-row ${cls}">${cell("u")}${cell("c")}${cell("k")}</div>`;
+    }).join("");
+    const { regs, changed } = regsAt(pos);
+    $("sc-regs").innerHTML = Object.entries(regs).map(([k, v]) => `<div class="${changed.has(k) ? "changed" : ""}">${k} ${v}</div>`).join("");
+    $("sc-pos").textContent = `${pos} / ${steps.length}`;
+    $("sc-prev").disabled = pos <= 1; $("sc-next").disabled = pos >= steps.length;
+  }
+  $("sc-next").addEventListener("click", () => { if (pos < SCEN[sc].steps.length) { pos++; render(); } });
+  $("sc-prev").addEventListener("click", () => { if (pos > 1) { pos--; render(); } });
+  $("sc-reset").addEventListener("click", () => { pos = 1; render(); });
+  render();
+})();
+
+/* ===================== 测试、历史、文件 ===================== */
+const TEST_GROUPS = [
+  ["启动与内存", ["各行的输出", ".text、.rodata 与 kernel.bin 一致", "保护模式、段寄存器、GDTR", "跨 3 个柱面的大内核能完整读入", "清零 loader 内存后仍能响应中断"]],
+  ["中断与外设", ["定时器约 100 Hz", "键盘回显、回车、退格", "Shift、右 Shift、Caps Lock", "Caps Lock 自动重复、退格跨过换行", "开中断前就有按键", "回显窗口滚动", "用别的数据段时中断入口换段并恢复"]],
+  ["异常", ["除零 #DE，EIP 指向 div", "未填写的 IDT 表项 #GP 0x182", "寄存器面板逐项核对", "读未映射地址、写空指针 #PF"]],
+  ["分页与任务", ["CR3、gva2gpa 逐个核对映射", "任务等待时停在 hlt，IF=1", "A、B 交替，TR 在 0x20、0x28 间切换", "A、B 都 exit 后切回任务 0 空转"]],
+  ["系统调用与用户态", ["IDT 0x80 是 DPL 3 陷阱门", "getpid、write、sleep、未知调用号", "用户段、只有用户页有 U 位", "任务 B 内核栈顶是 ring 3 现场", "坏指针返回 -1", "越权写、改写自己的代码、cli、exit 只结束任务 B", "用户态时的 NMI 显示面板"]],
+];
+$("test-groups").innerHTML = TEST_GROUPS.map(([h, items]) => `<div class="test-group"><h4>${h}</h4><ul>${items.map(i => `<li>${i}</li>`).join("")}</ul></div>`).join("");
+
+const HISTORY = [
+  ["31dc39e", "两阶段实模式引导，屏幕 AB", "feat-boot: add two-stage real mode boot experiment"],
+  ["42f209c", "进入 32 位保护模式，ABP", "feat-boot: enter 32-bit protected mode in loader"],
+  ["4c81abc", "把内核读到 0x10000 并跳过去，ABPK", "feat-boot: load kernel at 0x10000 and jump to it"],
+  ["a716a38", "用 C 写内核：clang + lld，ABPKC", "feat-kernel: build C kernel with clang and lld"],
+  ["a4be192", "IDT、8259、定时器和键盘中断", "feat-kernel: add IDT, 8259, timer and keyboard irqs"],
+  ["9953791", "make test：无头 QEMU 自动化测试", "test-kernel: add make test with headless QEMU checks"],
+  ["b33eb25", "分页：一一对应、空指针保护、显存别名", "feat-kernel: enable paging with identity map and alias"],
+  ["d38f8e5", "忽略 Python 缓存", "chore-repo: ignore python bytecode cache"],
+  ["e744be3", "内核自建 GDT", "feat-kernel: build own GDT instead of using loader's"],
+  ["300353d", "中断入口保存并切换段寄存器", "feat-kernel: save and switch segment registers in isr"],
+  ["0b33eaa", "两个任务用 TSS 硬件切换轮流运行", "feat-sched: run two tasks with hardware task switching"],
+  ["eef25af", "loader 按扇区跨磁道读内核", "feat-boot: load kernel sector by sector across tracks"],
+  ["586e5ec", "键盘支持 Shift 和 Caps Lock", "feat-keyboard: support shift and caps lock"],
+  ["6c87837", "回显窗口写满后滚动", "feat-vga: scroll the console window when full"],
+  ["b23adb2", "异常时显示全部寄存器", "feat-kernel: show all registers on cpu exceptions"],
+  ["6df3691", "int 0x80 系统调用：write、getpid、sleep", "feat-syscall: add int 0x80 write, getpid and sleep"],
+  ["1c2ef8f", "任务 B 进入用户态，页表用户位", "feat-user: run task B in ring 3 with user pages"],
+  ["03a8d01", "用户程序出错只结束该任务，exit 调用", "feat-sched: kill faulting user task and add exit call"],
+  ["11b0148", "审查：任务 0 的 TSS 补上 CR3", "fix-sched: set CR3 in task 0 TSS for the idle switch"],
+  ["c423036", "审查：开中断前清空键盘缓冲区", "fix-keyboard: drain 8042 buffer before enabling irqs"],
+  ["3bb073a", "审查：Caps Lock 重复、换行后的退格", "fix-keyboard: ignore caps repeat, backspace across wrap"],
+  ["7a54d0e", "审查：NMI 等不算用户程序的错", "fix-interrupt: panic on NMI, #DF and #MC from ring 3"],
+  ["83bb84f", "审查：读盘重试、关马达、检查几何参数", "fix-boot: retry reads, stop motor, guard geometry"],
+  ["949996f", "审查：加固测试脚本", "test-kernel: harden monitor reads and error handling"],
+  ["ba981d2", "审查：改正 README 中的 Linux 0.11 对照", "docs-readme: correct Linux 0.11 comparisons and stale notes"],
+  ["ed9baf1", "用户代码页只读", "feat-user: map user code pages read-only"],
+];
+$("history").innerHTML = HISTORY.map(([h, zh, en]) => `<li><span class="h">${h}</span><span class="s"><b>${zh}</b><span>${en}</span></span></li>`).join("");
+
+const FILES = [
+  ["boot.asm", "第一阶段：读 loader、跳转", "boot/bootsect.s"],
+  ["loader.asm", "第二阶段：读内核、A20、临时 GDT、进入保护模式", "boot/bootsect.s、boot/setup.s"],
+  ["entry.asm", "内核入口：换栈、清零 .bss", "boot/head.s"],
+  ["isr.asm", "48 个中断入口、系统调用入口、公共保存与恢复", "kernel/asm.s、kernel/system_call.s"],
+  ["kernel.c", "kmain()：按顺序初始化，打开中断，开始调度", "init/main.c"],
+  ["gdt.c", "内核 GDT：内核段、TSS、用户段", "boot/head.s 的 setup_gdt"],
+  ["interrupt.c", "IDT、8259、分发、异常面板、结束出错的用户任务", "kernel/traps.c"],
+  ["paging.c", "页表、用户位、user_range_ok", "boot/head.s 的 setup_paging、mm/memory.c"],
+  ["sched.c", "TSS、硬件任务切换、时间片、结束任务", "kernel/sched.c、include/linux/sched.h、kernel/exit.c"],
+  ["syscall.c / syscall.h", "系统调用表与包装函数", "kernel/system_call.s、include/unistd.h"],
+  ["user.c", "用户程序 user_main() 和用户栈", "（Linux 的用户程序是磁盘上的可执行文件）"],
+  ["timer.c", "8253 定时器", "kernel/sched.c 的 sched_init()、do_timer()"],
+  ["keyboard.c", "扫描码 → 字符，Shift、Caps Lock", "kernel/chr_drv/keyboard.S"],
+  ["vga.c", "写显存、硬件光标、滚动窗口、拼行", "kernel/chr_drv/console.c"],
+  ["linker.ld", "链接地址 0x10000、.user 段", "Makefile 中的链接参数"],
+  ["tests/test_kernel.py", "make test", "无"],
+];
+$("file-map").innerHTML = FILES.map(([f, w, l]) => `<tr><td><code>${f}</code></td><td>${w}</td><td class="mono" style="font-size:13px">${l}</td></tr>`).join("");
+</script>
