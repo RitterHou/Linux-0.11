@@ -31,9 +31,28 @@ QEMU 打开窗口后应看到：
 关闭 QEMU 窗口，或在启动它的终端按 Ctrl+C，即可退出。修改代码后，先关闭旧窗口，再执行 `make run`。
 
 - `make`：只生成镜像和 `build/kernel.elf`。
+- `make test`：在无头 QEMU 中运行全部自动化测试，见下文“自动化测试”。
 - `make clean`：删除生成的 `build/` 目录。
 - 默认使用 macOS 的 Cocoa 窗口。其他系统可按 QEMU 支持情况设置，例如 `make run QEMU_DISPLAY=gtk`。
 - Apple Silicon 本机是 ARM，QEMU 使用 TCG 模拟一台 x86 PC。
+
+## 自动化测试
+
+```sh
+make test
+```
+
+`tests/test_kernel.py` 只用 Python 标准库。它在后台启动没有窗口的 QEMU，通过 QEMU 监视器读取显存和寄存器、模拟按键，再用系统自带的 `objdump` 查符号地址和反汇编。目前检查：
+
+- 启动后各行的输出；`0x10000` 处的内存与 `kernel.bin` 一致；处于保护模式，代码段为 `0x08`。
+- 定时器频率约为 100 Hz（允许 90～110）。
+- 模拟按键后的回显、回车和退格，退格不会删到上一行。
+- 空闲时 CPU 停在 `kmain()` 的 `hlt` 上，且 IF 为 1。
+- 除以零显示 `#DE`，EIP 正好指向 `div` 指令；触发未填写的 IDT 表项显示 `#GP`，错误码为 `0x182`。
+
+最后两项需要故意制造异常。测试脚本会用 `make BUILD=build/selftest/<名称> SELFTEST=<名称>` 另外构建自检内核：`SELFTEST` 非空时，`selftest.c` 中对应的代码会被编译进去，在打开中断后触发异常。正常构建不定义 `SELFTEST`，`selftest_run()` 是空函数。
+
+全部测试约需 5 秒。任何一项失败时脚本以非 0 状态退出，并打印期望值与实际值。
 
 ## 启动过程
 
@@ -179,14 +198,8 @@ CHS 的扇区号从 1 开始。镜像写入命令中的 `seek=1` 跳过一个 51
 - 若要观察三重错误，将 `loader.asm` 中 `protected_mode` 后面的 `mov ax, DATA_SEL` 暂时改成 `mov ax, 0x18`。GDT 只有 3 项，`0x18` 超出界限，装入段寄存器时触发一般保护异常（13 号）；此时还没有 IDT，处理异常再次出错变成双重错误（8 号），最终三重错误。Makefile 带有 `-no-reboot`，QEMU 窗口会直接关闭。用 `make run QEMU_FLAGS="-d int,cpu_reset -D qemu.log"` 运行，可在 `qemu.log` 中看到 `new 0xd`、`new 0x8` 和 `Triple fault`。实验后改回。
 - 若要观察忘记发 EOI 的后果，将 `interrupt.c` 中 `interrupt_dispatch()` 末尾的 `pic_send_eoi(vector);` 暂时注释掉。`ticks` 停在 1，键盘也没有反应：8259 一直等着 CPU 回复，不再送来定时器和优先级更低的键盘中断。实验后改回。
 - 若要改变时钟频率，修改 `kernel.c` 中的 `TIMER_HZ`。改成 50，`ticks` 每秒加 50。改成 1000 也能明显变快，但在 QEMU 的 TCG 模拟下会丢失部分中断，实测每秒只加约 700。不要小于 19，否则分频值超出 16 位。
-- 若要观察除零异常，在 `kernel.c` 中 `vga_write_at(0, 5, "I", VGA_GRAY);` 的下一行加入：
-
-  ```c
-  __asm__ volatile("xorl %%edx, %%edx; movl $1, %%eax; xorl %%ecx, %%ecx; divl %%ecx" ::: "eax", "ecx", "edx");
-  ```
-
-  第 10、11 行会出现 `Exception 0  #DE divide error` 和出错指令的 `EIP`，用 `objdump -d build/kernel.elf` 可以看到那个地址正是 `divl`。这里必须用内联汇编：如果写成 C 的 `1 / zero`，clang 会把它优化成不用除法指令的比较，根本不会触发异常。
-- 若要观察未填写的 IDT 表项，在同一位置加入 `__asm__ volatile("int $0x30");`。应看到 `Exception 13 #GP general protection`，`error=0x00000182`，即 `0x30 × 8 + 2`。
+- 若要亲眼看到除零异常，运行 `make run BUILD=build/selftest/divide_error SELFTEST=DIVIDE_ERROR`。第 10、11 行会出现 `Exception 0  #DE divide error` 和出错指令的 `EIP`，用 `objdump -d build/selftest/divide_error/kernel.elf` 可以看到那个地址正是 `divl`。`selftest.c` 中用的是内联汇编：如果写成 C 的 `1 / zero`，clang 会把它优化成不用除法指令的比较，根本不会触发异常。
+- 若要亲眼看到未填写的 IDT 表项被触发，运行 `make run BUILD=build/selftest/bad_gate SELFTEST=BAD_GATE`。`selftest.c` 执行 `int $0x30`，应看到 `Exception 13 #GP general protection`，`error=0x00000182`，即 `0x30 × 8 + 2`。
 
 读取成功只表示扇区读取完成；这个最小实验尚未检查第二阶段和内核的内容或校验和。
 
@@ -206,9 +219,11 @@ CHS 的扇区号从 1 开始。镜像写入命令中的 `seek=1` 跳过一个 51
 | `keyboard.c` | 键盘扫描码转字符并回显 | `kernel/chr_drv/keyboard.S` |
 | `vga.c` | 直接写 VGA 显存、移动硬件光标、整数转字符串 | `kernel/chr_drv/console.c` |
 | `kernel.h`、`io.h` | 各模块共用的声明；端口读写 `inb`、`outb` | `include/asm/io.h` |
+| `selftest.c` | 自检代码，只在 `make test` 构建的自检内核中生效 | 无 |
+| `tests/test_kernel.py` | 自动化测试，由 `make test` 调用 | 无 |
 | `linker.ld` | 内核链接脚本：链接地址 `0x10000` 和各段顺序 | `Makefile` 中的链接参数 |
 | `Makefile` | 汇编、编译、链接、检查内核大小、打包和运行 QEMU | `Makefile`、`tools/build.c` |
 
-生成的文件都在 `build/` 中：写进软盘的 `boot.bin`、`loader.bin`、`kernel.bin`，带符号的 `kernel.elf`，以及软盘镜像 `floppy.img`。
+生成的文件都在 `build/` 中：写进软盘的 `boot.bin`、`loader.bin`、`kernel.bin`，带符号的 `kernel.elf`，以及软盘镜像 `floppy.img`。自检内核在 `build/selftest/` 下。
 
 参考：[SeaBIOS 读盘实现](https://github.com/coreboot/seabios/blob/master/src/disk.c)、[NASM 引导扇区填充与签名](https://www.nasm.us/doc/nasm14.html)、[QEMU 启动参数](https://www.qemu.org/docs/master/system/qemu-manpage.html)、[OSDev：A20 地址线](https://wiki.osdev.org/A20_Line)、[OSDev：GDT](https://wiki.osdev.org/Global_Descriptor_Table)、[LLD 链接脚本](https://lld.llvm.org/ELF/linker_script.html)、[OSDev：IDT](https://wiki.osdev.org/Interrupt_Descriptor_Table)、[OSDev：8259 PIC](https://wiki.osdev.org/8259_PIC)、[OSDev：PIT](https://wiki.osdev.org/Programmable_Interval_Timer)。
