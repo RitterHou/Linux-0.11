@@ -39,4 +39,7 @@ void timer_handle(void);
 /* keyboard.c：键盘 */
 void keyboard_handle(void);
 
+/* selftest.c：make test 构建的自检内核在这里故意制造异常 */
+void selftest_run(void);
+
 #endif

@@ -29,6 +29,8 @@ void kmain(void)
     __asm__ volatile("sti");        /* 打开中断：定时器和键盘从此可以打断下面的循环 */
     vga_write_at(0, 5, "I", VGA_GRAY);
 
+    selftest_run();                 /* 正常构建为空；make test 的自检内核在这里制造异常 */
+
     /* 没事可做就停下，等下一个中断唤醒 CPU；中断处理完又回到这里。 */
     for (;;)
         __asm__ volatile("hlt");
