@@ -42,10 +42,16 @@ start:
     int 0x13
     pop es
     jc disk_error
+    ; 有的 BIOS 不认识驱动器类型时返回 0 个扇区，下面的除法会除以零：改用 1.44 MB 软盘的 18。
     and cl, 0x3f
+    jnz .have_spt
+    mov cl, 18
+.have_spt:
     mov [sectors_per_track], cl
-    inc dh
-    mov [heads], dh
+    ; 磁头数 = 最大磁头号 + 1，用 16 位保存：DH 为 255 时加 1 是 256，8 位会回绕成 0。
+    movzx ax, dh
+    inc ax
+    mov [heads], ax
 
     ; 逐个扇区读入：每读一个，目标段地址加 512 / 16 = 0x20。
     ; 每次只读 512 字节，起点又按 512 对齐，永远不会跨越 64 KB 边界，满足软驱 DMA 的限制。
@@ -63,7 +69,7 @@ read_sector:
     mov cl, dl
     inc cl                      ; CL = 扇区号
     xor dx, dx
-    movzx bx, byte [heads]
+    mov bx, [heads]
     div bx                      ; AX = 柱面，DX = 磁头
     mov ch, al                  ; CH = 柱面（软盘只有 80 个柱面，8 位够用）
     mov dh, dl                  ; DH = 磁头
@@ -102,6 +108,12 @@ disk_error:
 kernel_loaded:
     xor ax, ax
     mov es, ax
+
+    ; 关掉软驱马达。BIOS 本来会在最后一次读盘几秒后由定时器中断关掉它，
+    ; 但接下来要关中断、重设 8253 和 8259，BIOS 的这段逻辑再也不会运行，马达会一直转。
+    ; 写 0 到软驱的数字输出寄存器（端口 0x3F2）：所有马达关闭。Linux 0.11 的 kill_motor 做同样的事。
+    mov dx, 0x3f2
+    out dx, al
 
     ; 保护模式下还没有 IDT，也不能再调用 BIOS，来一个中断就会三重错误。
     cli
@@ -144,7 +156,7 @@ protected_mode:
 boot_drive        db 0
 read_tries        db 3
 sectors_per_track db 0
-heads             db 0
+heads             dw 0
 lba               dw KERNEL_START_LBA     ; 下一个要读的扇区
 sectors_left      dw KERNEL_SECTORS       ; 还要读几个扇区
 load_seg          dw KERNEL_SEG           ; 下一个扇区放到的段地址

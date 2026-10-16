@@ -30,6 +30,7 @@ start:
     ; CHS 扇区号从 1 开始，所以扇区 2 对应镜像文件偏移 512。
     xor ax, ax
     mov es, ax
+read_loader:
     mov bx, 0x8000              ; 目标 ES:BX = 0000:8000
     mov ah, 0x02                ; BIOS 功能：读取扇区
     mov al, 1                   ; 读取 1 个扇区，即 512 字节
@@ -38,8 +39,18 @@ start:
     mov dh, 0                   ; 磁头 0
     mov dl, [boot_drive]        ; 使用实际启动盘，不写死盘号
     int 0x13
-    jc disk_error              ; CF=1 表示失败；此时不能跳到第二阶段
+    jnc loader_loaded
 
+    ; 真实软驱刚上电或刚换盘时，第一次读常常失败：复位磁盘系统后重试，最多 3 次。
+    ; Linux 0.11 的 bootsect.s 读 setup 时也是失败就复位、再读。
+    dec byte [read_tries]
+    jz disk_error               ; 3 次都失败：此时不能跳到第二阶段
+    xor ah, ah                  ; BIOS 功能：复位磁盘系统
+    mov dl, [boot_drive]
+    int 0x13
+    jmp read_loader
+
+loader_loaded:
     mov dl, [boot_drive]        ; 把启动盘编号继续传给第二阶段
     jmp 0x0000:0x8000           ; 将执行权交给刚加载的代码
 
@@ -54,6 +65,7 @@ disk_error:
     jmp .halt
 
 boot_drive db 0
+read_tries db 3
 
 times 510 - ($ - $$) db 0        ; 第一阶段必须放进一个引导扇区
 dw 0xaa55                       ; 小端存储为 55 AA，供 BIOS 检查
