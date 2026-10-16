@@ -9,7 +9,6 @@
 
 #define IDT_ENTRIES      256
 #define ISR_STUBS        48         /* isr.asm 提供 0～47 号入口 */
-#define KERNEL_CODE_SEL  0x08       /* loader.asm 中 GDT 的代码段选择子 */
 #define INTERRUPT_GATE   0x8E       /* 存在、DPL 0、32 位中断门：进入时 CPU 自动清 IF */
 
 #define PIC1_CMD   0x20             /* 主片：IRQ0～7 */

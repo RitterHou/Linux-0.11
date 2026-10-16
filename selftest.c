@@ -8,6 +8,7 @@
 #define SELFTEST_BAD_GATE     2     /* int 0x30：IDT 第 48 项为空，期望 13 号 #GP */
 #define SELFTEST_UNMAPPED     3     /* 读未映射的 0xD0000000：期望 14 号 #PF，错误码 0 */
 #define SELFTEST_NULL_WRITE   4     /* 写空指针：第 0 页未映射，期望 14 号 #PF，错误码 2 */
+#define SELFTEST_CLOBBER_LOADER 5   /* 清零 loader 所在内存：内核有自己的 GDT，期望照常运行 */
 
 void selftest_run(void)
 {
@@ -24,6 +25,11 @@ void selftest_run(void)
     __asm__ volatile("movl 0xD0000000, %%eax" ::: "eax");
 #elif SELFTEST == SELFTEST_NULL_WRITE
     __asm__ volatile("movl $1, 0x0" ::: "memory");
+#elif SELFTEST == SELFTEST_CLOBBER_LOADER
+    /* 0x8000～0x81FF 是 loader.bin，其中有它的 GDT。之后每次中断都要按选择子查 GDT。 */
+    for (volatile uint8_t *p = (volatile uint8_t *)0x8000; p < (volatile uint8_t *)0x8200; p++)
+        *p = 0;
+    vga_write_at(0, 7, "Z", VGA_GRAY);   /* 清零完成的标记 */
 #else
 #error "未知的 SELFTEST"
 #endif
