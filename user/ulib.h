@@ -16,5 +16,7 @@ void print_num(uint32_t n);
 void *sbrk(int32_t increment);      /* 把堆往上推 increment 个字节，返回原来的末尾；失败返回 (void *)-1 */
 void *malloc(uint32_t n);           /* 从堆上要 n 个字节，要不到返回 0 */
 void free(void *p);
+void *realloc(void *p, uint32_t n); /* 把 p 那一块改成 n 个字节，内容照留；在堆末尾就原地变大 */
+/* 可以和 malloc 混着用 sbrk 往上要内存，但不要把 brk 降到 malloc 用过的地方以下 */
 
 #endif

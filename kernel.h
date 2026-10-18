@@ -68,13 +68,16 @@ void pic_unmask(int irq);
 #define VGA_PHYS  0x000B8000u       /* 显存的物理地址 */
 #define VGA_ALIAS 0xC0000000u       /* 打开分页后，这个虚拟地址也指向显存 */
 /*
- * 用户空间：第 256 个页目录项管的 4 MB，每个用户任务各有一份。exec 把程序放在底部，
- * 栈从顶端往下长；没有映射的页在第一次用到时由缺页异常分配，任务结束时全部收回。
+ * 用户空间：第 256 个页目录项管的 4 MB，每个用户任务各有一份。从低往高是：exec 放的程序，堆（往上长到 brk），
+ * 一段没要过的空地，顶端 64 KB 的栈区（栈从顶端往下长）。程序、堆和栈区里没有映射的页在第一次用到时由缺页异常分配，
+ * 空地里的不分；任务结束时全部收回。
  */
 #define USER_LOW 0x40000000u
 #define USER_TOP 0x40400000u
 #define STACK_RESERVE (64 * 1024u)  /* 用户空间顶端的 64 KB 留给栈：程序和堆都不能伸进来 */
 #define STACK_LOW (USER_TOP - STACK_RESERVE)
+#define HEAP_GUARD (16 * 1024u)     /* 堆最高也离栈区 16 KB：栈用超了碰到的是空地，进程被结束，而不是悄悄写坏堆 */
+#define BRK_LIMIT (STACK_LOW - HEAP_GUARD)
 void paging_init(void);
 int user_range_ok(uint32_t addr, uint32_t size);
 int user_write_ok(uint32_t addr, uint32_t size);

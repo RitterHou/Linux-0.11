@@ -2,8 +2,9 @@
  * 用户程序：任务 B 在特权级 3（用户态）运行这里的代码。
  *
  * 链接脚本把本文件的代码、只读数据和数据单独放进按 4 KB 对齐的 .user 段，
- * paging.c 只给这几页打开“用户”位，其中代码所在的页只读。用户栈在 0x40000000 起的 4 MB 里，
- * 用到哪一页，内核才在缺页异常里分配哪一页（见 paging.c 的 handle_page_fault()）。内核的代码、数据和显存对这里的代码都不可访问，
+ * paging.c 只给这几页打开“用户”位，其中代码所在的页只读。用户栈在 0x40000000 起的 4 MB 的顶端 64 KB 里，
+ * 用到哪一页，内核才在缺页异常里分配哪一页（见 paging.c 的 handle_page_fault()）。
+ * 这几页是内核映像的一部分，所有任务共用：这里的全局变量 fork 时不复制。内核的代码、数据和显存对这里的代码都不可访问，
  * cli、hlt、in、out 等特权指令也不能执行，要做任何事都只能用 int 0x80 请内核帮忙。
  * 所以这里只包含 syscall.h，不包含内核的 kernel.h。
  */
@@ -47,6 +48,57 @@ static int is_cat(int32_t pid)
 {
     struct taskinfo info;
     return taskinfo(pid, &info) == 0 && info.name[0] == 'c' && info.name[1] == 'a' && info.name[2] == 't' && info.name[3] == 0;
+}
+#endif
+
+#if defined(SELFTEST) && SELFTEST == SELFTEST_USER_BRK
+/* 在子进程里运行 /bin/sort：in 从一个管道喂给它的标准输入，它的标准输出从另一个管道读回 out。返回读到的字节数，sort 失败返回 -1。 */
+static int32_t run_sort(char **argv, const char *in, uint32_t in_len, char *out, uint32_t cap)
+{
+    int32_t a[2], b[2], st = -1;
+    pipe(a);
+    pipe(b);
+    int32_t c = fork();
+    if (c == 0) {
+        if (a[0] != 0) {
+            close(0);
+            dup(a[0]);
+            close(a[0]);
+        }
+        close(1);
+        dup(b[1]);                      /* 0 号已经占着：dup 返回的正是刚关掉的 1 号 */
+        close(b[1]);
+        close(b[0]);
+        close(a[1]);
+        execv("/bin/sort", argv);
+        exit(9);
+    }
+    close(a[0]);
+    close(b[1]);
+    write(a[1], in, in_len);            /* 不到一页，管道放得下 */
+    close(a[1]);
+    uint32_t got = 0;
+    int32_t n;
+    while (got < cap && (n = read(b[0], out + got, cap - got)) > 0)
+        got += (uint32_t)n;
+    close(b[0]);
+    waitpid(c, &st, 0);
+    return st == 0 ? (int32_t)got : -1;
+}
+
+static int same(const char *a, const char *b, int32_t n)
+{
+    for (int32_t i = 0; i < n; i++)
+        if (a[i] != b[i])
+            return 0;
+    return 1;
+}
+
+static void put_file(const char *path, const char *text, uint32_t n)
+{
+    int32_t fd = open(path, O_WRONLY | O_CREAT | O_TRUNC);
+    write(fd, text, n);
+    close(fd);
 }
 #endif
 
@@ -685,14 +737,19 @@ void user_main(void)
     exit(0);
 #elif SELFTEST == SELFTEST_USER_BRK
     /*
-     * 每一项通过就写一个字母，期望第 6 行（去掉任务 A 的 A）是 qhgfleo：
+     * 每一项通过就写一个字母，期望第 6 行（去掉任务 A 的 A）是 qhgfleoksnm：
      *   q：init 的代码在内核映像里，用户空间里还什么都没有：堆从 0x40000000 开始，brk(0) 返回它。
      *   h：brk 往上挪 8 KB，返回新的末尾；写满这 8 KB 再读回来：两页都是用到时缺页补上的。
      *   g：堆末尾往上、栈区以下没要过的地方，子进程一写就被缺页异常结束；brk 不对齐到页时，它所在的那一页能用。
      *   f：fork 之后子进程的堆和父进程一样大、内容一样；子进程改了不影响父进程（写时复制）。
-     *   l：低于程序末尾、伸进栈区的 brk 不动，返回原来的末尾；栈区的最低处还能 brk 到。
-     *   e：系统调用的缓冲区在堆以外没要过的地方：read 返回 -1，不补页。
+     *   l：低于程序末尾、离栈区不到 16 KB 的 brk 不动，返回原来的末尾；栈区往下 16 KB 那里还能 brk 到；能缩回空堆。
+     *   e：系统调用的缓冲区在堆以外没要过的地方，或者跨过堆的末尾：read 返回 -1。
      *   o：exec 之后新程序的堆从它自己的 .bss 末尾开始，malloc 来的 100 KB 能用（check brk 的退出码）。
+     *   k：栈区是顶端的 64 KB：最低的那个字节能用，再往下一个字节就是空地；想把堆推到紧贴栈区，推不上去，
+     *      栈用超了碰到的是空地，进程被结束，而不是悄悄写进堆里。
+     *   s：sort 按字节排序，高位字节（0x80、0xFF）排在后面，行里可以有 0；-r 倒过来。
+     *   n：sort 读两个文件，前一个的最后一行没有换行，也不和后一个的第一行接在一起。
+     *   m：malloc 的检查（check malloc 的退出码）：空块合并、和 sbrk 混用、realloc、随机分配和释放。
      */
     uint32_t base = brk(0);
     write(1, base == 0x40000000 ? "q" : "Q", 1);
@@ -732,11 +789,12 @@ void user_main(void)
     ok = waitpid(c, &st, 0) == c && st == 0 && *(volatile uint32_t *)base == 42;
     write(1, ok ? "f" : "F", 1);
 
-    ok = brk(base - 4) == top && brk(0x403F0004) == top && brk(0x403F0000) == 0x403F0000 && brk(top) == top;
+    ok = brk(base - 4) == top && brk(0x403EC004) == top && brk(0x403F0000) == top && brk(0x403EC000) == 0x403EC000;
+    ok &= brk(base) == base && brk(top) == top;     /* 缩回空堆，再挪回来 */
     write(1, ok ? "l" : "L", 1);
 
     int32_t fd = open("/hello.txt", 0);
-    ok = read(fd, (void *)(top + 0x100000), 4) == -1 && read(fd, (void *)base, 4) == 4;
+    ok = read(fd, (void *)(top + 0x100000), 4) == -1 && read(fd, (void *)(top - 2), 4) == -1 && read(fd, (void *)base, 4) == 4;
     close(fd);
     write(1, ok ? "e" : "E", 1);
 
@@ -748,6 +806,59 @@ void user_main(void)
     }
     ok = waitpid(c, &st, 0) == c && st == 0;
     write(1, ok ? "o" : "O", 1);
+
+    c = fork();
+    if (c == 0) {
+        *(volatile char *)0x403F0000 = 1;           /* 栈区最低的那个字节 */
+        exit(*(volatile char *)0x403F0000 == 1 ? 0 : 1);
+    }
+    ok = waitpid(c, &st, 0) == c && st == 0;
+    c = fork();
+    if (c == 0) {
+        *(volatile char *)0x403EFFFF = 1;           /* 再往下一个字节：空地 */
+        exit(1);
+    }
+    ok &= waitpid(c, &st, 0) == c && st == (0x100 | 14);
+    c = fork();
+    if (c == 0) {
+        brk(0x403F0000);                            /* 推不上去：最高到 0x403EC000 */
+        /* 栈一下子用掉 70 KB，伸出了栈区。用汇编挪 ESP：clang 会把只碰一个元素的大数组优化掉 */
+        __asm__ volatile("subl $0x11800, %%esp\n"
+                         "movb $1, (%%esp)\n"
+                         "addl $0x11800, %%esp" ::: "memory");
+        exit(1);
+    }
+    ok &= waitpid(c, &st, 0) == c && st == (0x100 | 14);
+    write(1, ok ? "k" : "K", 1);
+
+    static const char in[] = "b\n\x80x\na\0z\na\n\xff\n\nab\n";
+    static const char want[] = "\na\na\0z\nab\nb\n\x80x\n\xff\n";
+    static const char want_r[] = "\xff\n\x80x\nb\nab\na\0z\na\n\n";
+    static char out[64];
+    char *plain[] = { "sort", 0 }, *rev[] = { "sort", "-r", 0 };
+    int32_t n = run_sort(plain, in, sizeof(in) - 1, out, sizeof(out));
+    ok = n == (int32_t)sizeof(want) - 1 && same(out, want, n);
+    n = run_sort(rev, in, sizeof(in) - 1, out, sizeof(out));
+    ok &= n == (int32_t)sizeof(want_r) - 1 && same(out, want_r, n);
+    write(1, ok ? "s" : "S", 1);
+
+    put_file("/tmp/s1", "zzz", 3);                  /* 最后一行没有换行 */
+    put_file("/tmp/s2", "aaa\nmmm", 7);
+    char *two[] = { "sort", "/tmp/s1", "/tmp/s2", 0 };
+    n = run_sort(two, "", 0, out, sizeof(out));
+    ok = n == 12 && same(out, "aaa\nmmm\nzzz\n", 12);
+    unlink("/tmp/s1");
+    unlink("/tmp/s2");
+    write(1, ok ? "n" : "N", 1);
+
+    c = fork();
+    if (c == 0) {
+        char *argv[] = { "check", "malloc", 0 };
+        execv("/bin/check", argv);
+        exit(9);
+    }
+    ok = waitpid(c, &st, 0) == c && st == 0;
+    write(1, ok ? "m" : "M", 1);
     exit(0);
 #elif SELFTEST == SELFTEST_ALL_EXIT
     write(1, "bye", 3);
