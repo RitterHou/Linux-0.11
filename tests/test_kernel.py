@@ -1118,6 +1118,10 @@ def test_shell(m, elf):
     """shell：cat、找不到的命令、check、被异常结束的程序、ps、后台运行、exit 后 init 再拉起 shell；命令结束后内存收回"""
     out = run_command(m, "cat /hello.txt")
     check(out == ["Hello from the Minix file system on hda!"], f"cat 应打印 /hello.txt：{out!r}")
+    out = run_command(m, "help")
+    progs = [p for p in bin_programs() if p != "sh"]
+    check(len(out) == 3 and out[0].startswith("programs: ") and sorted(out[0].split()[1:]) == progs,
+          f"help 应是 3 行，每行都放得下（不折行），第一行列出 /bin 里除了 sh 的每个程序 {progs}：{out!r}")
     free_before = m.screen(4)[3].split("/")[0]
     check(run_command(m, "nosuch") == ["sh: nosuch: not found"], "找不到的命令应报告 not found")
     check(run_command(m, "check") == ["check ok"], "check 应通过")
