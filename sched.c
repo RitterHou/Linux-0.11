@@ -283,6 +283,43 @@ void sched_sleep(uint32_t ticks)
 }
 
 /*
+ * fork 系统调用：复制当前的用户任务，返回新任务号；任务槽或内存不够时返回 -1。
+ * 新任务的 TSS 直接用父进程进入系统调用时 CPU 和 isr_common 压在栈上的寄存器：
+ * EIP 是 int 0x80 的下一条指令，CS、SS、ESP 是用户态的，只把 EAX 改成 0。
+ * 于是新任务第一次被调度时，硬件任务切换直接把它放回用户态，好像 fork 刚返回 0。
+ * 它的内核栈是新的一页，此刻是空的：它从没在内核里运行过。
+ * Linux 0.11 的 copy_process() 也是用栈上的寄存器填新进程的 TSS，再把 eax 设为 0。
+ * 整个过程关着中断：找空槽和占用它之间不能被别的任务插进来抢走同一个槽。
+ */
+int sched_fork(const struct interrupt_frame *frame)
+{
+    uint32_t flags = irq_save();
+    int n = 1;
+
+    while (n < NR_TASKS && (tasks[n].state != TASK_UNUSED || tasks[n].kstack != 0))
+        n++;
+    uint32_t kstack = n < NR_TASKS ? get_free_page() : 0;
+    uint32_t dir = kstack ? copy_page_dir(tasks[current_task].page_dir) : 0;
+    if (dir == 0) {
+        if (kstack)
+            free_page(kstack);
+        irq_restore(flags);
+        return -1;
+    }
+    tss[n] = (struct tss){
+        .esp0 = kstack + PAGE_SIZE, .ss0 = KERNEL_DATA_SEL, .cr3 = dir,
+        .eip = frame->eip, .eflags = frame->eflags,
+        .eax = 0, .ecx = frame->ecx, .edx = frame->edx, .ebx = frame->ebx,
+        .esp = frame->user_esp, .ebp = frame->ebp, .esi = frame->esi, .edi = frame->edi,
+        .es = frame->es, .cs = frame->cs, .ss = frame->user_ss, .ds = frame->ds, .fs = frame->fs, .gs = frame->gs,
+        .iomap_base = sizeof(struct tss),
+    };
+    tasks[n] = (struct task){ .state = TASK_RUNNING, .page_dir = dir, .kstack = kstack };
+    irq_restore(flags);
+    return n;
+}
+
+/*
  * 结束当前任务，切到下一个任务，不再返回。用户态程序出错或调用 exit 时由内核调用。
  * 它的内存当场收回：用户栈区的页、页表、页目录和内核栈。此刻还在用这个页目录和内核栈，
  * 但中断关着，切走之前没有人会分配内存，这几页的内容不会被改掉；切换时 CPU 把寄存器存进

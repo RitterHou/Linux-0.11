@@ -78,7 +78,8 @@ int handle_page_fault(uint32_t addr, uint32_t error_code);
 uint32_t kernel_page_dir(void);
 uint32_t new_page_dir(void);
 void free_page_dir(uint32_t dir);
-extern uint32_t page_faults;
+uint32_t copy_page_dir(uint32_t src);
+extern uint32_t page_faults, cow_faults;
 
 /* mem.c：物理页分配，管 LOW_MEM～HIGH_MEM 之间的页 */
 #define LOW_MEM   0x00100000u       /* 1 MB 以下归内核自己 */
@@ -86,6 +87,8 @@ extern uint32_t page_faults;
 void mem_init(void);
 uint32_t get_free_page(void);
 void free_page(uint32_t addr);
+void page_add_ref(uint32_t addr);
+uint32_t page_ref_count(uint32_t addr);
 uint32_t free_page_count(void);
 void mem_show(void);
 
@@ -106,6 +109,7 @@ void sched_sleep(uint32_t ticks);
 int current_pid(void);
 void task_write_char(char ch);
 void sched_exit_current(void);
+int sched_fork(const struct interrupt_frame *frame);
 #define TASK_MESSAGE_ROW 7          /* 任务结束的消息写在第 7 行 */
 
 /* syscall.c：int 0x80 系统调用 */

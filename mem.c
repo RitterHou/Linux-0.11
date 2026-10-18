@@ -31,6 +31,8 @@ void mem_show(void)
     line_append_dec(&line, PAGING_PAGES);
     line_append(&line, " pages free  page faults: ");
     line_append_dec(&line, page_faults);
+    line_append(&line, "  copy-on-write: ");
+    line_append_dec(&line, cow_faults);
     line_show(&line, VGA_GRAY, MEMORY_ROW);
 }
 
@@ -72,6 +74,22 @@ uint32_t get_free_page(void)
         p[i] = 0;
     mem_show();
     return page;
+}
+
+/* 又有一个页表项指向这一页：fork 时父子进程共用用户栈的页。 */
+void page_add_ref(uint32_t addr)
+{
+    if (addr < LOW_MEM)
+        return;
+    uint32_t flags = irq_save();
+    mem_map[MAP_NR(addr)]++;
+    irq_restore(flags);
+}
+
+/* 这一页被几个页表项引用。写时复制时，只剩一个就不用复制。 */
+uint32_t page_ref_count(uint32_t addr)
+{
+    return addr < LOW_MEM ? 0 : mem_map[MAP_NR(addr)];
 }
 
 /* 引用次数减一，减到 0 就回到空闲。释放一个本来就空闲的页说明内核自己记错了，只能停机。 */

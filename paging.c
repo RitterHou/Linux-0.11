@@ -24,6 +24,13 @@
 #define PAGE_WRITE    0x002         /* 可写 */
 #define PAGE_USER     0x004         /* 用户：为 0 时只有特权级 0～2 能访问 */
 #define CR0_PG        0x80000000u
+#define CR0_WP        0x00010000u   /* 写保护：特权级 0 写只读页也会触发缺页 */
+
+/* 缺页异常错误码的低两位 */
+#define PF_PROTECTION 0x1           /* 1：页存在但没权限；0：页不存在 */
+#define PF_WRITE      0x2           /* 1：写操作 */
+
+#define STACK_PDE     (USER_STACK_LOW >> 22)    /* 用户栈区是第 256 个页目录项 */
 
 #define ENTRIES       1024          /* 每张页目录或页表有 1024 项，每项 4 字节 */
 #define IDENTITY_MB   16
@@ -57,7 +64,7 @@ void paging_init(void)
     /*
      * 用户程序的页打开用户位。它们在前 4 MB 内，属于第一张页表。
      * 代码页去掉可写位：用户栈溢出或野指针写到代码上，会立刻触发缺页，而不是悄悄改掉代码。
-     * 386 在特权级 0 不理会只读位（CR0.WP 为 0），内核仍可写这些页，但内核从不写用户代码。
+     * 内核也不能写它们：下面打开了 CR0.WP。
      */
     for (uint32_t addr = (uint32_t)__user_start; addr < (uint32_t)__user_end; addr += PAGE_SIZE) {
         uint32_t *pte = &identity_tables[0][addr / PAGE_SIZE];
@@ -73,9 +80,15 @@ void paging_init(void)
     /* 页表在一一对应映射的范围内，它们的虚拟地址就是物理地址，可以直接装入 CR3。 */
     __asm__ volatile("movl %0, %%cr3" : : "r"(page_directory) : "memory");
 
+    /*
+     * 同时打开 WP：特权级 0 写只读页也会触发缺页。fork 之后父子共用的栈页是只读的，
+     * 内核替用户写这些页（例如 waitpid 写回退出码）时也要先复制，否则会改到另一个进程的那一份。
+     * 386 没有这一位，在特权级 0 不理会只读位，所以 Linux 0.11 在内核写用户内存之前
+     * 先调用 verify_area() 预先处理写时复制；WP 是 486 加上的，QEMU 模拟的 CPU 有它。
+     */
     uint32_t cr0;
     __asm__ volatile("movl %%cr0, %0" : "=r"(cr0));
-    __asm__ volatile("movl %0, %%cr0" : : "r"(cr0 | CR0_PG) : "memory");
+    __asm__ volatile("movl %0, %%cr0" : : "r"(cr0 | CR0_PG | CR0_WP) : "memory");
 }
 
 /* [addr, addr + size) 是否完全落在 [start, end) 内，加法溢出也不会算错。 */
@@ -98,7 +111,8 @@ int user_range_ok(uint32_t addr, uint32_t size)
 _Static_assert(USER_STACK_LOW % 0x400000u == 0 && USER_STACK_TOP - USER_STACK_LOW == 0x400000u,
                "user stack area must be exactly one page table");
 
-uint32_t page_faults;               /* 缺页异常补上了几页，显示在第 3 行 */
+uint32_t page_faults;               /* 缺页异常补上了几页（页不存在），显示在第 3 行 */
+uint32_t cow_faults;                /* 写时复制处理了几次（写了 fork 留下的只读页） */
 
 uint32_t kernel_page_dir(void)
 {
@@ -111,6 +125,12 @@ static uint32_t *current_page_dir(void)
     uint32_t cr3;
     __asm__ volatile("movl %%cr3, %0" : "=r"(cr3));
     return (uint32_t *)cr3;
+}
+
+/* 重新装入 CR3，丢掉 TLB 里缓存的翻译。改了存在的页表项之后要这样做；386 没有只刷一页的 invlpg。 */
+static void flush_tlb(void)
+{
+    __asm__ volatile("movl %0, %%cr3" : : "r"(current_page_dir()) : "memory");
 }
 
 /*
@@ -128,8 +148,69 @@ uint32_t new_page_dir(void)
 }
 
 /*
+ * fork：给子进程建页目录。内核部分照抄；用户栈区的页父子共用：两边的页表项都去掉可写位，
+ * 物理页的引用次数加一，谁先写，谁就在写时复制里得到自己的一份。页表本身不共用，子进程有自己的一张。
+ * 父进程自己的页表项被改成了只读，TLB 里可能还缓存着可写的旧翻译，所以要刷新。
+ * Linux 0.11 的 copy_page_tables() 做同样的事。没有空闲页时返回 0。
+ */
+uint32_t copy_page_dir(uint32_t src)
+{
+    uint32_t dir = new_page_dir();
+    if (dir == 0)
+        return 0;
+
+    uint32_t pde = ((uint32_t *)src)[STACK_PDE];
+    if (pde & PAGE_PRESENT) {
+        uint32_t table = get_free_page();
+        if (table == 0) {
+            free_page(dir);
+            return 0;
+        }
+        uint32_t *from = (uint32_t *)(pde & ~0xFFFu), *to = (uint32_t *)table;
+        for (int i = 0; i < ENTRIES; i++) {
+            if (from[i] & PAGE_PRESENT) {
+                from[i] &= ~PAGE_WRITE;
+                to[i] = from[i];
+                page_add_ref(from[i] & ~0xFFFu);
+            }
+        }
+        ((uint32_t *)dir)[STACK_PDE] = table | PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
+    }
+    flush_tlb();
+    return dir;
+}
+
+/*
+ * 写时复制：写了一个只读的栈页。还有别的任务在用这一页，就分一页、把内容复制过去，换成自己的，
+ * 旧页的引用次数减一；只剩自己在用（另一方已经复制走了，或者已经结束），直接改回可写，不用复制。
+ * 改的是存在的页表项，要刷新 TLB。Linux 0.11 的 do_wp_page() / un_wp_page() 也是这样。
+ */
+static int copy_on_write(uint32_t *pte)
+{
+    uint32_t old = *pte & ~0xFFFu;
+
+    if (page_ref_count(old) == 1) {
+        *pte |= PAGE_WRITE;
+    } else {
+        uint32_t page = get_free_page();
+        if (page == 0)
+            return 0;
+        for (int i = 0; i < PAGE_SIZE / 4; i++)
+            ((uint32_t *)page)[i] = ((uint32_t *)old)[i];
+        *pte = page | PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
+        free_page(old);
+    }
+    flush_tlb();
+    if (cow_faults++ == 0)
+        vga_write_at(0, 10, "W", VGA_GRAY);     /* 第一次写时复制 */
+    mem_show();
+    return 1;
+}
+
+/*
  * 缺页异常（14 号）：出错的地址在用户栈区、而且是“页不存在”（错误码第 0 位为 0），
  * 就分配一页清零的物理页映射上去，返回 1；中断返回后 CPU 重新执行出错的那条指令，这次就能访问了。
+ * 写了 fork 留下的只读栈页，交给 copy_on_write()。
  * 别的情况（页存在但没有权限、地址不在栈区、内存用完了）返回 0，由调用者照原来的规则处理：
  * 用户程序出错就结束它，内核出错就显示异常面板。
  * 内核读写用户传来的缓冲区时也可能碰到栈区里还没映射的页，同样在这里补上。
@@ -139,12 +220,20 @@ uint32_t new_page_dir(void)
  */
 int handle_page_fault(uint32_t addr, uint32_t error_code)
 {
-    if (error_code & PAGE_PRESENT)  /* 页存在却出错，是越权（写只读页、访问内核的页），不是缺页 */
-        return 0;
     if (addr < USER_STACK_LOW || addr >= USER_STACK_TOP)
         return 0;
 
     uint32_t *pde = &current_page_dir()[addr >> 22];   /* 当前任务自己的用户栈区 */
+    if (error_code & PF_PROTECTION) {
+        /* 页存在却出错：只有“写一个只读的栈页”能处理，那是 fork 留下的共享页 */
+        if (!(error_code & PF_WRITE) || !(*pde & PAGE_PRESENT))
+            return 0;
+        uint32_t *pte = &((uint32_t *)(*pde & ~0xFFFu))[(addr >> 12) & (ENTRIES - 1)];
+        if (!(*pte & PAGE_PRESENT) || (*pte & PAGE_WRITE))
+            return 0;
+        return copy_on_write(pte);
+    }
+
     if (!(*pde & PAGE_PRESENT)) {
         uint32_t table = get_free_page();       /* 已清零：1024 项都不存在 */
         if (table == 0)

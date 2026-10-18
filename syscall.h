@@ -16,7 +16,8 @@
 #define SYS_GETPID 1                /* getpid()：返回当前任务号 */
 #define SYS_SLEEP  2                /* sleep(ticks)：等待若干个定时器 tick */
 #define SYS_EXIT   3                /* exit(code)：结束当前任务，不再返回 */
-#define SYS_CALLS  4
+#define SYS_FORK   4                /* fork()：复制当前任务；父进程得到新任务号，子进程得到 0 */
+#define SYS_CALLS  5
 
 static inline int32_t syscall3(uint32_t nr, uint32_t a, uint32_t b, uint32_t c)
 {
@@ -41,6 +42,11 @@ static inline int32_t getpid(void)
 static inline int32_t sleep(uint32_t ticks)
 {
     return syscall3(SYS_SLEEP, ticks, 0, 0);
+}
+
+static inline int32_t fork(void)
+{
+    return syscall3(SYS_FORK, 0, 0, 0);
 }
 
 static inline void exit(int code)
