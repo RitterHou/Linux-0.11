@@ -235,7 +235,29 @@ static void user_exception(const struct interrupt_frame *frame)
     sched_exit(EXIT_KILLED | frame->vector);
 }
 
-void interrupt_dispatch(struct interrupt_frame *frame)
+/*
+ * 回到用户态之前处理信号：现在只有一种动作，结束进程，在第 7 行写一条消息。忽略的信号发的时候就丢掉了。
+ * Linux 0.11 在 system_call.s 的 ret_from_sys_call 里做同样的检查：系统调用和定时器中断返回用户态之前，
+ * 取出编号最小的信号，交给 do_signal()；没有设处理函数的信号，默认就是 do_exit()。
+ */
+static void handle_signals(void)
+{
+    int sig = sched_take_signal();
+    if (!sig)
+        return;
+    struct text_line line;
+    line_init(&line);
+    line_append(&line, "task ");
+    line_append_dec(&line, (uint32_t)current_pid());
+    line_append(&line, " killed by signal ");
+    line_append_dec(&line, (uint32_t)sig);
+    line_append(&line, sig == SIGINT ? " (SIGINT)" : sig == SIGKILL ? " (SIGKILL)" : sig == SIGPIPE ? " (SIGPIPE)" :
+                       sig == SIGTERM ? " (SIGTERM)" : "");
+    line_show(&line, VGA_YELLOW, TASK_MESSAGE_ROW);
+    sched_exit(EXIT_SIGNAL | (uint32_t)sig);
+}
+
+static void dispatch(struct interrupt_frame *frame)
 {
     uint32_t vector = frame->vector;
 
@@ -272,4 +294,15 @@ void interrupt_dispatch(struct interrupt_frame *frame)
     else if (vector == IRQ_DISK)
         hd_handle();
     sched_idle_wakeup();            /* 叫醒了谁、CPU 又正闲着，就马上切过去 */
+}
+
+void interrupt_dispatch(struct interrupt_frame *frame)
+{
+    dispatch(frame);
+    /*
+     * 任务可能在 dispatch() 里被切走过，回到这里时已经过了一段时间，期间可能收到了信号；
+     * frame 是它自己内核栈上的，看的是它自己被打断的地方。
+     */
+    if (from_user_mode(frame))
+        handle_signals();
 }

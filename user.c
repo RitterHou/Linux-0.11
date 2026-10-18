@@ -19,6 +19,11 @@ static int32_t start_shell(void)
 {
     int32_t pid = fork();
     if (pid == 0) {
+        /*
+         * 先自己当一个进程组的头，再打开终端：终端的前台进程组就是 shell 这一组，按 Ctrl+C 只发给它们，
+         * init 和写 C 的 letter 不在这一组。Linux 0.11 的 init() 也是先 setsid() 再打开 /dev/tty0。
+         */
+        setsid();
         close(1);
         open("/dev/tty0", 0);
         open("/dev/tty0", 0);
@@ -386,6 +391,155 @@ void user_main(void)
     fsinfo(&after);
     ok &= after.free_inodes == before.free_inodes && after.free_blocks == before.free_blocks;
     write(1, ok ? "s" : "S", 1);
+    exit(0);
+#elif SELFTEST == SELFTEST_USER_SIGNAL
+    /*
+     * 每一项通过就写一个字母，期望第 6 行（去掉任务 A 的 A）是 tikgspwevz。被信号结束的状态是 0x200 加信号编号。
+     *   t：kill 一个在 sleep 里的子进程：sleep 被打断，它被 SIGTERM 结束。
+     *   i：子进程忽略 SIGTERM：kill 返回 0，它照常睡完、退出。
+     *   k：SIGKILL 不能忽略，signal(SIGKILL, …) 返回 -1；忽略了 SIGTERM 的子进程照样被 SIGKILL 结束。
+     *   g：kill(0, …) 发给自己这一组；忽略是 fork 时继承的：改回默认的子进程被结束，没改的照常退出。
+     *   s：setsid 之后子进程自成一组：kill(0, …) 找不到它，kill(-它的任务号, …) 才行；第二次 setsid 返回 -1。
+     *   p：睡在管道上的读者和写者都能被信号结束。
+     *   w：睡在 waitpid 里的子进程能被信号结束，它的子进程成了孤儿，照常运行。
+     *   e：读的一头全关了还往管道里写：写的进程被 SIGPIPE 结束；忽略了 SIGPIPE 的，write 返回 -1。
+     *   v：不存在的任务、内核任务、init 自己、信号编号不对、pid 为 -1，kill 都返回 -1；signal 的编号不对也返回 -1。
+     *   z：给已经结束、还没被收走的子进程发信号：kill 返回 0，退出码不变。
+     */
+    int32_t st = 0, ok;
+    int32_t c = fork();
+    if (c == 0) {
+        sleep(100000);
+        exit(1);
+    }
+    sleep(3);
+    ok = kill(c, SIGTERM) == 0 && waitpid(c, &st, 0) == c && st == (0x200 | SIGTERM);
+    write(1, ok ? "t" : "T", 1);
+
+    c = fork();
+    if (c == 0) {
+        signal(SIGTERM, SIG_IGN);
+        sleep(20);
+        exit(5);
+    }
+    sleep(5);
+    ok = kill(c, SIGTERM) == 0 && waitpid(c, &st, 0) == c && st == 5;
+    write(1, ok ? "i" : "I", 1);
+
+    c = fork();
+    if (c == 0) {
+        if (signal(SIGKILL, SIG_IGN) != -1 || signal(SIGTERM, SIG_IGN) != SIG_DFL || signal(SIGTERM, SIG_IGN) != SIG_IGN)
+            exit(9);
+        sleep(100000);
+        exit(1);
+    }
+    sleep(3);
+    ok = kill(c, SIGTERM) == 0 && kill(c, SIGKILL) == 0 && waitpid(c, &st, 0) == c && st == (0x200 | SIGKILL);
+    write(1, ok ? "k" : "K", 1);
+
+    signal(SIGTERM, SIG_IGN);           /* 子进程继承“忽略” */
+    int32_t c1 = fork();
+    if (c1 == 0) {
+        signal(SIGTERM, SIG_DFL);
+        sleep(100000);
+        exit(1);
+    }
+    int32_t c2 = fork();
+    if (c2 == 0) {
+        sleep(30);
+        exit(4);
+    }
+    signal(SIGTERM, SIG_DFL);
+    sleep(3);
+    int32_t st2 = 0;
+    ok = kill(0, SIGTERM) == 0 && waitpid(c1, &st, 0) == c1 && st == (0x200 | SIGTERM) && waitpid(c2, &st2, 0) == c2 && st2 == 4;
+    write(1, ok ? "g" : "G", 1);
+
+    c = fork();
+    if (c == 0) {
+        if (setsid() != getpid() || setsid() != -1)
+            exit(1);
+        sleep(100000);
+        exit(2);
+    }
+    sleep(3);
+    ok = kill(0, SIGTERM) == -1 && kill(-c, SIGTERM) == 0 && waitpid(c, &st, 0) == c && st == (0x200 | SIGTERM);
+    write(1, ok ? "s" : "S", 1);
+
+    int32_t empty[2], full[2];          /* 两个管道：一个没人写，一个没人读 */
+    static char big[8192];
+    pipe(empty);
+    pipe(full);
+    int32_t reader = fork();
+    if (reader == 0) {
+        char ch;
+        read(empty[0], &ch, 1);         /* 管道是空的，写的一头还开着（父进程拿着）：一直等 */
+        exit(1);
+    }
+    int32_t writer = fork();
+    if (writer == 0) {
+        write(full[1], big, sizeof(big));   /* 读的一头开着（父进程拿着）却没人读，写满 4096 字节就等 */
+        exit(1);
+    }
+    sleep(5);
+    ok = kill(reader, SIGINT) == 0 && waitpid(reader, &st, 0) == reader && st == (0x200 | SIGINT);
+    ok &= kill(writer, SIGINT) == 0 && waitpid(writer, &st, 0) == writer && st == (0x200 | SIGINT);
+    close(empty[0]);
+    close(empty[1]);
+    close(full[0]);
+    close(full[1]);
+    write(1, ok ? "p" : "P", 1);
+
+    c = fork();
+    if (c == 0) {
+        int32_t grandchild = fork();
+        if (grandchild == 0) {
+            sleep(100000);
+            exit(0);
+        }
+        waitpid(grandchild, 0, 0);      /* 孙进程一直在睡：不被信号打断，就永远等下去 */
+        exit(1);
+    }
+    sleep(3);
+    ok = kill(c, SIGTERM) == 0 && waitpid(c, &st, 0) == c && st == (0x200 | SIGTERM);
+    ok &= kill(0, SIGTERM) == 0;        /* 成了孤儿的孙进程还在 init 这一组：结束它 */
+    write(1, ok ? "w" : "W", 1);
+
+    int32_t dead[2];
+    pipe(dead);
+    close(dead[0]);
+    c = fork();
+    if (c == 0) {
+        write(dead[1], "x", 1);
+        exit(1);
+    }
+    ok = waitpid(c, &st, 0) == c && st == (0x200 | SIGPIPE);
+    c = fork();
+    if (c == 0) {
+        signal(SIGPIPE, SIG_IGN);
+        exit(write(dead[1], "x", 1) == -1 ? 3 : 1);
+    }
+    ok &= waitpid(c, &st, 0) == c && st == 3;
+    close(dead[1]);
+    write(1, ok ? "e" : "E", 1);
+
+    ok = kill(99, SIGTERM) == -1 && kill(1, SIGTERM) == -1 && kill(getpid(), SIGTERM) == -1 && kill(-1, SIGTERM) == -1;
+    c = fork();
+    if (c == 0) {
+        sleep(100000);
+        exit(1);
+    }
+    ok &= kill(c, 0) == -1 && kill(c, 33) == -1 && signal(0, SIG_IGN) == -1 && signal(33, SIG_IGN) == -1;
+    ok &= kill(c, SIGKILL) == 0 && waitpid(c, &st, 0) == c;
+    write(1, ok ? "v" : "V", 1);
+
+    c = fork();
+    if (c == 0)
+        exit(6);
+    sleep(3);                           /* 子进程已经结束，成了僵尸 */
+    ok = kill(c, SIGTERM) == 0 && waitpid(c, &st, 0) == c && st == 6;
+    write(1, ok ? "z" : "Z", 1);
+    sleep(5);                           /* 等孤儿处理完信号、退出，第 7 行最后留下的是 init 的消息 */
     exit(0);
 #elif SELFTEST == SELFTEST_ALL_EXIT
     write(1, "bye", 3);

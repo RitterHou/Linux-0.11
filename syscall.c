@@ -387,6 +387,27 @@ static int32_t sys_getcwd(uint32_t buf, uint32_t size, uint32_t c, struct interr
     return (int32_t)len;
 }
 
+/* kill(pid, sig)：发信号，见 sched_kill()。 */
+static int32_t sys_kill(uint32_t pid, uint32_t sig, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)c, (void)frame;
+    return sched_kill((int)pid, (int)sig);
+}
+
+/* signal(sig, handler)：SIG_DFL 或 SIG_IGN，返回原来的处理方式。 */
+static int32_t sys_signal(uint32_t sig, uint32_t handler, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)c, (void)frame;
+    return sched_signal((int)sig, handler);
+}
+
+/* setsid()：自己当一个新的进程组的头，返回组号。 */
+static int32_t sys_setsid(uint32_t a, uint32_t b, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)a, (void)b, (void)c, (void)frame;
+    return sched_setsid();
+}
+
 static const syscall_fn syscall_table[SYS_CALLS] = {
     [SYS_WRITE]  = sys_write,
     [SYS_GETPID] = sys_getpid,
@@ -408,6 +429,9 @@ static const syscall_fn syscall_table[SYS_CALLS] = {
     [SYS_FSINFO] = sys_fsinfo,
     [SYS_CHDIR]  = sys_chdir,
     [SYS_GETCWD] = sys_getcwd,
+    [SYS_KILL]   = sys_kill,
+    [SYS_SIGNAL] = sys_signal,
+    [SYS_SETSID] = sys_setsid,
 };
 
 void syscall_dispatch(struct interrupt_frame *frame)

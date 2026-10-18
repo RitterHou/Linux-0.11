@@ -30,11 +30,11 @@ QEMU 打开窗口后应看到：
 | 4 | `ticks: N        idle: N%` | 定时器中断，每秒加 100；右边每秒更新一次上一秒 CPU 空闲的比例，两个任务都在睡眠时接近 100% |
 | 5 | `paging: on, 0xC0000000 -> 0xB8000` | 分页已打开 |
 | 6 | `tasks: ABCABCABC…` | 任务 A（内核态）、任务 B（用户态）和 B 用 `fork` 复制出、再 exec 成硬盘上 `/bin/letter` 的任务 3 都通过 `write` 系统调用写自己的字母，每写一个就 `sleep`，把 CPU 让给别人，所以逐个轮流；写满一行后从行首覆盖 |
-| 7 | 平时为空 | 任务结束时的黄色消息，例如 `task 2 killed by #PF page fault: …` 或 `task 2 exited with code 7` |
+| 7 | 平时为空 | 任务结束时的黄色消息，例如 `task 2 killed by #PF page fault: …`、`task 5 killed by signal 2 (SIGINT)` 或 `task 2 exited with code 7` |
 | 8～18 | shell 的欢迎语和提示符 `$` | 控制台窗口：shell 和它运行的程序的输出，以及键盘回显，都写在这里；写满后整个窗口向上滚动一行，窗口外的内容不受影响，见下文“终端与 shell” |
 | 19～23 | 平时为空 | 出现 CPU 异常时，红底白字的异常面板，见下文“异常” |
 
-开机后控制台窗口里运行着 shell，可以敲命令：`ls /bin`、`cat /hello.txt`、`cd /etc`、`pwd`、`ps`、`echo 文字`、`ls /bin | grep e`、`echo hi > /tmp/a`、`check`、`letter D &`（在后台运行，第 6 行会多出 D）、`help`、`exit`（init 会再拉起一个 shell）。键盘支持字母、数字、常用符号、空格、回车、退格、左右 Shift、Caps Lock（美式布局）和左 Ctrl 加字母（Ctrl+D 结束输入），暂不支持方向键、Alt 和小键盘。打字前先点一下 QEMU 窗口，让它获得键盘焦点。
+开机后控制台窗口里运行着 shell，可以敲命令：`ls /bin`、`cat /hello.txt`、`cd /etc`、`pwd`、`ps`、`echo 文字`、`ls /bin | grep e`、`echo hi > /tmp/a`、`check`、`letter D &`（在后台运行，第 6 行会多出 D，`kill 任务号` 结束它）、`help`、`exit`（init 会再拉起一个 shell）。键盘支持字母、数字、常用符号、空格、回车、退格、左右 Shift、Caps Lock（美式布局）和左 Ctrl 加字母（Ctrl+C 结束前台程序，Ctrl+D 结束输入），暂不支持方向键、Alt 和小键盘。打字前先点一下 QEMU 窗口，让它获得键盘焦点。
 
 关闭 QEMU 窗口，或在启动它的终端按 Ctrl+C，即可退出。修改代码后，先关闭旧窗口，再执行 `make run`。
 
@@ -70,6 +70,7 @@ make test
 - 用户程序用掉 5 页栈（自检 `USER_DEEP_STACK`）：每页第一次用到时补上；把一页还没碰过的栈交给 `write`，内核读到它时同样补上，`write` 返回 1；`exit(3)` 之后 B 的页全部收回，第 3 行回到 3839 页空闲（只剩任务 A 的内核栈）。用户程序读栈区以外没映射的 `0x50000000`（自检 `USER_WILD_READ`）时，内核不补页，任务 B 因 `#PF`（错误码 4）被结束。
 - 写文件（自检 `USER_FSWRITE`）：`O_CREAT | O_EXCL` 遇到已经存在的文件失败；只读打开的不能写、只写打开的不能读、目录不能打开来写；从头写会覆盖，`O_TRUNC` 清空，`O_APPEND` 接在末尾；删掉一个还开着的文件，目录里看不见了，开着的描述符照样能读，关掉以后块和 i 节点才收回；已经存在的目录不能再建，非空目录、根目录和 `.` 删不掉，父目录不存在或名字太长建不了；同一个文件打开两次共用 i 节点，从一个写进去另一个马上读得到。在 shell 里：`echo hello > /tmp/a`、`>>` 追加、`wc < /tmp/a`、`mkdir`、`rmdir`（非空时失败）、`rm`；`cat /big > /tmp/big2` 复制出的文件要用到二级间接块，内容完全一样；删掉之后 `df` 回到原来的数字。
 - 当前目录：`pwd` 开始是 `/`；`cd /etc` 之后 `pwd` 打印 `/etc`，`cat issue` 读到 `/etc/issue`，`ls` 不带参数列出 `/etc`，`ls ..` 和 `ls /` 一样；`cd /bin/../etc/./` 之后是 `/etc`；`cd` 到不存在的目录或普通文件报错，当前目录不变；在 `/tmp/sub` 里 `echo rel > note` 写的是 `/tmp/sub/note`；在 `/bin` 里 `./echo`、`../bin/echo` 都能运行；`cd ../../..` 停在 `/`。shell `exit` 之后，init 拉起的新 shell 从 `/` 开始，不是上一个 shell 的 `/etc`。
+- 信号（自检 `USER_SIGNAL`）：kill 一个在 sleep 里的子进程，它马上被 SIGTERM 结束，状态是 0x200 加信号编号；忽略了 SIGTERM 的照常睡完、退出；SIGKILL 不能忽略；`kill(0, …)` 发给自己这一组，忽略随 fork 继承；`setsid` 之后自成一组，`kill(-组号, …)` 才发得到；睡在管道上的读者和写者、睡在 waitpid 里的进程都能被结束；读的一头全关了还写，写的进程被 SIGPIPE 结束，忽略了 SIGPIPE 的 write 返回 -1；kill、signal 的参数不对，或者发给内核任务和 init，都返回 -1；给僵尸发信号返回 0。在 shell 里：前台的 `letter G`、等终端输入的 `cat`、`cat | wc` 的两段，按 Ctrl+C 都被 SIGINT 结束，回显 `^C`；在提示符上按 Ctrl+C 丢掉正在敲的这一行；后台的 letter 不受 Ctrl+C 影响，`kill 任务号` 用 SIGTERM 结束它，`kill -9` 发 SIGKILL；`kill 1`、`kill 2`、`kill 99`、`kill -x 5` 报错；shell 一直是原来的 4 号任务。
 - 管道（自检 `USER_PIPE`）：`pipe` 返回最小的两个空闲描述符；写进去的字节原样读出来；子进程往管道里写 10000 个字节，比一页的缓冲区大，写满了就睡下等，父进程边读边核对，写的一头全关了之后读到 0；读的一头关了再写返回 -1；`dup` 返回最小的空闲描述符，和原来的共用读写位置；结束后管道的缓冲区页也收回。
 - exec（自检 `USER_EXEC`）：不存在的文件、没有执行权限的文件、目录，exec 都返回 -1，程序接着运行；子进程 exec `/bin/hello from exec`，打印出参数后以 0 退出；`/bin/check` 检查自己的 `.data`（有初值）、`.bss`（全是 0，跨过一页多）、`argc` 和 `argv`，都对就打印 `check ok` 并以 7 退出；`/bin/check crash` 往自己的代码里写，代码页只读，被缺页异常结束（状态 `0x10E`）；第 0 行出现 `E`；所有程序结束后内存全部收回。
 - 用户程序写内核变量或执行 `cli` 时，只有任务 B 被结束：第 7 行给出 `#PF`（错误码 7：页存在、写操作、来自用户态）或 `#GP` 以及出错指令的 EIP，不出现异常面板，定时器照常走，第 6 行很快只剩 A，TR 不再出现任务 B 的 `0x60`，任务 B 的内核栈、页目录、栈区页表和栈页全部收回（第 3 行回到 3839 页空闲）；用户程序调用 `exit(7)` 时同样只剩任务 A，第 7 行为 `task 2 exited with code 7`；把内核地址交给 `write` 得到 -1。
@@ -222,9 +223,9 @@ DS=0x0010 ES=0x0010 FS=0x0010 GS=0x0010 CR2=0x00000000 CR3=0x00018000
 | 2 | `sleep(ticks)` | 睡若干个定时器 tick，期间把 CPU 让给别的任务 | 0 |
 | 3 | `exit(code)` | 结束当前任务，在第 7 行写出结束代码 | 不返回 |
 | 4 | `fork()` | 复制当前的用户任务，见下文“fork 与写时复制” | 父进程得到新任务号，子进程得到 0；任务槽或内存不够时 -1 |
-| 5 | `waitpid(pid, &status, options)` | 等子进程结束，把它的状态写进 `status`；`pid` 为 -1 时等任意一个；`options` 为 `WNOHANG` 时不等。见下文“exit 与 waitpid” | 子进程的任务号；`WNOHANG` 时子进程还没结束返回 0；没有这样的子进程，或 `status` 不在用户可写的内存里时 -1 |
+| 5 | `waitpid(pid, &status, options)` | 等子进程结束，把它的状态写进 `status`；`pid` 为 -1 时等任意一个；`options` 为 `WNOHANG` 时不等。见下文“exit 与 waitpid” | 子进程的任务号；`WNOHANG` 时子进程还没结束返回 0；没有这样的子进程，或 `status` 不在用户可写的内存里时 -1；等着的时候来了信号返回 -EINTR |
 | 6 | `open(path, flags)` | 打开文件。`flags` 是 `O_RDONLY`、`O_WRONLY`、`O_RDWR`，可以再加 `O_CREAT`（不存在就新建）、`O_EXCL`（和 `O_CREAT` 一起：已经存在就失败）、`O_TRUNC`（清空）、`O_APPEND`（接在末尾写），取值与 Linux 0.11 相同，见下文“文件系统” | 最小的空闲文件描述符；文件不存在、目录要打开来写、路径太长或描述符用光时 -1 |
-| 7 | `read(fd, buf, count)` | 从文件当前的读写位置读，位置往后移；从控制台读时等到敲完一行，一次最多读一行 | 读到的字节数，到了文件末尾为 0；`fd` 不对或 `buf` 不在用户可写的内存里时 -1 |
+| 7 | `read(fd, buf, count)` | 从文件当前的读写位置读，位置往后移；从控制台读时等到敲完一行，一次最多读一行 | 读到的字节数，到了文件末尾为 0；`fd` 不对或 `buf` 不在用户可写的内存里时 -1；在控制台或管道上等着的时候来了信号返回 -EINTR |
 | 8 | `close(fd)` | 关闭文件描述符 | 0；`fd` 没打开时 -1 |
 | 9 | `execv(path, argv)` | 把当前任务换成硬盘上的程序，`argv` 是以 0 结尾的参数数组，见下文“exec” | 成功时不返回，从新程序的入口开始执行；文件不存在、不能执行、不是 ELF 或内存不够时 -1，原程序不受影响 |
 | 10 | `stat(path, &st)` | 取文件的类型和权限、链接数、大小、i 节点号 | 0；文件不存在或 `st` 不在用户可写的内存里时 -1 |
@@ -237,6 +238,9 @@ DS=0x0010 ES=0x0010 FS=0x0010 GS=0x0010 CR2=0x00000000 CR3=0x00018000
 | 17 | `fsinfo(&info)` | 文件系统一共多少数据块、多少 i 节点，各还剩多少，给 `df` 用 | 0 |
 | 18 | `chdir(path)` | 换当前目录，见下文“当前目录” | 0；不存在或不是目录时 -1 |
 | 19 | `getcwd(buf, size)` | 把当前目录的绝对路径写进 `buf` | 路径的长度；放不下或 `buf` 不在用户可写的内存里时 -1 |
+| 20 | `kill(pid, sig)` | 发信号：`pid` 大于 0 发给那个任务，为 0 发给自己这一组，小于 -1 发给 `-pid` 那一组。见下文“信号” | 0；一个也没找到、信号编号不对、发给内核任务或 init 时 -1 |
+| 21 | `signal(sig, handler)` | 这个信号来了怎么办：`SIG_DFL` 结束进程，`SIG_IGN` 不理 | 原来的处理方式；编号不对或想改 SIGKILL 时 -1 |
+| 22 | `setsid()` | 自己当一个新的进程组的头 | 组号，就是自己的任务号；已经当过了 -1 |
 | 其他 | | | -1 |
 
 调用的过程：
@@ -578,6 +582,7 @@ init（任务 B，内核映像里的 `user_main()`）先 fork 出写 C 的 `/bin
 | `echo 文字…` | 打印参数 |
 | `ps` | 用 `taskinfo` 逐个问 16 个任务槽，列出任务号、父进程、状态（R 能运行、S 在 sleep 里、Z 僵尸、W 在 waitpid 里、B 在等待队列上）和名字。名字是内核起的（idle、task_a、init），exec 之后是程序的文件名 |
 | `letter X` | 每 2 个 tick 往 `/dev/tty1`（第 6 行）写一个 X；`letter D &` 在后台运行，第 6 行就多出 D |
+| `kill [-信号] 任务号…` | 发信号，默认是 SIGTERM；`kill -9` 发 SIGKILL。任务号是负数就发给那一组 |
 | `hello`、`check` | exec 的测试程序 |
 
 每个程序结束时，内核照旧在第 7 行写出 `task N exited with code M`。
@@ -587,11 +592,22 @@ init（任务 B，内核映像里的 `user_main()`）先 fork 出写 C 的 `/bin
 `pipe(fd)` 建一个管道（`pipe.c`）：缓冲区是从分配器拿来的一页，当作环形缓冲区用；文件表里占两项，一项是读的一头，一项是写的一头，分别放进最小的两个空闲描述符。与 Linux 0.11 的 `fs/pipe.c` 相同：
 
 - 读：管道空着、还有人拿着写的一头，就睡下等；有数据就读走，最多读到要的字节数，不等凑满。管道空了、写的一头全都关了，返回 0：读的一方由此知道数据到头了。
-- 写：管道满了、还有人拿着读的一头，就睡下等；读的一头全都关了，再写也没人看，返回 -1。Linux 会给写的进程发 `SIGPIPE`，这里还没有信号。
+- 写：管道满了、还有人拿着读的一头，就睡下等；读的一头全都关了，再写也没人看：给写的进程发 SIGPIPE，默认就结束它，忽略了 SIGPIPE 的才看到 write 返回 -1，和 Linux 0.11 的 `write_pipe()` 相同。
 - 读写双方睡在同一个等待队列上，每读走或写进一些数据都叫醒对方。和用户内存之间的复制在开中断时做，每次最多 512 字节：复制时可能缺页。
 - 每一头被几个打开的文件拿着，记在 `readers`、`writers` 里。一头的最后一个描述符关掉时（`file_put()` 里引用次数减到 0），计数减一，叫醒另一头；两头都关了，还掉缓冲区那一页。fork 会给每个打开的文件加一个引用，所以管道多余的描述符必须关掉：只要还有一个进程拿着写的一头，读的一方就永远等不到 0。
 
-shell 运行 `ls /bin | grep e | wc` 时，先建第一个管道，fork 出 ls：它 `close(1); dup(写的一头)`，`dup` 返回最小的空闲描述符，正是刚关掉的 1 号，于是 ls 的标准输出就成了管道，再关掉两头原来的描述符，exec ls。grep 的标准输入接上一个管道读的一头，标准输出接下一个管道写的一头；wc 只接标准输入。shell 自己每建一个子进程就关掉它不再需要的那一头，最后等所有子进程结束。Linux 0.11 的 shell 也是这样，用 `pipe`、`fork`、`dup` 拼出管道。
+shell 运行 `ls /bin | grep e | wc` 时，先建第一个管道，fork 出 ls：它 `close(1); dup(写的一头)`，`dup` 返回最小的空闲描述符，正是刚关掉的 1 号，于是 ls 的标准输出就成了管道，再关掉两头原来的描述符，exec ls。grep 的标准输入接上一个管道读的一头，标准输出接下一个管道写的一头；wc 只接标准输入。shell 自己每建一个子进程就关掉它不再需要的那一头，最后等所有子进程结束。Linux 0.11 上运行的 shell 也是这样，用 `pipe`、`fork`、`dup` 拼出管道。
+
+## 信号
+
+信号是内核通知进程“出了某件事”的办法：按了 Ctrl+C、别的进程用 `kill` 叫它结束、往没人读的管道里写。每个任务记着收到、还没处理的信号（`struct task` 的 `signal`，第 sig − 1 位）和忽略哪些信号（`ignored`）。编号与 Linux 0.11 相同：SIGINT 2、SIGKILL 9、SIGPIPE 13、SIGTERM 15。
+
+- **发信号**（`sched_kill()`）：`kill(pid, sig)` 的 `pid` 大于 0 发给那个任务，为 0 发给自己所在的进程组（自己也收到），小于 -1 发给 `-pid` 那一组。目标忽略这个信号，就直接丢掉；SIGKILL 不能忽略。任务 0、A 和 init 收不到信号：前两个是内核任务，从不回到用户态，信号永远处理不了；init 要收养孤儿、拉起 shell，不能结束。
+- **什么时候处理**：从用户态进来的中断（系统调用、定时器、键盘……）处理完、回到用户态之前，`interrupt_dispatch()` 取出编号最小的信号。现在只有一种动作：在第 7 行写出 `task N killed by signal S`，结束进程，留给父进程的状态是 0x200 加信号编号。Linux 0.11 在 `system_call.s` 的 `ret_from_sys_call` 里做同样的检查，再交给 `do_signal()`；没设处理函数的信号，默认动作就是 `do_exit()`。
+- **睡着的任务**：睡在 sleep、waitpid、终端和管道上的任务，不知道要等多久，信号会把它叫醒（`send_signal()` 把它改回能运行），系统调用返回 -EINTR，回到用户态之前再处理信号：`cat` 等着敲字时，按 Ctrl+C 能马上结束它。等硬盘、等缓冲区、等文件系统锁很快就有结果，半途放弃还会留下改到一半的数据，所以不能被打断，信号要等它们做完。Linux 0.11 也分 `TASK_INTERRUPTIBLE` 和 `TASK_UNINTERRUPTIBLE` 两种睡眠。
+- **进程组和 Ctrl+C**：每个任务属于一个进程组（`pgrp`），fork 时继承。init 拉起 shell 时，子进程先 `setsid()` 自成一组，再打开 `/dev/tty0`：进程组的头打开控制台，这一组就成了终端的前台进程组。按 Ctrl+C，终端丢掉正在编辑的这一行，回显 `^C`，给前台进程组的每个任务发 SIGINT：shell 和它 fork 出的程序都在这一组，init 和写 C 的 letter 不在。Linux 0.11 的 `init()` 也是先 `setsid()` 再打开终端，`copy_to_cooked()` 遇到 Ctrl+C 就调用 `tty_intr()`；它不回显，也不丢掉这一行。
+- **shell 怎么用**：shell 自己忽略 SIGINT，Ctrl+C 结束的是前台程序。fork 出的子进程在 exec 之前把 SIGINT 改回默认（前台），或者继续忽略（`&` 的后台程序）；忽略的信号 exec 之后仍然忽略，所以 Ctrl+C 停不了后台程序，要用 `kill`。Linux 0.11 的 `do_execve()` 把 32 个信号的处理方式全改回默认，连忽略的也改回来；这里照 POSIX 的规定，忽略的保持忽略。shell 不报告被 SIGINT 和 SIGPIPE 结束的程序，被别的信号结束的报告 `sh: … killed by signal N`。
+- **还没有的**：用户自己的信号处理函数。所以在提示符上按 Ctrl+C，shell 不会重新打印提示符，接着敲就行。
 
 ## 修改实验
 
@@ -641,7 +657,7 @@ shell 运行 `ls /bin | grep e | wc` 时，先建第一个管道，fork 出 ls�
 | `timer.c` | 8253 定时器 | `kernel/sched.c` 中的 `sched_init()`、`do_timer()` |
 | `syscall.c`、`syscall.h` | 系统调用：内核一侧的分发表，调用方使用的编号和包装函数 | `kernel/system_call.s`、`include/unistd.h` |
 | `user.c` | 用户程序：任务 B 在用户态运行的 `user_main()`，它 `fork` 出任务 3 | 无（Linux 0.11 的用户程序是磁盘上的可执行文件） |
-| `sched.c` | 任务表、TSS、硬件任务切换、睡眠与唤醒、等待队列、fork、exit、waitpid | `kernel/sched.c` 中的 `schedule()`、`sleep_on()`，`kernel/fork.c` 中的 `copy_process()`，`kernel/exit.c` 中的 `do_exit()`、`sys_waitpid()`，`include/linux/sched.h` 中的 `switch_to` |
+| `sched.c` | 任务表、TSS、硬件任务切换、睡眠与唤醒、等待队列、fork、exit、waitpid、信号和进程组、当前目录 | `kernel/sched.c` 中的 `schedule()`、`sleep_on()`，`kernel/fork.c` 中的 `copy_process()`，`kernel/exit.c` 中的 `do_exit()`、`sys_waitpid()`、`sys_kill()`，`kernel/signal.c`，`include/linux/sched.h` 中的 `switch_to` |
 | `hd.c` | ATA 硬盘驱动：IDENTIFY、按 LBA 读写扇区、IRQ14 | `kernel/blk_drv/hd.c`、`ll_rw_blk.c` |
 | `buffer.c` | 缓冲区缓存：`bread()`、`bget()`、`bwrite()`、`brelse()` | `fs/buffer.c` |
 | `fs.c`、`fs.h` | Minix v1 文件系统：超级块、i 节点表、位图、`bmap()`、`namei()`、写文件、目录的增删、文件系统锁 | `fs/super.c`、`fs/inode.c`、`fs/namei.c`、`fs/bitmap.c`、`fs/truncate.c`、`include/linux/fs.h` |
@@ -652,7 +668,7 @@ shell 运行 `ls /bin | grep e | wc` 时，先建第一个管道，fork 出 ls�
 | `tools/mkfs.py` | 把 `build/rootfs/` 打包成 Minix v1 镜像 | Linux 0.11 用 Minix 上的 `mkfs` 做根文件系统 |
 | `tools/mkbig.py` | 生成测试用的 600 KB 大文件 `/big` | 无 |
 | `keyboard.c` | 键盘扫描码转字符，支持 Shift 和 Caps Lock，交给终端 | `kernel/chr_drv/keyboard.S` |
-| `tty.c` | 终端：一行的编辑、回显、退格、Ctrl+D，读一行，写控制台 | `kernel/chr_drv/tty_io.c` |
+| `tty.c` | 终端：一行的编辑、回显、退格、Ctrl+D、Ctrl+C，读一行，写控制台 | `kernel/chr_drv/tty_io.c` |
 | `pipe.c` | 管道：一页的环形缓冲区，读写两头 | `fs/pipe.c` |
 | `vga.c` | 直接写 VGA 显存、移动硬件光标、整数转字符串 | `kernel/chr_drv/console.c` |
 | `string.c` | `memset`、`memcpy`：编译器会把大结构体的赋值和清零编译成对它们的调用 | `include/string.h` |

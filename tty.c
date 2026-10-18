@@ -7,6 +7,7 @@
  *   - 回车把这一行连同换行符放进 ready 缓冲区，叫醒睡在 tty_wait 上等着读的任务。
  *   - Ctrl+D 把这一行（不带换行）交出去，后面跟一个结束标记；行是空的，读的程序就得到 0，知道输入结束了。
  *     Unix 的终端都是这样，cat、wc 读到 0 就停。
+ *   - Ctrl+C 丢掉正在编辑的这一行，回显 ^C 和换行，给终端的前台进程组发 SIGINT（tty_intr）。
  * read(0) 一次最多读走一行；还没有敲完的行，程序读不到，它就睡下等。
  * 程序 write(1) 的输出也写在这个窗口里，和回显共用一个光标，就像一台真正的终端。
  * Linux 0.11 的终端有三个队列：read_q 存键盘送来的原始字符，copy_to_cooked() 处理退格和回显，
@@ -14,20 +15,46 @@
  */
 #include "io.h"
 #include "kernel.h"
+#include "syscall.h"
 
 #define LINE_MAX   128              /* 一行最多 127 个字符，再加换行；比屏幕宽，长的一行会折到下一行 */
 #define READY_SIZE 512              /* 敲完、还没被读走的行；2 的幂，下标回绕时取模也对 */
 #define EOF_CHAR   0x04             /* Ctrl+D；在 ready 里当作一行的结束标记，不交给程序 */
+#define INTR_CHAR  0x03             /* Ctrl+C */
 
 static char line[LINE_MAX];
 static uint32_t line_len;
 static char ready[READY_SIZE];
 static uint32_t ready_head, ready_tail;     /* 只增不减，相减就是还没读走的字节数 */
 static struct wait_queue tty_wait;
+static int tty_pgrp;                /* 前台进程组：Ctrl+C 发给这一组；0 表示还没有（自检内核不拉起 shell） */
+
+/*
+ * 进程组的头打开控制台时调用：这一组就成了前台进程组。init 拉起 shell 前先 setsid()，
+ * 所以前台进程组是 shell 这一组，shell fork 出的程序都在里面，init 和它的 letter 不在。
+ * Linux 0.11 的 sys_open() 也是在 current->leader 打开终端、它还没有控制终端时，把 tty->pgrp 设成它的组。
+ */
+void tty_set_pgrp(int pgrp)
+{
+    tty_pgrp = pgrp;
+}
 
 /* 由键盘中断调用（自检也会直接调用），此时中断关着。 */
 void tty_input(char ch)
 {
+    if (ch == INTR_CHAR) {
+        /*
+         * Linux 0.11 的 copy_to_cooked() 遇到 INTR_CHAR 调用 tty_intr()，给 tty->pgrp 里的每个进程挂上 SIGINT，
+         * 不回显，也不丢掉已经敲的字符；这里像后来的 Unix 一样回显 ^C，丢掉这一行。
+         */
+        line_len = 0;
+        vga_putc('^');
+        vga_putc('C');
+        vga_putc('\n');
+        if (tty_pgrp > 0)
+            sched_kill(-tty_pgrp, SIGINT);
+        return;
+    }
     if (ch == '\b') {
         if (line_len > 0) {
             line_len--;
@@ -65,8 +92,12 @@ int32_t tty_read(void *dst, uint32_t n)
     uint32_t got = 0;
     uint32_t flags = irq_save();
 
-    while (ready_tail == ready_head)
-        sleep_on(&tty_wait);
+    while (ready_tail == ready_head) {
+        if (interruptible_sleep_on(&tty_wait) < 0) {
+            irq_restore(flags);
+            return -EINTR;          /* 等着的时候来了信号，比如按了 Ctrl+C */
+        }
+    }
     while (got < n && got < LINE_MAX && ready_tail != ready_head) {
         char c = ready[ready_head % READY_SIZE];
         if (c == EOF_CHAR) {        /* 结束标记：读掉它，不交给程序；它前面没有字符时 read 返回 0 */

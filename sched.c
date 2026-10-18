@@ -35,6 +35,8 @@
 #define TASK_WAITING   4            /* 在 waitpid 里等子进程结束，不参与调度 */
 #define TASK_BLOCKED   5            /* 睡在某个等待队列上（例如等硬盘），等 wake_up 叫醒 */
 
+#define INIT_TASK      2            /* init：内核建的用户任务，收养孤儿、拉起 shell，不能被信号结束 */
+
 #define OUTPUT_ROW     6
 #define OUTPUT_COL     7            /* 紧跟在 "tasks: " 后面 */
 #define OUTPUT_WIDTH   (80 - OUTPUT_COL)
@@ -64,6 +66,11 @@ struct task {
     struct file *files[NR_OPEN];    /* 文件描述符表：第 fd 项指向打开的文件，0 表示没用 */
     char name[TASK_NAME_LEN];       /* ps 显示的名字：内核建的任务起好的名字，exec 后是程序的文件名 */
     char cwd[PATH_MAX];             /* 当前目录：规范化过的绝对路径，内核建的任务是 /，fork 时继承 */
+    uint32_t signal;                /* 收到、还没处理的信号：第 sig - 1 位 */
+    uint32_t ignored;               /* 忽略哪些信号（signal(sig, SIG_IGN)），fork 和 exec 都保留 */
+    int pgrp;                       /* 进程组：Ctrl+C 发给终端的前台进程组里的每个任务；fork 时继承 */
+    int leader;                     /* 调用过 setsid，是进程组的头：它打开终端时，终端的前台进程组就是它这一组 */
+    int interruptible;              /* 睡在 interruptible_sleep_on 里：信号能叫醒它 */
 };
 
 static struct tss tss[NR_TASKS];
@@ -183,7 +190,7 @@ static int setup_task(int n, void (*entry)(void), uint32_t cr3)
 
     if (kstack == 0)
         return 0;
-    tasks[n] = (struct task){ .state = TASK_RUNNING, .page_dir = cr3, .kstack = kstack, .cwd = "/" };
+    tasks[n] = (struct task){ .state = TASK_RUNNING, .page_dir = cr3, .kstack = kstack, .cwd = "/", .pgrp = n };
     tss[n] = (struct tss){ .eip = (uint32_t)entry, .eflags = 0x202, .cr3 = cr3,
                            .iomap_base = sizeof(struct tss) };   /* 没有 I/O 权限位图 */
     give_tasks_row(n);
@@ -365,6 +372,142 @@ void wake_up(struct wait_queue *q)
 }
 
 /*
+ * 和 sleep_on 一样睡下，但信号也能叫醒它：终端、管道这些不知道要等多久的地方用它。
+ * 返回 -1 表示有信号（睡之前就有，或者是被信号叫醒的），调用者应该放弃这次系统调用，返回 -EINTR；
+ * 回到用户态之前，interrupt_dispatch() 再按信号的处理方式结束进程。等硬盘、等缓冲区、等文件系统锁
+ * 很快就有结果，半途放弃还会留下改到一半的数据，所以仍用 sleep_on，信号要等它们做完才处理。
+ * Linux 0.11 的 interruptible_sleep_on() 把状态设为 TASK_INTERRUPTIBLE，schedule() 看到它有信号就改回能运行。
+ */
+int interruptible_sleep_on(struct wait_queue *q)
+{
+    struct task *t = &tasks[current_task];
+
+    if (t->signal)
+        return -1;
+    t->interruptible = 1;
+    sleep_on(q);
+    t->interruptible = 0;
+    return t->signal ? -1 : 0;
+}
+
+/*
+ * 给任务 n 挂上信号 sig。它要是睡在能打断的地方（sleep、waitpid、interruptible_sleep_on），就改回能运行，
+ * 让它从系统调用里出来，回到用户态之前处理这个信号。调用者关着中断。
+ * 它忽略的信号直接丢掉，也不叫醒它：shell 忽略 SIGINT，按 Ctrl+C 不会打断它的 waitpid。
+ * SIGKILL 总能送到：sched_signal() 不让任何进程忽略它。
+ * Linux 0.11 的 send_sig() 只挂上信号，由 schedule() 叫醒 TASK_INTERRUPTIBLE 的任务，忽略要等处理时才看。
+ */
+static void send_signal(int n, int sig)
+{
+    struct task *t = &tasks[n];
+    uint32_t bit = 1u << (sig - 1);
+
+    if (t->ignored & bit)
+        return;
+    t->signal |= bit;
+    if (t->state == TASK_SLEEPING || t->state == TASK_WAITING || (t->state == TASK_BLOCKED && t->interruptible))
+        t->state = TASK_RUNNING;
+}
+
+/*
+ * kill 系统调用：pid > 0 发给那个任务；pid 为 0 发给自己所在的进程组（自己也收到）；pid < -1 发给 -pid 那一组。
+ * 任务 0、A 和 init 收不到：前两个是内核任务，从不回到用户态，信号永远处理不了；init 结束了就没人收养孤儿、拉起 shell。
+ * 一个也没找到返回 -1。Linux 0.11 的 sys_kill() 一样按 pid 分几种情况；pid 为 -1 时发给所有进程，这里不支持。
+ */
+int sched_kill(int pid, int sig)
+{
+    if (sig < 1 || sig > 32 || pid == -1)
+        return -1;
+    uint32_t flags = irq_save();
+    int group = pid == 0 ? tasks[current_task].pgrp : -pid, found = 0;
+
+    for (int n = INIT_TASK + 1; n < NR_TASKS; n++) {
+        if (tasks[n].state == TASK_UNUSED || (pid > 0 ? n != pid : tasks[n].pgrp != group))
+            continue;
+        found = 1;
+        if (tasks[n].state != TASK_ZOMBIE)  /* 已经结束了，信号也没用了 */
+            send_signal(n, sig);
+    }
+    irq_restore(flags);
+    return found ? 0 : -1;
+}
+
+/*
+ * signal 系统调用：这个信号来了怎么办。只认 SIG_DFL（结束进程）和 SIG_IGN（不理）；返回原来的处理方式。
+ * 改成忽略时，已经挂着的这个信号也丢掉。SIGKILL 改不了：总得有办法结束一个进程。
+ */
+int sched_signal(int sig, uint32_t handler)
+{
+    if (sig < 1 || sig > 32 || sig == SIGKILL || handler > SIG_IGN)
+        return -1;
+    struct task *t = &tasks[current_task];
+    uint32_t bit = 1u << (sig - 1);
+    uint32_t flags = irq_save();        /* 键盘中断随时可能往 t->signal 里挂信号 */
+    int old = (t->ignored & bit) ? SIG_IGN : SIG_DFL;
+
+    if (handler == SIG_IGN) {
+        t->ignored |= bit;
+        t->signal &= ~bit;
+    } else {
+        t->ignored &= ~bit;
+    }
+    irq_restore(flags);
+    return old;
+}
+
+/*
+ * setsid 系统调用：自己当一个新的进程组的头，组号就是自己的任务号。已经当过了返回 -1。
+ * init 拉起 shell 时在子进程里先调用它，再打开 /dev/tty0：终端的前台进程组就成了 shell 这一组（见 file.c）。
+ * Linux 0.11 的 sys_setsid() 同时新建一个会话、断开原来的控制终端；这里没有会话，只有进程组。
+ */
+int sched_setsid(void)
+{
+    struct task *t = &tasks[current_task];
+
+    if (t->leader)
+        return -1;
+    t->leader = 1;
+    t->pgrp = current_task;
+    return current_task;
+}
+
+/* 给当前任务自己发信号：往没人读的管道里写时发 SIGPIPE。init 和内核任务照样收不到。 */
+void signal_current(int sig)
+{
+    uint32_t flags = irq_save();
+    if (current_task > INIT_TASK)
+        send_signal(current_task, sig);
+    irq_restore(flags);
+}
+
+int sched_pgrp(void)
+{
+    return tasks[current_task].pgrp;
+}
+
+int sched_is_leader(void)
+{
+    return tasks[current_task].leader;
+}
+
+/* 取出一个要处理的信号：编号最小的那个，没有返回 0。回到用户态之前由 interrupt_dispatch() 调用。 */
+int sched_take_signal(void)
+{
+    struct task *t = &tasks[current_task];
+    uint32_t flags = irq_save();
+    int sig = 0;
+
+    if (t->signal) {
+        while (!(t->signal & (1u << sig)))
+            sig++;
+        t->signal &= ~(1u << sig);
+        sig++;
+    }
+    irq_restore(flags);
+    return sig;
+}
+
+/*
  * sleep 系统调用：当前任务睡 ticks 个 tick，立刻把 CPU 让给别的任务，没有就让给任务 0。
  * 时间到了，定时器中断里的 wake_sleepers() 把它改回能运行；轮到它时从 reschedule() 里接着往下走。
  * 关中断让“标记为睡眠”和“切走”之间插不进定时器中断；切回来时恢复原来的中断状态。
@@ -385,9 +528,11 @@ void sched_sleep(uint32_t ticks)
         return;
     }
     uint32_t flags = irq_save();
-    tasks[current_task].state = TASK_SLEEPING;
-    tasks[current_task].wake_at = start + ticks;
-    reschedule();
+    if (!tasks[current_task].signal) {  /* 有信号就不睡了；睡着的时候来了信号，send_signal() 也会提前叫醒它 */
+        tasks[current_task].state = TASK_SLEEPING;
+        tasks[current_task].wake_at = start + ticks;
+        reschedule();
+    }
     irq_restore(flags);
 }
 
@@ -423,7 +568,8 @@ int sched_fork(const struct interrupt_frame *frame)
         .es = frame->es, .cs = frame->cs, .ss = frame->user_ss, .ds = frame->ds, .fs = frame->fs, .gs = frame->gs,
         .iomap_base = sizeof(struct tss),
     };
-    tasks[n] = (struct task){ .state = TASK_RUNNING, .page_dir = dir, .kstack = kstack, .parent = current_task };
+    tasks[n] = (struct task){ .state = TASK_RUNNING, .page_dir = dir, .kstack = kstack, .parent = current_task,
+                              .ignored = tasks[current_task].ignored, .pgrp = tasks[current_task].pgrp };   /* 收到的信号不继承 */
     set_name(n, tasks[current_task].name);
     for (int i = 0; i < PATH_MAX; i++)
         tasks[n].cwd[i] = tasks[current_task].cwd[i];
@@ -490,6 +636,10 @@ int sched_waitpid(int pid, uint32_t *status, int options)
         if (!have_child || (options & WNOHANG)) {
             irq_restore(flags);
             return have_child ? 0 : -1;
+        }
+        if (tasks[current_task].signal) {      /* 等着的时候来了信号：send_signal() 把它叫醒了 */
+            irq_restore(flags);
+            return -EINTR;
         }
         tasks[current_task].state = TASK_WAITING;
         reschedule();

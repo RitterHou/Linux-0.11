@@ -1089,6 +1089,25 @@ def test_no_disk(_m, _elf):
         check(not exception_screen(m)[0], f"不应出现异常面板：{exception_screen(m)[0]!r}")
 
 
+def test_signal_syscalls(_m, _elf):
+    """kill 和 signal：结束睡着的子进程、忽略、SIGKILL 不能忽略、进程组、setsid、打断管道和 waitpid、SIGPIPE、参数检查、僵尸"""
+    d = build_selftest("USER_SIGNAL")
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        m.wait_for(lambda mm: message_row(mm) == "task 2 exited with code 0", timeout=15, what="init 的结束消息")
+        out = task_output(m).replace("A", "")
+        expected = "tikgspwevz"
+        meaning = {"t": "kill 打断 sleep，子进程被 SIGTERM 结束，状态 0x20F", "i": "忽略了 SIGTERM 的子进程照常退出",
+                   "k": "SIGKILL 不能忽略", "g": "kill(0, …) 发给自己这一组，忽略随 fork 继承",
+                   "s": "setsid 之后自成一组，kill(-组号, …) 才发得到", "p": "睡在管道上的读者、写者都能被结束",
+                   "w": "睡在 waitpid 里的进程能被结束", "e": "往没人读的管道里写：被 SIGPIPE 结束，忽略了就返回 -1", "v": "kill、signal 的参数不对返回 -1，内核任务和 init 收不到信号",
+                   "z": "给僵尸发信号返回 0，退出码不变"}
+        for i, ch in enumerate(expected):
+            check(len(out) > i and out[i] == ch, f"第 {i + 1} 项（{meaning[ch]}）没有通过：第 6 行去掉 A 后是 {out!r}，应为 {expected!r}")
+        m.wait_for(lambda mm: mm.screen(4)[3].startswith("memory: 3839/3840 pages free"), timeout=2,
+                   what="所有子进程的内存和内核栈都收回（只剩任务 A 的内核栈）")
+        check(not exception_screen(m)[0], f"不应出现异常面板：{exception_screen(m)[0]!r}")
+
+
 def test_fs_write(_m, _elf):
     """写文件：O_EXCL、读写权限、O_TRUNC、O_APPEND、删掉开着的文件、目录的错误、同一个文件开两次共用 i 节点"""
     d = build_selftest("USER_FSWRITE")
@@ -1221,17 +1240,69 @@ def test_cwd(m, elf):
     check(run_command(m, "pwd") == ["/"], "新的 shell 是 init 的子进程，当前目录应是 init 的 /，不是上一个 shell 的 /etc")
 
 
+
+def test_signals(m, elf):
+    """信号：Ctrl+C 结束前台的程序和整条管道，shell 自己和后台程序不受影响；kill 结束后台程序；kill 的错误"""
+    def ctrl_c_ends(command, what):
+        wait_prompt(m)
+        type_text(m, command + "\n")
+        m.wait_for(lambda mm: last_line(mm) == f"$ {command}" or console(mm)[-1] == "" and f"$ {command}" in console(mm),
+                   timeout=2, what=f"{command} 开始运行")
+        time.sleep(0.5)
+        m.sendkeys(["ctrl-c"])
+        m.wait_for(lambda mm: [r for r in console(mm) if r][-3:] == [f"$ {command}", "^C", "$"], timeout=2,
+                   what=f"按 Ctrl+C 后{what}结束，回显 ^C，shell 打出提示符")
+        check(re.fullmatch(r"task \d+ killed by signal 2 \(SIGINT\)", message_row(m).strip()),
+              f"第 7 行应写出被 SIGINT 结束：{message_row(m)!r}")
+
+    ctrl_c_ends("letter G", "前台的 letter")      # test_shell 在后台留了一个写 D 的，这里用别的字母
+    time.sleep(1.0)                 # 第 6 行每秒写 100 多个字母，1 秒后旧的 G 都被盖掉了
+    check("G" not in task_output(m), f"letter G 结束后第 6 行不应再出现 G：{task_output(m)!r}")
+    ctrl_c_ends("cat", "在终端上等输入的 cat")
+    ctrl_c_ends("cat | wc", "管道的两段")
+    names = [r.split()[-1] for r in run_command(m, "ps")[1:]]
+    check(names.count("sh") == 1 and "cat" not in names and "wc" not in names, f"shell 还在，cat 和 wc 都结束了：{names!r}")
+
+    out = run_command(m, "letter E &")
+    check(len(out) == 1 and re.fullmatch(r"\[\d+\]", out[0]), f"后台运行应打印任务号：{out!r}")
+    pid = out[0][1:-1]
+    wait_prompt(m)
+    type_text(m, "ech")
+    m.sendkeys(["ctrl-c"])
+    m.wait_for(lambda mm: [r for r in console(mm) if r][-1] == "$ ech^C", timeout=2, what="在提示符上按 Ctrl+C：回显 ^C，丢掉这一行")
+    type_text(m, "echo ok\n")
+    m.wait_for(lambda mm: [r for r in console(mm) if r][-3:] == ["echo ok", "ok", "$"], timeout=2,
+               what="丢掉的那一行不会交给 shell，接着敲的命令照常运行")
+    time.sleep(1.0)
+    check("E" in task_output(m), f"后台的 letter 忽略 SIGINT，按了 Ctrl+C 还在写 E：{task_output(m)!r}")
+    check(run_command(m, "kill " + pid) == [], "kill 应成功")
+    check(message_row(m).strip() == f"task {pid} killed by signal 15 (SIGTERM)", f"第 7 行应写出被 SIGTERM 结束：{message_row(m)!r}")
+    time.sleep(1.0)
+    check("E" not in task_output(m), f"后台的 letter 被 kill 后第 6 行不应再出现 E：{task_output(m)!r}")
+
+    for command, expected in [("kill 1", ["kill: 1: cannot signal"]), ("kill 2", ["kill: 2: cannot signal"]),
+                              ("kill 99", ["kill: 99: cannot signal"]), ("kill -x 5", ["kill: -x: bad signal"]),
+                              ("kill", ["usage: kill [-signal] pid..."])]:
+        out = run_command(m, command)
+        check(out == expected, f"{command} 应输出 {expected!r}，实际是 {out!r}")
+    pid = run_command(m, "letter F &")[0][1:-1]
+    check(run_command(m, f"kill -9 {pid}") == [] and message_row(m).strip() == f"task {pid} killed by signal 9 (SIGKILL)",
+          f"kill -9 应发 SIGKILL：{message_row(m)!r}")
+    out = run_command(m, "ps")
+    check(any(r.split()[-1] == "sh" and r.split()[0] == "4" for r in out[1:]), f"按了几次 Ctrl+C，shell 还是原来的 4 号任务：{out!r}")
+
+
 # 前几项共用一台正常启动的虚拟机；其余各自启动自检内核。
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_console_scroll,
                 test_idle_in_hlt, test_demand_paging, test_fork_address_spaces, test_syscall_gate, test_user_setup, test_user_task,
-                test_tasks_alternate, test_shell, test_cwd]
+                test_tasks_alternate, test_shell, test_cwd, test_signals]
 SEPARATE_TESTS = [test_syscalls, test_page_alloc, test_double_free, test_hd_rw, test_early_key, test_keyboard_edge_cases, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,
                   test_big_kernel, test_user_write_kernel, test_user_privileged,
                   test_user_bad_pointer, test_user_exit, test_all_tasks_exit,
                   test_nmi_in_user_mode, test_user_write_code, test_preemption,
-                  test_deep_stack, test_wild_read, test_fork_isolation, test_waitpid, test_file_system, test_exec, test_pipe, test_fs_write, test_no_disk]
+                  test_deep_stack, test_wild_read, test_fork_isolation, test_waitpid, test_file_system, test_exec, test_pipe, test_fs_write, test_signal_syscalls, test_no_disk]
 
 
 def main():
