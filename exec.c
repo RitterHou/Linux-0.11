@@ -115,6 +115,9 @@ int do_exec(const char *path, uint32_t user_argv, struct interrupt_frame *frame)
         if (ph[i].vaddr + ph[i].memsz > end)
             end = ph[i].vaddr + ph[i].memsz;
     }
+    /* 最高的段是只读的（程序没有数据段）：它最后一页里剩下的地方写不了，堆从下一页开始 */
+    if ((end & (PAGE_SIZE - 1)) && user_page_writable(dir, end) != 1)
+        end = (end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
 
     /* 4. 栈顶这一页：从上往下依次是参数字符串、argv[argc] = 0、argv[0..argc-1]、argv、argc、假的返回地址 */
     uint32_t top = USER_TOP - PAGE_SIZE;

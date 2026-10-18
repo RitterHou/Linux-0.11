@@ -1,7 +1,8 @@
 /*
  * sort [-r] [文件…]：把所有的行读进内存，排好序再打印；没给文件就读标准输入。-r 倒过来排。
- * 事先不知道有多少行、每行多长，所以内容和每一行的位置都放在 malloc 来的堆上，不够了就要一块两倍大的，
- * 把旧的搬过去再 free。按字节比较（0～255），行里可以有任何字节，打印时每行后面都加一个换行。
+ * 事先不知道有多少行、每行多长，所以内容和每一行的位置都放在 malloc 来的堆上，不够了就用 realloc 扩到两倍：
+ * 在堆末尾的块原地变大，不用搬。按字节比较（0～255），行里可以有任何字节，打印时每行后面都加一个换行。
+ * 一个文件的最后一行没有换行，也算一行，不会和下一个文件的第一行接在一起。
  */
 #include "ulib.h"
 
@@ -16,7 +17,7 @@ static struct line *lines;
 static uint32_t nlines, lines_cap;
 static int reverse;
 
-/* 把 *buf 扩成至少能放 need 个 elem 字节的元素：新要一块两倍大的，搬过去，free 旧的。 */
+/* 把 *buf 扩成至少能放 need 个 elem 字节的元素：每次翻倍。 */
 static int grow(void **buf, uint32_t *cap, uint32_t need, uint32_t elem)
 {
     if (need <= *cap)
@@ -24,27 +25,30 @@ static int grow(void **buf, uint32_t *cap, uint32_t need, uint32_t elem)
     uint32_t n = *cap ? *cap : 256;
     while (n < need)
         n *= 2;
-    char *p = malloc(n * elem);
+    void *p = realloc(*buf, n * elem);
     if (!p)
         return 0;
-    for (uint32_t i = 0; i < *cap * elem; i++)
-        p[i] = ((char *)*buf)[i];
-    free(*buf);
     *buf = p;
     *cap = n;
     return 1;
 }
 
+/* 读完一个文件：1 表示读完了，0 表示内存不够，-1 表示读出错。 */
 static int read_all(int32_t fd)
 {
     for (;;) {
         if (!grow((void **)&text, &text_cap, text_len + 512, 1))
             return 0;
         int32_t n = read(fd, text + text_len, 512);
-        if (n <= 0)
-            return 1;
+        if (n < 0)
+            return -1;
+        if (n == 0)
+            break;
         text_len += (uint32_t)n;
     }
+    if (text_len && text[text_len - 1] != '\n')     /* 最后一行没有换行：补一个，免得和下一个文件接成一行 */
+        text[text_len++] = '\n';                     /* grow 时总留着 512 字节，放得下 */
+    return 1;
 }
 
 static int less(const struct line *a, const struct line *b)
@@ -80,7 +84,7 @@ int main(int argc, char **argv)
     int ok = 1;
     if (first == argc)
         ok = read_all(0);
-    for (int i = first; i < argc && ok; i++) {
+    for (int i = first; i < argc && ok > 0; i++) {
         int32_t fd = open(argv[i], 0);
         if (fd < 0) {
             print("sort: ");
@@ -91,7 +95,7 @@ int main(int argc, char **argv)
         ok = read_all(fd);
         close(fd);
     }
-    for (uint32_t start = 0; ok && start < text_len;) {
+    for (uint32_t start = 0; ok > 0 && start < text_len;) {
         uint32_t end = start;
         while (end < text_len && text[end] != '\n')
             end++;
@@ -99,9 +103,9 @@ int main(int argc, char **argv)
             lines[nlines++] = (struct line){ text + start, end - start };
         start = end + 1;
     }
-    struct line *tmp = ok ? malloc(nlines * sizeof(struct line) + 1) : 0;
+    struct line *tmp = ok > 0 ? malloc(nlines * sizeof(struct line)) : 0;
     if (!tmp) {
-        print("sort: out of memory\n");
+        print(ok < 0 ? "sort: read error\n" : "sort: out of memory\n");
         return 1;
     }
     merge_sort(lines, tmp, 0, nlines);

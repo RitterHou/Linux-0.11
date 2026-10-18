@@ -1113,16 +1113,18 @@ def test_signal_syscalls(_m, _elf):
 
 
 def test_brk(_m, _elf):
-    """brk：堆从程序末尾开始、用到才补页；堆和栈之间不补页；fork 继承；越界的 brk 不动；exec 之后从新程序的末尾开始"""
+    """brk：堆从程序末尾开始、用到才补页；堆和栈之间不补页；fork 继承；越界的 brk 不动；exec 之后从新程序的末尾开始；栈区边界；sort 和 malloc"""
     d = build_selftest("USER_BRK")
     with Machine(os.path.join(d, "floppy.img")) as m:
         m.wait_for(lambda mm: message_row(mm) == "task 2 exited with code 0", timeout=10, what="init 的结束消息")
         out = task_output(m).replace("A", "")
-        expected = "qhgfleo"
+        expected = "qhgfleoksnm"
         meaning = {"q": "init 的堆从 0x40000000 开始", "h": "brk 往上挪 8 KB，写满再读回来",
                    "g": "堆和栈之间没要过的地方一写就被结束，brk 所在的那一页能用", "f": "fork 之后堆一样大、内容一样，各改各的",
-                   "l": "低于程序末尾或伸进栈区的 brk 不动", "e": "系统调用的缓冲区在没要过的地方，read 返回 -1",
-                   "o": "exec 之后堆从新程序的 .bss 末尾开始，malloc 来的内存能用"}
+                   "l": "低于程序末尾或离栈区不到 16 KB 的 brk 不动，能缩回空堆", "e": "系统调用的缓冲区在没要过的地方或者跨过堆末尾，read 返回 -1",
+                   "o": "exec 之后堆从新程序的 .bss 末尾开始，malloc 来的内存能用",
+                   "k": "栈区是顶端 64 KB；堆推不到紧贴栈区，栈用超了被结束", "s": "sort 按字节排序（含 0、0x80、0xFF），-r 倒序",
+                   "n": "sort 读两个文件，前一个末行没换行也不接在一起", "m": "malloc 的检查：合并、和 sbrk 混用、realloc、随机分配"}
         for i, ch in enumerate(expected):
             check(len(out) > i and out[i] == ch, f"第 {i + 1} 项（{meaning[ch]}）没有通过：第 6 行去掉 A 后是 {out!r}，应为 {expected!r}")
         m.wait_for(lambda mm: mm.screen(4)[3].startswith("memory: 3839/3840 pages free"), timeout=2,
@@ -1316,7 +1318,7 @@ def test_signals(m, elf):
 
 
 def test_sort(m, elf):
-    """sort：malloc 来的堆放下 600 KB 的 /big 再排序；-r 倒序；结束后堆的页都收回"""
+    """sort：malloc 来的堆放下 600 KB 到 1.8 MB 的输入再排序；两个文件之间补换行；-r 倒序；结束后堆的页都收回"""
     free_before = m.screen(4)[3].split("/")[0]
     check(run_command(m, "cat /hello.txt /etc/issue | sort") == ["Hello from the Minix file system on hda!", "Linux 0.11 learning kernel"],
           "两行按字节排好")
@@ -1329,6 +1331,12 @@ def test_sort(m, elf):
     m.wait_for(lambda mm: last_line(mm) == "$" and "$ cat /big | sort | wc" in console(mm), timeout=20, what="sort 排完 600 KB 的 /big")
     out = [r for r in console(m) if r][-2]
     check(out == "2401 7201 614401", f"排序不增减字节，最后一行补上换行：wc 应为 2401 7201 614401，实际是 {out!r}")
+    for command, expected in [("cat /big /big /big | sort | wc", "7201 21601 1843201"), ("sort /big /big | wc", "4802 14402 1228802")]:
+        wait_prompt(m)
+        type_text(m, command + "\n")
+        m.wait_for(lambda mm: last_line(mm) == "$" and f"$ {command}" in console(mm), timeout=30, what=f"{command} 排完")
+        out = [r for r in console(m) if r][-2]
+        check(out == expected, f"{command}：1.2～1.8 MB 的输入，realloc 在堆末尾原地变大才放得下；wc 应为 {expected}，实际是 {out!r}")
     m.wait_for(lambda mm: mm.screen(4)[3].split("/")[0] == free_before, timeout=2, what=f"sort 结束后空闲页回到 {free_before}")
 
 

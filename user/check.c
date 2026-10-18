@@ -12,6 +12,64 @@
 volatile int initialized = 12345;
 volatile char zeros[5000];          /* 跨过一页多：.bss 不在文件里，exec 要分出清零的页 */
 
+/*
+ * check malloc：分配器自己的检查，结果只用退出码报告。
+ *   - 先后 free 的两块挨着的空块，能并成一块再分出去（不管 free 的顺序）；
+ *   - 别人直接 sbrk 了一段，malloc 跨过它，不会卡住，也不会把那一段分出去；
+ *   - 堆末尾的块 realloc 变大，原地变，内容不变；不在末尾的，搬过去，内容也不变；
+ *   - 32 个槽随机 malloc、free 两千次：每块都对齐到 8 字节，填上自己的花样，free 之前核对没被别人改过。
+ */
+static int check_malloc(void)
+{
+    int ok = 1;
+    char *a = malloc(100), *b = malloc(100), *c = malloc(100);
+    free(a);
+    free(b);                                /* a 先空出来：free(b) 时 a 不在 b 后面，要靠 malloc 扫描时并上 */
+    ok &= malloc(200) == a;
+    free(a);
+    free(c);
+
+    char *p = malloc(16);
+    char *gap = sbrk(4096);
+    char *q = malloc(16), *r = malloc(16);
+    ok &= p && q && r && gap != (void *)-1 && (q >= gap + 4096 || q + 16 <= gap) && (r >= gap + 4096 || r + 16 <= gap);
+    for (int i = 0; i < 4096; i++)
+        gap[i] = 0;                         /* 全是 0：malloc 要是把这里当成块头，大小是 0，会原地打转 */
+    q[0] = 2;
+    ok &= gap[0] == 0 && gap[4095] == 0;
+
+    char *big = malloc(50000);
+    for (int i = 0; i < 50000; i++)
+        big[i] = (char)i;
+    char *bigger = realloc(big, 100000);
+    ok &= bigger == big;                    /* 在堆末尾：原地变大 */
+    for (int i = 0; i < 50000; i++)
+        ok &= bigger[i] == (char)i;
+    char *moved = realloc(p, 1000);         /* p 后面有别的块：搬 */
+    ok &= moved != p && moved[0] == p[0];
+
+    static char *slot[32];
+    static uint32_t len[32];
+    uint32_t seed = 12345;
+    for (int op = 0; op < 2000 && ok; op++) {
+        seed = seed * 1103515245 + 12345;
+        int k = (int)((seed >> 16) % 32);
+        if (slot[k]) {
+            for (uint32_t i = 0; i < len[k]; i++)
+                ok &= slot[k][i] == (char)(k + i);
+            free(slot[k]);
+            slot[k] = 0;
+        } else {
+            len[k] = 1 + (seed >> 8) % 3000;
+            slot[k] = malloc(len[k]);
+            ok &= slot[k] != 0 && ((uint32_t)slot[k] & 7) == 0;
+            for (uint32_t i = 0; ok && i < len[k]; i++)
+                slot[k][i] = (char)(k + i);
+        }
+    }
+    return ok;
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 2 && strcmp(argv[1], "badptr") == 0) {
@@ -41,6 +99,8 @@ int main(int argc, char **argv)
             ok &= p[i] == i;
         return ok ? 0 : 1;
     }
+    if (argc == 2 && strcmp(argv[1], "malloc") == 0)
+        return check_malloc() ? 0 : 1;
     if (argc == 2 && strcmp(argv[1], "crash") == 0) {
         *(volatile char *)main = 0;
         print("x\n");
