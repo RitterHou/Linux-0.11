@@ -131,7 +131,7 @@ char *format_uint(uint32_t value, unsigned base, char buf[12])
 
 /*
  * 拼一整行文字，再一次写到屏幕上：异常面板、任务结束的消息等都用它。
- * 不用 = { 0 } 初始化 text，因为编译器可能为此生成对 memset 的调用，而内核里没有 memset。
+ * 只清开头一个字节，不把 128 字节的 text 全部清零：后面的字节在写进去之前不会被读到。
  */
 void line_init(struct text_line *line)
 {

@@ -63,6 +63,7 @@ struct task {
     uint32_t status;                /* 结束时的状态，waitpid 取走：exit 的退出码，或 0x100 加异常号 */
     struct file *files[NR_OPEN];    /* 文件描述符表：第 fd 项指向打开的文件，0 表示没用 */
     char name[TASK_NAME_LEN];       /* ps 显示的名字：内核建的任务起好的名字，exec 后是程序的文件名 */
+    char cwd[PATH_MAX];             /* 当前目录：规范化过的绝对路径，内核建的任务是 /，fork 时继承 */
 };
 
 static struct tss tss[NR_TASKS];
@@ -99,6 +100,12 @@ int current_pid(void)
 struct file **current_files(void)
 {
     return tasks[current_task].files;
+}
+
+/* 当前任务的当前目录。 */
+char *current_cwd(void)
+{
+    return tasks[current_task].cwd;
 }
 
 static void set_name(int n, const char *name)
@@ -176,7 +183,7 @@ static int setup_task(int n, void (*entry)(void), uint32_t cr3)
 
     if (kstack == 0)
         return 0;
-    tasks[n] = (struct task){ .state = TASK_RUNNING, .page_dir = cr3, .kstack = kstack };
+    tasks[n] = (struct task){ .state = TASK_RUNNING, .page_dir = cr3, .kstack = kstack, .cwd = "/" };
     tss[n] = (struct tss){ .eip = (uint32_t)entry, .eflags = 0x202, .cr3 = cr3,
                            .iomap_base = sizeof(struct tss) };   /* 没有 I/O 权限位图 */
     give_tasks_row(n);
@@ -223,7 +230,7 @@ void sched_init(void)
      */
     tss[0].cr3 = kernel_page_dir();
     tss[0].iomap_base = sizeof(struct tss);
-    tasks[0] = (struct task){ .state = TASK_RUNNING, .page_dir = kernel_page_dir() };
+    tasks[0] = (struct task){ .state = TASK_RUNNING, .page_dir = kernel_page_dir(), .cwd = "/" };
     give_tasks_row(0);              /* 自检会在开始调度前从 kmain 调用 write */
     set_name(0, "idle");
     for (int n = 0; n < NR_TASKS; n++)
@@ -418,6 +425,8 @@ int sched_fork(const struct interrupt_frame *frame)
     };
     tasks[n] = (struct task){ .state = TASK_RUNNING, .page_dir = dir, .kstack = kstack, .parent = current_task };
     set_name(n, tasks[current_task].name);
+    for (int i = 0; i < PATH_MAX; i++)
+        tasks[n].cwd[i] = tasks[current_task].cwd[i];
     for (int fd = 0; fd < NR_OPEN; fd++) {      /* 子进程继承所有打开的文件，与父进程共用读写位置 */
         tasks[n].files[fd] = tasks[current_task].files[fd];
         if (tasks[n].files[fd])

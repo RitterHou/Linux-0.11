@@ -4,7 +4,8 @@
  *   - 用 | 把几个命令接起来：每一段一个子进程，相邻两段之间一个管道，前一个的标准输出接到后一个的标准输入；
  *   - > 文件、>> 文件、< 文件：把这一段的标准输出写进文件（清空或者接在末尾），或者从文件读标准输入；
  *   - 最后一个参数是 & 的，在后台运行，不等它；每次读命令之前收走已经结束的后台程序；
- *   - 内建命令：exit 退出 shell（init 会再拉起一个），help 显示能用的命令。
+ *   - 内建命令：cd 换当前目录（不带参数回到根目录），exit 退出 shell（init 会再拉起一个），help 显示能用的命令。
+ *     cd 必须是内建的：子进程换了目录，父进程的当前目录不会跟着变。
  * Linux 0.11 的 init 运行的是磁盘上的 /bin/sh（当年的 bash），道理相同：pipe、fork、dup、exec、wait。
  */
 #include "ulib.h"
@@ -79,7 +80,7 @@ static void exec_command(char **argv)
     redirect(argv);
     if (!argv[0])
         exit(0);
-    char path[64];
+    char path[128];                 /* 内核的路径最长 127 个字节 */
     uint32_t len = 0;
     int has_slash = 0;
 
@@ -203,8 +204,17 @@ int main(int sh_argc, char **sh_argv)
         }
         if (strcmp(argv[0], "exit") == 0)
             return 0;
+        if (strcmp(argv[0], "cd") == 0) {
+            const char *dir = argc > 1 ? argv[1] : "/";
+            if (chdir(dir) < 0) {
+                print("sh: cd: ");
+                print(dir);
+                print(": not a directory\n");
+            }
+            continue;
+        }
         if (strcmp(argv[0], "help") == 0) {
-            print("commands: ls cat echo ps wc grep rm mkdir rmdir df hello check, letter X &, exit\n");
+            print("commands: ls cat echo ps wc grep rm mkdir rmdir df pwd hello check, cd, letter X &, exit\n");
             print("pipes and files: ls /bin | wc, echo hi > /tmp/a, cat < /tmp/a\n");
             continue;
         }
