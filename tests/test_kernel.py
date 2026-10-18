@@ -1131,10 +1131,13 @@ def test_shell(m, elf):
     out = run_command(m, "ps")
     check(out[0] == "PID PPID S NAME", f"ps 的表头不对：{out!r}")
     rows = {r.split()[0]: r.split() for r in out[1:]}
-    expected = {"0": ["0", "0", "R", "idle"], "1": ["1", "0", "S", "task_a"], "2": ["2", "0", "S", "init"],
-                "3": ["3", "2", "S", "letter"], "4": ["4", "2", "W", "sh"]}
-    for pid, want in expected.items():
-        check(rows.get(pid) == want, f"ps 中任务 {pid} 应为 {want}：{out!r}")
+    # 任务 1～3 每写一个字母睡 2 个 tick：ps 查到它们时多半在睡（S）；也可能刚被定时器叫醒，在等 ps 用完时间片（R）
+    expected = {"0": ["0", "0", "R", "idle"], "1": ["1", "0", "SR", "task_a"], "2": ["2", "0", "SR", "init"],
+                "3": ["3", "2", "SR", "letter"], "4": ["4", "2", "W", "sh"]}
+    for pid, (want_pid, want_ppid, states, name) in expected.items():
+        row = rows.get(pid)
+        check(row is not None and len(row) == 4 and row[0] == want_pid and row[1] == want_ppid and row[2] in states and row[3] == name,
+              f"ps 中任务 {pid} 应为 {want_pid} {want_ppid} {'或'.join(states)} {name}：{out!r}")
     check(any(r[3] == "ps" and r[2] == "R" and r[1] == "4" for r in rows.values()), f"ps 应列出自己：{out!r}")
     m.wait_for(lambda mm: mm.screen(4)[3].split("/")[0] == free_before, timeout=2,
                what=f"命令都结束后空闲页回到 {free_before}")
