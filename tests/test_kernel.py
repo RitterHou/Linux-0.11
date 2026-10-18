@@ -1095,14 +1095,16 @@ def test_signal_syscalls(_m, _elf):
     with Machine(os.path.join(d, "floppy.img")) as m:
         m.wait_for(lambda mm: message_row(mm) == "task 2 exited with code 0", timeout=15, what="init 的结束消息")
         out = task_output(m).replace("A", "")
-        expected = "tikgspwevzhrxb"
+        expected = "tikgspwevzhrxbuq"
         meaning = {"t": "kill 打断 sleep，子进程被 SIGTERM 结束，状态 0x20F", "i": "忽略了 SIGTERM 的子进程照常退出",
                    "k": "SIGKILL 不能忽略", "g": "kill(0, …) 发给自己这一组，忽略随 fork 继承",
                    "s": "setsid 之后自成一组，kill(-组号, …) 才发得到", "p": "睡在管道上的读者、写者都能被结束",
                    "w": "睡在 waitpid 里的进程能被结束", "e": "往没人读的管道里写：被 SIGPIPE 结束，忽略了就返回 -1", "v": "kill、signal 的参数不对返回 -1，内核任务和 init 收不到信号",
                    "z": "给僵尸发信号返回 0，退出码不变", "h": "处理函数拿到信号编号，被打断的 kill 照样返回 0，第二次还有效",
                    "r": "设了处理函数的信号打断管道上的 read：返回 -EINTR，程序接着运行",
-                   "x": "exec 之后处理函数改回默认，忽略的保持忽略", "b": "处理函数不在用户的内存里，signal 返回 SIG_ERR"}
+                   "x": "exec 之后处理函数改回默认，忽略的保持忽略", "b": "处理函数不在用户的内存里，signal 返回 SIG_ERR",
+                   "u": "在用户态空转的进程也能被 kill 结束（定时器中断返回时处理信号）",
+                   "q": "处理函数前后 eax、ecx、edx、DF 原样恢复，处理函数里 DF 是 0"}
         for i, ch in enumerate(expected):
             check(len(out) > i and out[i] == ch, f"第 {i + 1} 项（{meaning[ch]}）没有通过：第 6 行去掉 A 后是 {out!r}，应为 {expected!r}")
         m.wait_for(lambda mm: mm.screen(4)[3].startswith("memory: 3839/3840 pages free"), timeout=2,
@@ -1244,7 +1246,7 @@ def test_cwd(m, elf):
 
 
 def test_signals(m, elf):
-    """信号：Ctrl+C 结束前台的程序和整条管道，shell 自己和后台程序不受影响；kill 结束后台程序；kill 的错误"""
+    """信号：Ctrl+C 结束前台的程序和整条管道，shell 自己和后台程序不受影响；kill 结束后台程序；kill 的错误；shell 忽略 SIGTERM"""
     def ctrl_c_ends(command, what):
         wait_prompt(m)
         type_text(m, command + "\n")
@@ -1289,8 +1291,9 @@ def test_signals(m, elf):
     pid = run_command(m, "letter F &")[0][1:-1]
     check(run_command(m, f"kill -9 {pid}") == [] and message_row(m).strip() == f"task {pid} killed by signal 9 (SIGKILL)",
           f"kill -9 应发 SIGKILL：{message_row(m)!r}")
+    check(run_command(m, "kill 4") == [], "shell 忽略 SIGTERM：kill 它自己返回 0，什么也不打印，shell 也不会重新拉起")
     out = run_command(m, "ps")
-    check(any(r.split()[-1] == "sh" and r.split()[0] == "4" for r in out[1:]), f"按了几次 Ctrl+C，shell 还是原来的 4 号任务：{out!r}")
+    check(any(r.split()[-1] == "sh" and r.split()[0] == "4" for r in out[1:]), f"按了几次 Ctrl+C、kill 了一次，shell 还是原来的 4 号任务：{out!r}")
 
 
 # 前几项共用一台正常启动的虚拟机；其余各自启动自检内核。

@@ -56,8 +56,8 @@ struct file *file_open(const char *path, int flags)
         if ((d.mode & S_IFMT) == S_IFCHR) {
             if (d.zone[0] == (TTY_MAJOR << 8 | 0)) {
                 type = FILE_CONSOLE;
-                if (sched_is_leader())
-                    tty_set_pgrp(sched_pgrp());     /* 进程组的头打开控制台：它这一组成了前台进程组 */
+                if (sched_claim_tty())
+                    tty_set_pgrp(sched_pgrp());     /* 进程组的头第一次打开控制台：它这一组成了前台进程组 */
             } else if (d.zone[0] == (TTY_MAJOR << 8 | 1)) {
                 type = FILE_TASKS;
             } else {

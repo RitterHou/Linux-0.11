@@ -255,7 +255,7 @@ static void handle_signals(struct interrupt_frame *frame)
 {
     uint32_t handler, restorer;
     int sig = sched_take_signal(&handler, &restorer);
-    if (!sig)
+    if (!sig || handler == (uint32_t)SIG_IGN)   /* 忽略的信号发的时候就丢掉了，这里只是防万一 */
         return;
     if (handler != (uint32_t)SIG_DFL) {
         uint32_t sp = frame->user_esp - 7 * 4;
@@ -270,6 +270,7 @@ static void handle_signals(struct interrupt_frame *frame)
             p[6] = frame->eip;
             frame->user_esp = sp;
             frame->eip = handler;
+            frame->eflags &= ~0x500u;   /* 清 DF 和 TF：C 函数进来时 DF 必须是 0，单步跟踪也不该带进处理函数 */
             return;
         }
     }

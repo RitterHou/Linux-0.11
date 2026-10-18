@@ -138,7 +138,12 @@ static void run_line(char **argv, int argc, int background)
         }
         int32_t pid = fork();
         if (pid == 0) {
+            /*
+             * 从 fork 到这里，子进程用的还是 shell 的 on_intr：这时按 Ctrl+C 只会打断一下，命令照样开始。
+             * 没有 sigprocmask 这种先挡住信号的办法，这一小段避免不了。
+             */
             signal(SIGINT, background ? SIG_IGN : SIG_DFL);
+            signal(SIGTERM, SIG_DFL);
             if (prev >= 0) {
                 close(0);
                 dup(prev);
@@ -199,6 +204,7 @@ int main(int sh_argc, char **sh_argv)
     int32_t st;
 
     signal(SIGINT, on_intr);        /* Ctrl+C 结束的是前台程序，不是 shell 自己 */
+    signal(SIGTERM, SIG_IGN);       /* kill 0 发给这一组，也不该把 shell 自己结束；kill -9 才行 */
     print("shell on hda: try help, ls /bin, cat /hello.txt, ps\n");
     for (;;) {
         while (waitpid(-1, &st, WNOHANG) > 0)
