@@ -33,6 +33,7 @@
 #define SELFTEST_USER_FORK         29   /* fork 后父子各改栈上的变量：期望互不影响，两边的返回值正确 */
 #define SELFTEST_USER_WAIT         30   /* waitpid：取退出码、内核写共享页要复制、任务槽用光、WNOHANG、被结束的子进程 */
 #define SELFTEST_USER_FS           31   /* open/read/close：读文件、大文件、目录、子目录，描述符用光，fork 后共用读写位置 */
+#define SELFTEST_USER_EXEC         32   /* exec：失败时原程序不受影响，hello 打印参数，check 检查自己的段，写代码页被结束 */
 
 #define SELFTEST_IN_USER(n) ((n) >= 20)
 
