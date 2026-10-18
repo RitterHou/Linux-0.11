@@ -39,6 +39,13 @@ void tty_set_pgrp(int pgrp)
     tty_pgrp = pgrp;
 }
 
+/* 进程组的头结束了：前台进程组还是它那一组的话，清掉。init 拉起的新 shell 打开终端时再设上。 */
+void tty_release_pgrp(int pgrp)
+{
+    if (tty_pgrp == pgrp)
+        tty_pgrp = 0;
+}
+
 /* 由键盘中断调用（自检也会直接调用），此时中断关着。 */
 void tty_input(char ch)
 {

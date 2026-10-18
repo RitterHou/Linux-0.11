@@ -131,6 +131,7 @@ int sched_signal(int sig, uint32_t handler, uint32_t restorer);
 int sched_setsid(void);
 int sched_pgrp(void);
 int sched_is_leader(void);
+int sched_claim_tty(void);
 int sched_take_signal(uint32_t *handler, uint32_t *restorer);
 void sched_exec_signals(void);
 void signal_current(int sig);
@@ -158,6 +159,7 @@ int hd_write(uint32_t lba, const void *buf);
 /* tty.c：终端 */
 void tty_input(char ch);
 void tty_set_pgrp(int pgrp);
+void tty_release_pgrp(int pgrp);
 int32_t tty_read(void *dst, uint32_t n);
 int32_t tty_write(const void *src, uint32_t n);
 

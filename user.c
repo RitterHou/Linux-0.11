@@ -26,10 +26,18 @@ __asm__(".globl sig_restore\n"
         "    ret\n");
 
 #if defined(SELFTEST) && SELFTEST == SELFTEST_USER_SIGNAL
+/*
+ * 注意：这个文件链接进内核映像，这些全局变量在内核映像的 .user 数据区里，一一对应映射，所有任务共用，
+ * fork 时不复制（只有 0x40000000 起的用户空间是各有一份的）。所以每一项开始前，init 先把它们清零。
+ */
 static volatile int32_t caught, caught_count;
+static volatile uint32_t handler_flags;
 
 static void on_signal(int sig)
 {
+    uint32_t flags;
+    __asm__ volatile("pushfl; popl %0" : "=r"(flags));
+    handler_flags = flags;
     caught = sig;
     caught_count++;
 }
@@ -426,7 +434,7 @@ void user_main(void)
     exit(0);
 #elif SELFTEST == SELFTEST_USER_SIGNAL
     /*
-     * 每一项通过就写一个字母，期望第 6 行（去掉任务 A 的 A）是 tikgspwevzhrxb。被信号结束的状态是 0x200 加信号编号。
+     * 每一项通过就写一个字母，期望第 6 行（去掉任务 A 的 A）是 tikgspwevzhrxbuq。被信号结束的状态是 0x200 加信号编号。
      *   t：kill 一个在 sleep 里的子进程：sleep 被打断，它被 SIGTERM 结束。
      *   i：子进程忽略 SIGTERM：kill 返回 0，它照常睡完、退出。
      *   k：SIGKILL 不能忽略，signal(SIGKILL, …) 返回 SIG_ERR；忽略了 SIGTERM 的子进程照样被 SIGKILL 结束。
@@ -442,6 +450,8 @@ void user_main(void)
      *   r：睡在管道上的子进程，信号设了处理函数：处理函数运行，read 返回 -EINTR，程序接着往下走。
      *   x：exec 之后，设过处理函数的信号改回默认（新程序被 SIGTERM 结束），忽略的保持忽略（只有 SIGKILL 结束得了）。
      *   b：处理函数不在用户自己的内存里，signal 返回 SIG_ERR。
+     *   u：一直在用户态空转、不做系统调用的子进程，也能被 kill 结束：信号在定时器中断返回用户态时处理。
+     *   q：处理函数打断了一段汇编：eax、ecx、edx 和 DF 都由 sig_restore 原样恢复；处理函数里 DF 是 0。
      */
     int32_t st = 0, ok;
     int32_t c = fork();
@@ -577,6 +587,7 @@ void user_main(void)
     ok = kill(c, SIGTERM) == 0 && waitpid(c, &st, 0) == c && st == 6;
     write(1, ok ? "z" : "Z", 1);
 
+    caught = caught_count = 0;
     c = fork();
     if (c == 0) {
         volatile int32_t keep = 12345;
@@ -591,6 +602,7 @@ void user_main(void)
 
     int32_t q[2];
     pipe(q);
+    caught = 0;
     c = fork();
     if (c == 0) {
         signal(SIGTERM, on_signal);
@@ -627,7 +639,9 @@ void user_main(void)
     for (int k = 0; k < 100 && !(is_cat(c) && is_cat(c2)); k++)
         sleep(1);                           /* 等两个子进程都换成 cat */
     ok = kill(c, SIGTERM) == 0 && waitpid(c, &st, 0) == c && st == (0x200 | SIGTERM);
-    ok &= kill(c2, SIGTERM) == 0 && waitpid(c2, &st, WNOHANG) == 0;
+    ok &= kill(c2, SIGTERM) == 0;
+    sleep(3);                               /* 让 c2 有机会处理 SIGTERM：忽略的话它还活着 */
+    ok &= waitpid(c2, &st, WNOHANG) == 0;
     ok &= kill(c2, SIGKILL) == 0 && waitpid(c2, &st, 0) == c2 && st == (0x200 | SIGKILL);
     close(q[0]);
     close(q[1]);
@@ -636,6 +650,37 @@ void user_main(void)
     ok = signal(SIGTERM, (sighandler_t)0x00100000) == SIG_ERR;     /* 内核的地址 */
     ok &= signal(SIGTERM, (sighandler_t)0x50000000) == SIG_ERR;    /* 没有映射的地址 */
     write(1, ok ? "b" : "B", 1);
+
+    c = fork();
+    if (c == 0)
+        for (;;)
+            __asm__ volatile("");       /* 不做系统调用：只有定时器中断会把它带进内核 */
+    sleep(3);
+    ok = kill(c, SIGTERM) == 0 && waitpid(c, &st, 0) == c && st == (0x200 | SIGTERM);
+    write(1, ok ? "u" : "U", 1);
+
+    caught_count = 0;
+    c = fork();
+    if (c == 0) {
+        signal(SIGTERM, on_signal);
+        uint32_t a, cx, dx, flags;
+        __asm__ volatile("movl $0x11111111, %%eax\n"
+                         "movl $0x22222222, %%ecx\n"
+                         "movl $0x33333333, %%edx\n"
+                         "std\n"
+                         "1: cmpl $0, %4\n"         /* 等处理函数把 caught_count 加一 */
+                         "je 1b\n"
+                         "pushfl\n"
+                         "popl %3\n"
+                         "cld\n"
+                         : "=a"(a), "=c"(cx), "=d"(dx), "=r"(flags)
+                         : "m"(caught_count)
+                         : "memory", "cc");
+        exit(a == 0x11111111 && cx == 0x22222222 && dx == 0x33333333 && (flags & 0x400) && !(handler_flags & 0x400) ? 0 : 1);
+    }
+    sleep(3);
+    ok = kill(c, SIGTERM) == 0 && waitpid(c, &st, 0) == c && st == 0;
+    write(1, ok ? "q" : "Q", 1);          /* 不用 a：测试会把第 6 行里任务 A 写的 A 都去掉 */
     sleep(5);                           /* 等孤儿处理完信号、退出，第 7 行最后留下的是 init 的消息 */
     exit(0);
 #elif SELFTEST == SELFTEST_ALL_EXIT

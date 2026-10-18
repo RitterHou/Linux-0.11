@@ -62,7 +62,7 @@ struct task {
     uint32_t page_dir;              /* 页目录的物理地址，也就是 TSS 里的 CR3 */
     uint32_t kstack;                /* 内核栈所在的页；任务 0 用 entry.asm 的栈，这里是 0 */
     int parent;                     /* 父进程的任务号；内核建的任务和孤儿是 0，没有人等它们 */
-    uint32_t status;                /* 结束时的状态，waitpid 取走：exit 的退出码，或 0x100 加异常号 */
+    uint32_t status;                /* 结束时的状态，waitpid 取走：exit 的退出码、0x100 加异常号或 0x200 加信号编号 */
     struct file *files[NR_OPEN];    /* 文件描述符表：第 fd 项指向打开的文件，0 表示没用 */
     char name[TASK_NAME_LEN];       /* ps 显示的名字：内核建的任务起好的名字，exec 后是程序的文件名 */
     char cwd[PATH_MAX];             /* 当前目录：规范化过的绝对路径，内核建的任务是 /，fork 时继承 */
@@ -71,6 +71,7 @@ struct task {
     uint32_t restorer;              /* 处理函数返回到这里（用户程序里的 sig_restore） */
     int pgrp;                       /* 进程组：Ctrl+C 发给终端的前台进程组里的每个任务；fork 时继承 */
     int leader;                     /* 调用过 setsid，是进程组的头：它打开终端时，终端的前台进程组就是它这一组 */
+    int has_tty;                    /* 进程组的头已经有了控制终端（打开过 /dev/tty0）；结束时把终端的前台进程组清掉 */
     int interruptible;              /* 睡在 interruptible_sleep_on 里：信号能叫醒它 */
 };
 
@@ -375,7 +376,7 @@ void wake_up(struct wait_queue *q)
 /*
  * 和 sleep_on 一样睡下，但信号也能叫醒它：终端、管道这些不知道要等多久的地方用它。
  * 返回 -1 表示有信号（睡之前就有，或者是被信号叫醒的），调用者应该放弃这次系统调用，返回 -EINTR；
- * 回到用户态之前，interrupt_dispatch() 再按信号的处理方式结束进程。等硬盘、等缓冲区、等文件系统锁
+ * 回到用户态之前，interrupt_dispatch() 再按信号的处理方式处理：结束进程，或者先去调用处理函数。等硬盘、等缓冲区、等文件系统锁
  * 很快就有结果，半途放弃还会留下改到一半的数据，所以仍用 sleep_on，信号要等它们做完才处理。
  * Linux 0.11 的 interruptible_sleep_on() 把状态设为 TASK_INTERRUPTIBLE，schedule() 看到它有信号就改回能运行。
  */
@@ -388,13 +389,14 @@ int interruptible_sleep_on(struct wait_queue *q)
     t->interruptible = 1;
     sleep_on(q);
     t->interruptible = 0;
+    q->sleepers &= ~(1u << current_task);   /* 被信号叫醒的话，wake_up 没来清这一位：不清的话，“位在队列里”就不再意味着“睡在上面” */
     return t->signal ? -1 : 0;
 }
 
 /*
  * 给任务 n 挂上信号 sig。它要是睡在能打断的地方（sleep、waitpid、interruptible_sleep_on），就改回能运行，
  * 让它从系统调用里出来，回到用户态之前处理这个信号。调用者关着中断。
- * 它忽略的信号直接丢掉，也不叫醒它：shell 忽略 SIGINT，按 Ctrl+C 不会打断它的 waitpid。
+ * 它忽略的信号直接丢掉，也不叫醒它：后台程序忽略 SIGINT，按 Ctrl+C 不会打断它的 sleep。
  * SIGKILL 总能送到：sched_signal() 不让任何进程忽略它。
  * Linux 0.11 的 send_sig() 只挂上信号，由 schedule() 叫醒 TASK_INTERRUPTIBLE 的任务，忽略要等处理时才看。
  */
@@ -494,6 +496,20 @@ void signal_current(int sig)
     if (current_task > INIT_TASK)
         send_signal(current_task, sig);
     irq_restore(flags);
+}
+
+/*
+ * 打开控制台时调用：进程组的头第一次打开它，就成了它的控制终端，返回 1，调用者把终端的前台进程组设成这一组。
+ * 已经有了控制终端的再打开不算，不会把前台进程组抢过来。Linux 0.11 的 sys_open() 也要求 current->tty < 0。
+ */
+int sched_claim_tty(void)
+{
+    struct task *t = &tasks[current_task];
+
+    if (!t->leader || t->has_tty)
+        return 0;
+    t->has_tty = 1;
+    return 1;
 }
 
 int sched_pgrp(void)
@@ -696,6 +712,8 @@ void sched_exit(uint32_t status)
         if (f)
             file_put(f);
     }
+    if (t->leader && t->has_tty)
+        tty_release_pgrp(t->pgrp);  /* 终端的前台进程组没了头：Ctrl+C 不再发给这一组。Linux 0.11 的 do_exit() 也这样 */
     __asm__ volatile("cli");        /* 不再返回，切到的任务从自己的 TSS 装入 EFLAGS，中断状态随之恢复 */
     if (t->page_dir != kernel_page_dir())
         free_page_dir(t->page_dir);
