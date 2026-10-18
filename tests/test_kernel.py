@@ -1059,6 +1059,26 @@ def test_pipe(_m, _elf):
                    what="管道的缓冲区页随两头关闭一起收回")
 
 
+def test_no_disk(_m, _elf):
+    """不接硬盘开机：第 1 行显示 disk: none；exec 不了 /bin/letter，任务 3 用内核映像里的代码写 C；init 隔一会儿才重试 shell"""
+    tmp = tempfile.mkdtemp(prefix="kernel-nodisk-")
+    image = os.path.join(tmp, "floppy.img")
+    with open(os.path.join(BUILD, "floppy.img"), "rb") as src, open(image, "wb") as dst:
+        dst.write(src.read())
+    with Machine(image) as m:
+        m.wait_for(boot_ready, what="启动完成")
+        check(m.screen(2)[1] == "disk: none", f"第 1 行应为 disk: none：{m.screen(2)[1]!r}")
+        m.wait_for(lambda mm: {"A", "B", "C"} <= set(task_output(mm)), timeout=3, what="第 6 行的 A、B、C")
+        check(m.screen(1)[0][11:12] != "E", "没有硬盘，不应有程序被 exec 装入")
+        # 每拉起一次 shell 都要 fork，就有写时复制；隔 1 秒才重试的话，2 秒里只会多几次
+        cow = lambda: int(re.search(r"copy-on-write: (\d+)", m.screen(4)[3]).group(1))
+        c1 = cow()
+        time.sleep(2.0)
+        c2 = cow()
+        check(c2 - c1 < 30, f"shell 起不来时 init 应隔一会儿再试：2 秒里写时复制从 {c1} 涨到 {c2}")
+        check(not exception_screen(m)[0], f"不应出现异常面板：{exception_screen(m)[0]!r}")
+
+
 def test_wild_read(_m, _elf):
     """用户程序读栈区以外没映射的地址：内核不补页，只结束任务 B，错误码 4"""
     d = build_selftest("USER_WILD_READ")
@@ -1077,6 +1097,11 @@ def test_shell(m, elf):
     free_before = m.screen(4)[3].split("/")[0]
     check(run_command(m, "nosuch") == ["sh: nosuch: not found"], "找不到的命令应报告 not found")
     check(run_command(m, "check") == ["check ok"], "check 应通过")
+    check(run_command(m, "check badptr") == ["badptr ok"],
+          "把代码页的地址交给要写用户内存的系统调用，应逐个返回 -1，而不是让内核停机")
+    words = " ".join(str(i) for i in range(1, 18))
+    check(run_command(m, "echo " + words) == [" ".join(str(i) for i in range(1, 16))],
+          "shell 最多 16 个参数，多余的不要，不能并进最后一个参数里")
     out = run_command(m, "check crash")
     check(out == ["sh: check killed by exception 14"], f"check crash 写代码页，应被缺页异常结束：{out!r}")
     out = run_command(m, "ps")
@@ -1129,7 +1154,7 @@ SEPARATE_TESTS = [test_syscalls, test_page_alloc, test_double_free, test_hd_rw, 
                   test_big_kernel, test_user_write_kernel, test_user_privileged,
                   test_user_bad_pointer, test_user_exit, test_all_tasks_exit,
                   test_nmi_in_user_mode, test_user_write_code, test_preemption,
-                  test_deep_stack, test_wild_read, test_fork_isolation, test_waitpid, test_file_system, test_exec, test_pipe]
+                  test_deep_stack, test_wild_read, test_fork_isolation, test_waitpid, test_file_system, test_exec, test_pipe, test_no_disk]
 
 
 def main():

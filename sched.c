@@ -369,6 +369,8 @@ void sched_sleep(uint32_t ticks)
 
     if (ticks == 0)
         return;
+    if (ticks > 0x7FFFFFFF)         /* wake_sleepers() 用有符号的差值比较，再长就会被当成已经到时间 */
+        ticks = 0x7FFFFFFF;
     if (!scheduling || current_task == 0) {
         /* 任务 0 没有可以让给的任务，只能原地等。自检会在开始调度前从 kmain 调用 sleep。 */
         while (timer_ticks - start < ticks)

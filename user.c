@@ -323,29 +323,46 @@ void user_main(void)
     /*
      * 复制出一个子进程（任务 3）。子进程换成硬盘上的 /bin/letter，由它每 2 个 tick 写一个 C；
      * 父进程接着往下走，写 B。fork 之后两者的栈一开始是同一批物理页，谁先写谁复制一份。
-     * 万一 exec 失败（比如没有硬盘），子进程就接着用这里的代码，按任务号写 C。
+     * 万一 exec 失败（比如没有硬盘），子进程就用这里的代码按任务号写 C，不往下走：下面是 init 自己的事。
      */
+    char letter;
     if (fork() == 0) {
         char *argv[] = { "letter", "C", 0 };
         execv("/bin/letter", argv);
+        letter = (char)('A' + getpid() - 1);
+        for (;;) {
+            write(1, &letter, 1);
+            sleep(2);
+        }
     }
-    char letter = (char)('A' + getpid() - 1);
+    letter = (char)('A' + getpid() - 1);
 
 #if !defined(SELFTEST)
     /*
      * 再拉起 shell（任务 4），做法与 Linux 0.11 的 init() 相同：子进程关掉继承来的 1 号描述符（第 6 行），
      * 把控制台 /dev/tty0 打开三次，正好得到 0、1、2 号描述符，再 exec /bin/sh。
-     * 之后 init 一边写 B，一边收走结束了的子进程；shell 退出了就再拉起一个。
+     * 之后 init 一边写 B，一边收走结束了的子进程；shell 退出了就再拉起一个。shell 一下子就退出了
+     * （比如没有硬盘，exec 不了），就隔 1 秒再试，免得一刻不停地 fork；fork 失败了也隔 1 秒再试。
      * 自检内核不拉起 shell：它们要用控制台窗口检查键盘回显，shell 的提示符会混进去。
      */
     int32_t shell = start_shell();
+    int age = 0, wait = 0;          /* shell 活了几圈（每圈约 2 个 tick）；还要等几圈再拉起 */
     for (;;) {
         write(1, &letter, 1);
         sleep(2);
+        age++;
         int32_t pid;
         while ((pid = waitpid(-1, 0, WNOHANG)) > 0)
-            if (pid == shell)
-                shell = start_shell();
+            if (pid == shell) {
+                shell = -1;
+                wait = age < 50 ? 50 : 0;
+            }
+        if (shell < 0 && wait-- <= 0) {
+            shell = start_shell();
+            age = 0;
+            if (shell < 0)
+                wait = 50;
+        }
     }
 #else
     for (;;) {

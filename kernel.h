@@ -84,6 +84,7 @@ uint32_t new_page_dir(void);
 void free_page_dir(uint32_t dir);
 uint32_t copy_page_dir(uint32_t src);
 uint32_t map_user_page(uint32_t dir, uint32_t addr, int writable);
+int user_page_writable(uint32_t dir, uint32_t addr);
 extern uint32_t page_faults, cow_faults;
 
 /* mem.c：物理页分配，管 LOW_MEM～HIGH_MEM 之间的页 */
