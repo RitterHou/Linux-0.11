@@ -73,6 +73,8 @@ void pic_unmask(int irq);
  */
 #define USER_LOW 0x40000000u
 #define USER_TOP 0x40400000u
+#define STACK_RESERVE (64 * 1024u)  /* 用户空间顶端的 64 KB 留给栈：程序和堆都不能伸进来 */
+#define STACK_LOW (USER_TOP - STACK_RESERVE)
 void paging_init(void);
 int user_range_ok(uint32_t addr, uint32_t size);
 int user_write_ok(uint32_t addr, uint32_t size);
@@ -133,6 +135,9 @@ int sched_pgrp(void);
 int sched_is_leader(void);
 int sched_claim_tty(void);
 int sched_take_signal(uint32_t *handler, uint32_t *restorer);
+void sched_set_brk(uint32_t end);
+uint32_t sched_brk(uint32_t addr);
+uint32_t current_brk(void);
 void sched_exec_signals(void);
 void signal_current(int sig);
 int sched_fork(const struct interrupt_frame *frame);

@@ -13,5 +13,8 @@ uint32_t strlen(const char *s);
 int strcmp(const char *a, const char *b);
 void print(const char *s);          /* 写到 1 号描述符 */
 void print_num(uint32_t n);
+void *sbrk(int32_t increment);      /* 把堆往上推 increment 个字节，返回原来的末尾；失败返回 (void *)-1 */
+void *malloc(uint32_t n);           /* 从堆上要 n 个字节，要不到返回 0 */
+void free(void *p);
 
 #endif

@@ -1112,6 +1112,24 @@ def test_signal_syscalls(_m, _elf):
         check(not exception_screen(m)[0], f"不应出现异常面板：{exception_screen(m)[0]!r}")
 
 
+def test_brk(_m, _elf):
+    """brk：堆从程序末尾开始、用到才补页；堆和栈之间不补页；fork 继承；越界的 brk 不动；exec 之后从新程序的末尾开始"""
+    d = build_selftest("USER_BRK")
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        m.wait_for(lambda mm: message_row(mm) == "task 2 exited with code 0", timeout=10, what="init 的结束消息")
+        out = task_output(m).replace("A", "")
+        expected = "qhgfleo"
+        meaning = {"q": "init 的堆从 0x40000000 开始", "h": "brk 往上挪 8 KB，写满再读回来",
+                   "g": "堆和栈之间没要过的地方一写就被结束，brk 所在的那一页能用", "f": "fork 之后堆一样大、内容一样，各改各的",
+                   "l": "低于程序末尾或伸进栈区的 brk 不动", "e": "系统调用的缓冲区在没要过的地方，read 返回 -1",
+                   "o": "exec 之后堆从新程序的 .bss 末尾开始，malloc 来的内存能用"}
+        for i, ch in enumerate(expected):
+            check(len(out) > i and out[i] == ch, f"第 {i + 1} 项（{meaning[ch]}）没有通过：第 6 行去掉 A 后是 {out!r}，应为 {expected!r}")
+        m.wait_for(lambda mm: mm.screen(4)[3].startswith("memory: 3839/3840 pages free"), timeout=2,
+                   what="堆的页随进程结束一起收回（只剩任务 A 的内核栈）")
+        check(not exception_screen(m)[0], f"不应出现异常面板：{exception_screen(m)[0]!r}")
+
+
 def test_fs_write(_m, _elf):
     """写文件：O_EXCL、读写权限、O_TRUNC、O_APPEND、删掉开着的文件、目录的错误、同一个文件开两次共用 i 节点"""
     d = build_selftest("USER_FSWRITE")
@@ -1143,7 +1161,7 @@ def test_shell(m, elf):
     check(out == ["Hello from the Minix file system on hda!"], f"cat 应打印 /hello.txt：{out!r}")
     out = run_command(m, "help")
     progs = [p for p in bin_programs() if p != "sh"]
-    check(len(out) == 3 and out[0].startswith("programs: ") and sorted(out[0].split()[1:]) == progs,
+    check(len(out) == 3 and out[0].startswith("/bin: ") and sorted(out[0].split()[1:]) == progs,
           f"help 应是 3 行，每行都放得下（不折行），第一行列出 /bin 里除了 sh 的每个程序 {progs}：{out!r}")
     free_before = m.screen(4)[3].split("/")[0]
     check(run_command(m, "nosuch") == ["sh: nosuch: not found"], "找不到的命令应报告 not found")
@@ -1296,17 +1314,35 @@ def test_signals(m, elf):
     check(any(r.split()[-1] == "sh" and r.split()[0] == "4" for r in out[1:]), f"按了几次 Ctrl+C、kill 了一次，shell 还是原来的 4 号任务：{out!r}")
 
 
+
+def test_sort(m, elf):
+    """sort：malloc 来的堆放下 600 KB 的 /big 再排序；-r 倒序；结束后堆的页都收回"""
+    free_before = m.screen(4)[3].split("/")[0]
+    check(run_command(m, "cat /hello.txt /etc/issue | sort") == ["Hello from the Minix file system on hda!", "Linux 0.11 learning kernel"],
+          "两行按字节排好")
+    lines = run_command(m, "ls /")                 # sort 比较整行：类型、大小、i 节点号、名字（/bin 太长，窗口放不下）
+    out = run_command(m, "ls / | sort -r")
+    check(out == sorted(lines, reverse=True), f"sort -r 把整行按字节倒着排：{out!r}")
+    check(run_command(m, "sort /nothing") == ["sort: /nothing: cannot open"], "打不开的文件要报错")
+    wait_prompt(m)
+    type_text(m, "cat /big | sort | wc\n")
+    m.wait_for(lambda mm: last_line(mm) == "$" and "$ cat /big | sort | wc" in console(mm), timeout=20, what="sort 排完 600 KB 的 /big")
+    out = [r for r in console(m) if r][-2]
+    check(out == "2401 7201 614401", f"排序不增减字节，最后一行补上换行：wc 应为 2401 7201 614401，实际是 {out!r}")
+    m.wait_for(lambda mm: mm.screen(4)[3].split("/")[0] == free_before, timeout=2, what=f"sort 结束后空闲页回到 {free_before}")
+
+
 # 前几项共用一台正常启动的虚拟机；其余各自启动自检内核。
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_console_scroll,
                 test_idle_in_hlt, test_demand_paging, test_fork_address_spaces, test_syscall_gate, test_user_setup, test_user_task,
-                test_tasks_alternate, test_shell, test_cwd, test_signals]
+                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort]
 SEPARATE_TESTS = [test_syscalls, test_page_alloc, test_double_free, test_hd_rw, test_early_key, test_keyboard_edge_cases, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,
                   test_big_kernel, test_user_write_kernel, test_user_privileged,
                   test_user_bad_pointer, test_user_exit, test_all_tasks_exit,
                   test_nmi_in_user_mode, test_user_write_code, test_preemption,
-                  test_deep_stack, test_wild_read, test_fork_isolation, test_waitpid, test_file_system, test_exec, test_pipe, test_fs_write, test_signal_syscalls, test_no_disk]
+                  test_deep_stack, test_wild_read, test_fork_isolation, test_waitpid, test_file_system, test_exec, test_pipe, test_fs_write, test_signal_syscalls, test_brk, test_no_disk]
 
 
 def main():

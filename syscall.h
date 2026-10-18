@@ -35,7 +35,8 @@
 #define SYS_KILL   20               /* kill(pid, sig)：给任务（pid > 0）或进程组（0 是自己的组，负数是 -pid 那一组）发信号 */
 #define SYS_SIGNAL 21               /* signal(sig, handler, restorer)：这个信号来了怎么办：结束进程、不理，或者调用 handler */
 #define SYS_SETSID 22               /* setsid()：自己当一个新的进程组的头，返回组号 */
-#define SYS_CALLS  23
+#define SYS_BRK    23               /* brk(addr)：把堆的末尾挪到 addr，返回现在的堆末尾；brk(0) 只是问一下 */
+#define SYS_CALLS  24
 
 /* fsinfo 写回的内容 */
 struct fsinfo {
@@ -201,6 +202,11 @@ void sig_restore(void);
 static inline sighandler_t signal(int32_t sig, sighandler_t handler)
 {
     return (sighandler_t)syscall3(SYS_SIGNAL, (uint32_t)sig, (uint32_t)handler, (uint32_t)sig_restore);
+}
+
+static inline uint32_t brk(uint32_t addr)
+{
+    return (uint32_t)syscall3(SYS_BRK, addr, 0, 0);
 }
 
 static inline int32_t setsid(void)

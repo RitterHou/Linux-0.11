@@ -29,6 +29,18 @@ int main(int argc, char **argv)
         print(ok ? "badptr ok\n" : "badptr bad\n");
         return ok ? 0 : 1;
     }
+    if (argc == 2 && strcmp(argv[1], "brk") == 0) {
+        /* 堆从程序的末尾开始；malloc 来的 100 KB 都能写、能读回来。结果只用退出码报告 */
+        extern char __end[];
+        int ok = brk(0) == (uint32_t)__end;
+        uint32_t *p = malloc(100 * 1024);
+        ok &= p != 0;
+        for (uint32_t i = 0; ok && i < 25 * 1024; i++)
+            p[i] = i;
+        for (uint32_t i = 0; ok && i < 25 * 1024; i++)
+            ok &= p[i] == i;
+        return ok ? 0 : 1;
+    }
     if (argc == 2 && strcmp(argv[1], "crash") == 0) {
         *(volatile char *)main = 0;
         print("x\n");
