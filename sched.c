@@ -21,6 +21,7 @@
  */
 #include "io.h"
 #include "kernel.h"
+#include "fs.h"
 #include "selftest.h"
 #include "syscall.h"
 
@@ -60,6 +61,7 @@ struct task {
     uint32_t kstack;                /* 内核栈所在的页；任务 0 用 entry.asm 的栈，这里是 0 */
     int parent;                     /* 父进程的任务号；内核建的任务和孤儿是 0，没有人等它们 */
     uint32_t status;                /* 结束时的状态，waitpid 取走：exit 的退出码，或 0x100 加异常号 */
+    struct file *files[NR_OPEN];    /* 文件描述符表：第 fd 项指向打开的文件，0 表示没用 */
 };
 
 static struct tss tss[NR_TASKS];
@@ -87,6 +89,20 @@ void task_write_char(char ch)
 int current_pid(void)
 {
     return current_task;
+}
+
+/* 当前任务的文件描述符表。 */
+struct file **current_files(void)
+{
+    return tasks[current_task].files;
+}
+
+/* 内核建的任务开始时只有 1 号描述符：第 6 行的任务输出区。 */
+static void give_tasks_row(int n)
+{
+    struct file *f = tasks_file();
+    file_get(f);
+    tasks[n].files[1] = f;
 }
 
 /*
@@ -124,6 +140,7 @@ static int setup_task(int n, void (*entry)(void), uint32_t cr3)
     tasks[n] = (struct task){ .state = TASK_RUNNING, .page_dir = cr3, .kstack = kstack };
     tss[n] = (struct tss){ .eip = (uint32_t)entry, .eflags = 0x202, .cr3 = cr3,
                            .iomap_base = sizeof(struct tss) };   /* 没有 I/O 权限位图 */
+    give_tasks_row(n);
     return 1;
 }
 
@@ -168,6 +185,7 @@ void sched_init(void)
     tss[0].cr3 = kernel_page_dir();
     tss[0].iomap_base = sizeof(struct tss);
     tasks[0] = (struct task){ .state = TASK_RUNNING, .page_dir = kernel_page_dir() };
+    give_tasks_row(0);              /* 自检会在开始调度前从 kmain 调用 write */
     for (int n = 0; n < NR_TASKS; n++)
         gdt_set_entry(TSS_GDT_INDEX + n, (uint32_t)&tss[n], sizeof(struct tss) - 1, TSS_ACCESS, 0);
 
@@ -355,6 +373,11 @@ int sched_fork(const struct interrupt_frame *frame)
         .iomap_base = sizeof(struct tss),
     };
     tasks[n] = (struct task){ .state = TASK_RUNNING, .page_dir = dir, .kstack = kstack, .parent = current_task };
+    for (int fd = 0; fd < NR_OPEN; fd++) {      /* 子进程继承所有打开的文件，与父进程共用读写位置 */
+        tasks[n].files[fd] = tasks[current_task].files[fd];
+        if (tasks[n].files[fd])
+            file_get(tasks[n].files[fd]);
+    }
     irq_restore(flags);
     return n;
 }
@@ -425,6 +448,11 @@ void sched_exit(uint32_t status)
     if (t->page_dir != kernel_page_dir())
         free_page_dir(t->page_dir);
     t->page_dir = 0;
+    for (int fd = 0; fd < NR_OPEN; fd++) {      /* 关闭所有打开的文件 */
+        if (t->files[fd])
+            file_put(t->files[fd]);
+        t->files[fd] = 0;
+    }
     for (int n = 1; n < NR_TASKS; n++) {
         if (tasks[n].state != TASK_UNUSED && tasks[n].parent == current_task) {
             tasks[n].parent = 0;

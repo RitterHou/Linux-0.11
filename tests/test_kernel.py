@@ -286,7 +286,7 @@ def test_boot_screen(m, elf):
     """启动后各行的输出"""
     m.wait_for(lambda mm: mm.screen(1)[0] == "ABPKCVITUFW", timeout=2, what="第 0 行的 ABPKCVITUFW")
     rows = m.screen(9)
-    check(rows[1] == "disk: 2048 sectors (1024 KB), QEMU HARDDISK", f"第 1 行应显示硬盘的扇区数和型号：{rows[1]!r}")
+    check(rows[1] == "disk: 8192 sectors (4096 KB), QEMU HARDDISK", f"第 1 行应显示硬盘的扇区数和型号（还没挂载文件系统）：{rows[1]!r}")
     check(rows[2] == "Hello from kmain() in C!", f"第 2 行不对：{rows[2]!r}")
     check(rows[3] == "memory: 3831/3840 pages free  page faults: 1  copy-on-write: 2",
           f"第 3 行应显示用掉了 9 页（3 个内核栈，B 和 C 各自的页目录、栈区页表，原来的栈页和复制出的一页）、"
@@ -733,19 +733,20 @@ def test_double_free(_m, _elf):
 
 
 def test_hd_rw(_m, _elf):
-    """硬盘：读回第 0 和最后一个扇区，越界的读失败，写进去的扇区能读回来；读写时任务睡下等 IRQ14"""
+    """硬盘：读出引导块和超级块，最后一个扇区能读、越界的读失败，写进去的扇区能读回来；读写时任务睡下等 IRQ14"""
     d = build_selftest("HD_RW")
     with Machine(os.path.join(d, "floppy.img")) as m:
         m.wait_for(lambda mm: "reqs=" in mm.screen(8)[7], what="第 7 行的硬盘读写结果")
         row = m.screen(8)[7]
         f = dict(re.findall(r"(\w+)=([0-9A-F]+)", row))
-        check(f.get("first") == "1" and f.get("last") == "1", f"第 0 和第 2047 扇区应读出 SECTOR 00000000 和 SECTOR 00002047：{row!r}")
-        check(f.get("beyond") == "FFFFFFFF", f"读第 2048 扇区（超出硬盘）应返回 -1：{row!r}")
-        check(f.get("write") == "1", f"写进第 100 扇区的内容应能原样读回：{row!r}")
-        check(f.get("many") == "1", f"连续读 64 个扇区，每个的开头都应对：{row!r}")
+        check(f.get("first") == "1", f"第 0 扇区应是 mkfs 写的说明，第 2 扇区应有 Minix 的魔数 0x137F：{row!r}")
+        check(f.get("last") == "1", f"最后一个扇区（第 8191 个）应能读：{row!r}")
+        check(f.get("beyond") == "FFFFFFFF", f"读第 8192 扇区（超出硬盘）应返回 -1：{row!r}")
+        check(f.get("write") == "1", f"写进第 8000 扇区的内容应能原样读回：{row!r}")
+        check(f.get("many") == "1", f"连续读 64 个扇区都应成功：{row!r}")
         # 中断叫醒任务后 CPU 正闲着就马上切过去；要是等下一个定时器中断，每个扇区就要多花 10 ms
         check(int(f.get("ticks", "999")) < 10, f"读 64 个扇区应在 0.1 秒内完成：{row!r}")
-        check(f.get("reqs") == "68", f"一共应发出 68 个读写请求（越界的那次不算）：{row!r}")
+        check(f.get("reqs") == "69", f"一共应发出 69 个读写请求（越界的那次不算）：{row!r}")
         check(set(task_output(m)) >= {"A", "B", "C"}, f"读完后任务 A 照常运行：{task_output(m)!r}")
         check(not exception_screen(m)[0], f"不应出现异常面板：{exception_screen(m)[0]!r}")
 
@@ -951,6 +952,31 @@ def test_waitpid(_m, _elf):
         check(not exception_screen(m)[0], f"不应出现异常面板：{exception_screen(m)[0]!r}")
 
 
+def test_file_system(_m, _elf):
+    """Minix 文件系统：open/read/close 读文件、600 KB 的大文件、目录和子目录；描述符用光；fork 后共用读写位置"""
+    d = build_selftest("USER_FS")
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        m.wait_for(lambda mm: message_row(mm) == "task 2 exited with code 0", timeout=15, what="任务 B 的结束消息")
+        out = task_output(m)
+        hello = "Hello from the Minix file system on hda!"
+        check(out.startswith(hello), f"第 6 行开头应是 /hello.txt 的内容：{out!r}")
+        expected = "oubdscf"
+        meaning = {"o": "不存在的文件和过长的路径，open 返回 -1", "u": "缓冲区是内核地址，read 返回 -1",
+                   "b": "600 KB 的 /big 逐字节正确，读到末尾返回 0", "d": "根目录里有 hello.txt、big、etc",
+                   "s": "读出子目录里的 /etc/issue", "c": "close 后 read 返回 -1，描述符用光后 open 返回 -1",
+                   "f": "fork 后父子共用读写位置"}
+        got = out[len(hello):]
+        for i, ch in enumerate(expected):
+            check(len(got) > i and got[i] == ch, f"第 {i + 1} 项（{meaning[ch]}）没有通过：检查结果是 {got!r}，应为 {expected!r}")
+        check(m.screen(2)[1].endswith("minix fs: 128 inodes, 4096 blocks"), f"挂载后第 1 行应显示文件系统的大小：{m.screen(2)[1]!r}")
+        table = symbols(os.path.join(d, "kernel.elf"))
+        hits, misses = read_u32(m, table["buffer_hits"][0]), read_u32(m, table["buffer_misses"][0])
+        # /big 有 600 个数据块，加上间接块、i 节点表、目录，未命中应略多于 600；反复打开 /hello.txt 时目录和 i 节点都在缓存里
+        check(600 < misses < 650, f"缓冲区缓存：每个块只应从硬盘读一次，未命中 {misses} 次")
+        check(hits > 100, f"缓冲区缓存：反复查目录、读 i 节点应命中，命中 {hits} 次")
+        check(not exception_screen(m)[0], f"不应出现异常面板：{exception_screen(m)[0]!r}")
+
+
 def test_wild_read(_m, _elf):
     """用户程序读栈区以外没映射的地址：内核不补页，只结束任务 B，错误码 4"""
     d = build_selftest("USER_WILD_READ")
@@ -972,7 +998,7 @@ SEPARATE_TESTS = [test_syscalls, test_page_alloc, test_double_free, test_hd_rw, 
                   test_big_kernel, test_user_write_kernel, test_user_privileged,
                   test_user_bad_pointer, test_user_exit, test_all_tasks_exit,
                   test_nmi_in_user_mode, test_user_write_code, test_preemption,
-                  test_deep_stack, test_wild_read, test_fork_isolation, test_waitpid]
+                  test_deep_stack, test_wild_read, test_fork_isolation, test_waitpid, test_file_system]
 
 
 def main():

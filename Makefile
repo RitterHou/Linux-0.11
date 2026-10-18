@@ -25,8 +25,8 @@ KERNEL_CFLAGS += -DSELFTEST=SELFTEST_$(SELFTEST)
 endif
 
 KERNEL_OBJS := $(addprefix $(BUILD)/, entry.o isr.o kernel.o vga.o gdt.o \
-	interrupt.o paging.o mem.o hd.o timer.o sched.o syscall.o keyboard.o selftest.o user.o)
-KERNEL_HEADERS := kernel.h io.h syscall.h selftest.h
+	interrupt.o paging.o mem.o hd.o buffer.o fs.o file.o timer.o sched.o syscall.o keyboard.o selftest.o user.o)
+KERNEL_HEADERS := kernel.h io.h syscall.h selftest.h fs.h
 
 .PHONY: all run test clean
 
@@ -64,9 +64,15 @@ $(BUILD)/floppy.img: $(BUILD)/boot.bin $(BUILD)/loader.bin $(BUILD)/kernel.bin M
 	dd if=$(BUILD)/loader.bin of=$@ bs=512 seek=1 conv=notrunc
 	dd if=$(BUILD)/kernel.bin of=$@ bs=512 seek=2 conv=notrunc
 
-# 硬盘镜像：接在主 IDE 通道上。
-$(BUILD)/hd.img: tools/mkdisk.py | $(BUILD)
-	$(PYTHON) tools/mkdisk.py $@
+# 硬盘镜像：接在主 IDE 通道上，是一个 Minix v1 文件系统，内容是 rootfs/ 目录，
+# 再加上测试用的 600 KB 大文件 /big。
+ROOTFS_FILES := $(shell find rootfs -type f)
+
+$(BUILD)/hd.img: tools/mkfs.py tools/mkbig.py $(ROOTFS_FILES) | $(BUILD)
+	rm -rf $(BUILD)/rootfs
+	cp -R rootfs $(BUILD)/rootfs
+	$(PYTHON) tools/mkbig.py $(BUILD)/rootfs/big
+	$(PYTHON) tools/mkfs.py $@ $(BUILD)/rootfs
 
 run: $(BUILD)/floppy.img $(BUILD)/hd.img
 	$(QEMU) -name "Two-stage boot - C kernel" \

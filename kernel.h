@@ -112,6 +112,7 @@ int current_pid(void);
 void task_write_char(char ch);
 void sched_exit(uint32_t status) __attribute__((noreturn));
 void sched_idle_wakeup(void);
+struct file **current_files(void);
 
 /* 等待队列：第 n 位为 1 表示任务 n 睡在上面。调用 sleep_on 之前要关中断，检查条件和睡下之间不能被打断。 */
 struct wait_queue {

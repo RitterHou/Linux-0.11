@@ -12,13 +12,16 @@
 
 #define SYSCALL_VECTOR 0x80
 
-#define SYS_WRITE  0                /* write(fd, buf, count)：fd 1 是第 6 行的任务输出区 */
+#define SYS_WRITE  0                /* write(fd, buf, count)：开机时 fd 1 是第 6 行的任务输出区 */
 #define SYS_GETPID 1                /* getpid()：返回当前任务号 */
 #define SYS_SLEEP  2                /* sleep(ticks)：等待若干个定时器 tick */
 #define SYS_EXIT   3                /* exit(code)：结束当前任务，不再返回 */
 #define SYS_FORK   4                /* fork()：复制当前任务；父进程得到新任务号，子进程得到 0 */
 #define SYS_WAITPID 5               /* waitpid(pid, &status, options)：等子进程结束，返回它的任务号 */
-#define SYS_CALLS  6
+#define SYS_OPEN   6                /* open(path, flags)：打开文件，返回文件描述符 */
+#define SYS_READ   7                /* read(fd, buf, count)：读文件，返回读到的字节数，到末尾返回 0 */
+#define SYS_CLOSE  8                /* close(fd)：关闭文件描述符 */
+#define SYS_CALLS  9
 
 #define WNOHANG    1                /* waitpid 的选项：子进程还没结束就立刻返回 0 */
 
@@ -35,6 +38,21 @@ static inline int32_t syscall3(uint32_t nr, uint32_t a, uint32_t b, uint32_t c)
 static inline int32_t write(int fd, const void *buf, uint32_t count)
 {
     return syscall3(SYS_WRITE, (uint32_t)fd, (uint32_t)buf, count);
+}
+
+static inline int32_t open(const char *path, int32_t flags)
+{
+    return syscall3(SYS_OPEN, (uint32_t)path, (uint32_t)flags, 0);
+}
+
+static inline int32_t read(int fd, void *buf, uint32_t count)
+{
+    return syscall3(SYS_READ, (uint32_t)fd, (uint32_t)buf, count);
+}
+
+static inline int32_t close(int fd)
+{
+    return syscall3(SYS_CLOSE, (uint32_t)fd, 0, 0);
 }
 
 static inline int32_t getpid(void)
