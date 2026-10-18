@@ -504,15 +504,20 @@ void sched_exit(uint32_t status)
 {
     struct task *t = &tasks[current_task];
 
+    /*
+     * 先关闭所有打开的文件：最后一个关掉已经删了的文件时要收回它的块，要读写硬盘、会睡，
+     * 所以必须趁内核栈和页目录都还在的时候做。
+     */
+    for (int fd = 0; fd < NR_OPEN; fd++) {
+        struct file *f = t->files[fd];
+        t->files[fd] = 0;
+        if (f)
+            file_put(f);
+    }
     __asm__ volatile("cli");        /* 不再返回，切到的任务从自己的 TSS 装入 EFLAGS，中断状态随之恢复 */
     if (t->page_dir != kernel_page_dir())
         free_page_dir(t->page_dir);
     t->page_dir = 0;
-    for (int fd = 0; fd < NR_OPEN; fd++) {      /* 关闭所有打开的文件 */
-        if (t->files[fd])
-            file_put(t->files[fd]);
-        t->files[fd] = 0;
-    }
     for (int n = 1; n < NR_TASKS; n++) {
         if (tasks[n].state != TASK_UNUSED && tasks[n].parent == current_task) {
             tasks[n].parent = 0;

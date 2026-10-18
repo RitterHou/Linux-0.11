@@ -67,7 +67,7 @@ $(BUILD)/floppy.img: $(BUILD)/boot.bin $(BUILD)/loader.bin $(BUILD)/kernel.bin M
 	dd if=$(BUILD)/kernel.bin of=$@ bs=512 seek=2 conv=notrunc
 
 # 用户程序：每个 user/名称.c 和 user/ulib.c 链接成 build/user/名称.elf，装进硬盘的 /bin/名称。
-USER_PROGS := sh ls cat echo ps wc grep hello check letter
+USER_PROGS := sh ls cat echo ps wc grep rm mkdir rmdir df hello check letter
 USER_ELFS := $(addprefix $(BUILD)/user/, $(addsuffix .elf, $(USER_PROGS)))
 
 $(BUILD)/user:
@@ -90,7 +90,7 @@ ROOTFS_FILES := $(shell find rootfs -type f)
 $(BUILD)/hd.img: tools/mkfs.py tools/mkbig.py $(ROOTFS_FILES) $(USER_ELFS) | $(BUILD)
 	rm -rf $(BUILD)/rootfs
 	cp -R rootfs $(BUILD)/rootfs
-	mkdir -p $(BUILD)/rootfs/bin
+	mkdir -p $(BUILD)/rootfs/bin $(BUILD)/rootfs/tmp
 	for p in $(USER_PROGS); do cp $(BUILD)/user/$$p.elf $(BUILD)/rootfs/bin/$$p; done
 	$(PYTHON) tools/mkbig.py $(BUILD)/rootfs/big
 	$(PYTHON) tools/mkfs.py $@ $(BUILD)/rootfs --chr /dev/tty0=4,0 --chr /dev/tty1=4,1
