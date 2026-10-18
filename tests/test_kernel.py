@@ -912,6 +912,23 @@ def test_fork_isolation(_m, _elf):
         check(not exception_screen(m)[0], f"不应出现异常面板：{exception_screen(m)[0]!r}")
 
 
+def test_waitpid(_m, _elf):
+    """waitpid：取回退出码；内核写 fork 共享的页也会先复制；任务槽用光时 fork 返回 -1；WNOHANG；被异常结束的子进程"""
+    d = build_selftest("USER_WAIT")
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        m.wait_for(lambda mm: message_row(mm) == "task 2 exited with code 0", timeout=10, what="父进程的结束消息")
+        out = task_output(m).replace("A", "")
+        expected = "winrhk"
+        meaning = {"w": "waitpid 返回子进程号并写回退出码 42", "i": "内核写共享页时先复制，另一个进程的那份不变",
+                   "n": "16 个任务槽里能 fork 13 次，第 14 次返回 -1", "r": "waitpid(-1) 收走 13 个子进程，退出码都是 7",
+                   "h": "WNOHANG 立刻返回 0，等别人的子进程返回 -1", "k": "被缺页异常结束的子进程，状态是 0x10E"}
+        for i, ch in enumerate(expected):
+            check(len(out) > i and out[i] == ch, f"第 {i + 1} 项（{meaning[ch]}）没有通过：第 6 行去掉 A 后是 {out!r}，应为 {expected!r}")
+        m.wait_for(lambda mm: mm.screen(4)[3].startswith("memory: 3839/3840 pages free"), timeout=2,
+                   what="所有子进程的内存和内核栈都收回（只剩任务 A 的内核栈）")
+        check(not exception_screen(m)[0], f"不应出现异常面板：{exception_screen(m)[0]!r}")
+
+
 def test_wild_read(_m, _elf):
     """用户程序读栈区以外没映射的地址：内核不补页，只结束任务 B，错误码 4"""
     d = build_selftest("USER_WILD_READ")
@@ -933,7 +950,7 @@ SEPARATE_TESTS = [test_syscalls, test_page_alloc, test_double_free, test_early_k
                   test_big_kernel, test_user_write_kernel, test_user_privileged,
                   test_user_bad_pointer, test_user_exit, test_all_tasks_exit,
                   test_nmi_in_user_mode, test_user_write_code, test_preemption,
-                  test_deep_stack, test_wild_read, test_fork_isolation]
+                  test_deep_stack, test_wild_read, test_fork_isolation, test_waitpid]
 
 
 def main():

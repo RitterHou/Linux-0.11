@@ -220,7 +220,7 @@ static void user_exception(const struct interrupt_frame *frame)
     line_append_hex(&line, "EIP", frame->eip, 8);
     line_append_hex(&line, "error", frame->error_code, 8);
     line_show(&line, VGA_YELLOW, TASK_MESSAGE_ROW);
-    sched_exit_current();
+    sched_exit(EXIT_KILLED | frame->vector);
 }
 
 void interrupt_dispatch(struct interrupt_frame *frame)
