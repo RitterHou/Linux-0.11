@@ -250,6 +250,29 @@ def in_function(table, name, addr):
 # ---------------------------------------------------------------- 测试用例
 
 USER_STACK_LOW, USER_STACK_TOP = 0x40000000, 0x40400000   # 用户栈区，与 kernel.h 一致
+TSS_SIZE = 104
+
+
+def tss_sel(n):
+    """任务 n 的 TSS 选择子：TSS 描述符从 GDT 第 10 项起排列，与 kernel.h 的 TSS_SEL 一致。"""
+    return (10 + n) * 8
+
+
+def tss_u32(m, elf, n, offset):
+    """读任务 n 的 TSS 中偏移 offset 处的 4 字节：4 是 esp0，8 是 ss0，28 是 CR3。"""
+    return read_u32(m, symbols(elf)["tss"][0] + n * TSS_SIZE + offset)
+
+
+def translate(m, cr3, va):
+    """按页目录 cr3 手工查两级页表，把虚拟地址翻译成物理地址；没有映射时返回 None。
+    监视器的 gva2gpa 只用 CPU 当前的 CR3，查不了别的任务的地址空间。"""
+    pde = read_u32(m, cr3 + (va >> 22) * 4)
+    if not pde & 1:
+        return None
+    pte = read_u32(m, (pde & ~0xFFF) + ((va >> 12) & 0x3FF) * 4)
+    if not pte & 1:
+        return None
+    return (pte & ~0xFFF) | (va & 0xFFF)
 
 
 def boot_ready(m):
@@ -261,8 +284,8 @@ def test_boot_screen(m, elf):
     m.wait_for(lambda mm: mm.screen(1)[0] == "ABPKCVITUF", timeout=2, what="第 0 行的 ABPKCVITUF")
     rows = m.screen(9)
     check(rows[2] == "Hello from kmain() in C!", f"第 2 行不对：{rows[2]!r}")
-    check(rows[3] == "memory: 3838/3840 pages free  page faults: 1",
-          f"第 3 行应显示 3840 页中用掉了 2 页（用户栈的一页和它的页表）、补过 1 次缺页：{rows[3]!r}")
+    check(rows[3] == "memory: 3835/3840 pages free  page faults: 1",
+          f"第 3 行应显示用掉了 5 页（A、B 的内核栈，B 的页目录、栈区页表和栈页）、补过 1 次缺页：{rows[3]!r}")
     check(re.fullmatch(r"ticks: \d+( +idle: +\d+%)?", rows[4]) is not None, f"第 4 行不对：{rows[4]!r}")
     check(rows[5] == "paging: on, 0xC0000000 -> 0xB8000", f"第 5 行不对：{rows[5]!r}")
     check(rows[6].startswith("tasks: "), f"第 6 行不对：{rows[6]!r}")
@@ -375,12 +398,12 @@ def test_idle_in_hlt(m, elf):
     table = symbols(elf)
     for _ in range(10):
         regs = m.registers()
-        if regs["HLT"] == 1 and regs["TR"] == 0x18 and in_function(table, "kmain", regs["EIP"]):
+        if regs["HLT"] == 1 and regs["TR"] == tss_sel(0) and in_function(table, "kmain", regs["EIP"]):
             check(regs["EFL"] & 0x200, "空闲时 IF 应为 1")
             break
         time.sleep(0.1)
     else:
-        raise TestFailure("10 次采样都没有停在任务 0（TR=0x18）kmain 的 hlt 上：睡眠的任务没有让出 CPU？")
+        raise TestFailure("10 次采样都没有停在任务 0 的 kmain 的 hlt 上：睡眠的任务没有让出 CPU？")
     m.wait_for(lambda mm: idle_percent(mm) >= 90, timeout=3, what="空闲比例达到 90% 以上")
 
 
@@ -417,32 +440,37 @@ def test_user_setup(m, elf):
 def test_user_task(m, elf):
     """任务 B 运行在用户态：它的内核栈顶是从特权级 3 进入系统调用时 CPU 压入的现场"""
     table = symbols(elf)
-    stacks, size = table["task_stacks"]
-    top = stacks + size                 # 任务 B 的内核栈（第二个 4 KB）的顶端
+    top, ss0 = tss_u32(m, elf, 2, 4), tss_u32(m, elf, 2, 8)    # 任务 B 的 TSS 中的 esp0、ss0
+    check(ss0 == 0x10, f"任务 B 的 TSS 中 ss0 应为内核数据段 0x10，实际是 {ss0:#x}")
+    check(0x100000 < top <= 0x1000000 and top % 4096 == 0, f"任务 B 的内核栈应是分配来的一整页，esp0 = {top:#x}")
     eip, cs, eflags, esp, ss = (read_u32(m, top - 20 + 4 * i) for i in range(5))
     check(cs == 0x33, f"任务 B 进入内核前的 CS 应为用户代码段 0x33，实际是 {cs:#x}")
     check(ss == 0x3B, f"任务 B 进入内核前的 SS 应为用户数据段 0x3B，实际是 {ss:#x}")
     check(in_function(table, "user_main", eip), f"返回地址 {eip:#x} 应在 user_main 内")
     check(USER_STACK_TOP - 4096 < esp <= USER_STACK_TOP, f"用户态 ESP {esp:#x} 应在用户栈区顶端的那一页内")
     check(eflags & 0x200 and not eflags & 0x3000, f"用户态 EFLAGS 应 IF=1、IOPL=0：{eflags:#x}")
-    tss_b = table["tss"][0] + 2 * 104
-    esp0, ss0 = read_u32(m, tss_b + 4), read_u32(m, tss_b + 8)
-    check(esp0 == top and ss0 == 0x10, f"任务 B 的 TSS 中 ss0:esp0 应为 0x10:{top:#x}，实际是 {ss0:#x}:{esp0:#x}")
 
 
 def test_demand_paging(m, elf):
-    """用户栈按需分配：只有任务 B 用到的栈顶那一页映射了物理页，页表也是缺页时才分配的"""
+    """每个用户任务有自己的页目录；用户栈按需分配，只有任务 B 用到的栈顶那一页映射了物理页"""
     m.wait_for(lambda mm: mm.screen(1)[0] == "ABPKCVITUF", timeout=2, what="第 0 行的 F")
+    table = symbols(elf)
+    kernel_dir = table["page_directory"][0]
+    cr3 = tss_u32(m, elf, 2, 28)
+    check(cr3 != kernel_dir and 0x100000 <= cr3 < 0x1000000, f"任务 B 应有自己的页目录（分配来的一页），CR3 = {cr3:#x}")
+    for index in (0, 1, 2, 3, 768):     # 内核部分照抄内核的页目录
+        check(read_u32(m, cr3 + index * 4) == read_u32(m, kernel_dir + index * 4), f"第 {index} 个页目录项应与内核的相同")
+    check(tss_u32(m, elf, 1, 28) == kernel_dir, "内核任务 A 应使用内核的页目录")
+    check(read_u32(m, kernel_dir + (USER_STACK_LOW >> 22) * 4) == 0, "内核的页目录里不应有用户栈区")
+    pde = read_u32(m, cr3 + (USER_STACK_LOW >> 22) * 4)
+    check(pde & 7 == 7 and 0x100000 <= pde & ~0xFFF < 0x1000000, f"任务 B 的第 256 个页目录项应指向分配来的页表，存在、可写、用户：{pde:#x}")
     top_page = USER_STACK_TOP - 4096
-    phys = m.gva2gpa(top_page)
-    # 第一次缺页时先分页表（最高的 0xFFF000），再分栈页（0xFFE000）
-    check(phys == 0xFFE000, f"栈顶那一页应映射到第二个分出去的物理页 0xFFE000，实际是 {phys if phys is None else hex(phys)}")
-    check(m.gva2gpa(top_page - 4096) is None, "栈顶下面那一页还没用到，不应映射")
-    check(m.gva2gpa(USER_STACK_LOW) is None, "栈区底部不应映射")
-    pde = read_u32(m, symbols(elf)["page_directory"][0] + (USER_STACK_LOW >> 22) * 4)
-    check(pde & 7 == 7 and pde & ~0xFFF == 0xFFF000, f"第 256 个页目录项应指向 0xFFF000 的页表，存在、可写、用户：{pde:#x}")
-    pte = read_u32(m, 0xFFF000 + 1023 * 4) & ~0x60   # CPU 访问后会置上“已访问”“已写”两位
-    check(pte == 0xFFE000 | 7, f"页表最后一项应为 0xFFE000 | 7（存在、可写、用户）：{pte:#x}")
+    phys = translate(m, cr3, top_page)
+    check(phys is not None and 0x100000 <= phys < 0x1000000, f"栈顶那一页应映射到分配来的物理页，实际是 {phys}")
+    pte = read_u32(m, (pde & ~0xFFF) + 1023 * 4) & ~0x60   # CPU 访问后会置上“已访问”“已写”两位
+    check(pte == phys | 7, f"页表最后一项应为 物理页 | 7（存在、可写、用户）：{pte:#x}")
+    check(translate(m, cr3, top_page - 4096) is None, "栈顶下面那一页还没用到，不应映射")
+    check(translate(m, cr3, USER_STACK_LOW) is None, "栈区底部不应映射")
 
 
 def test_syscall_gate(m, elf):
@@ -697,10 +725,10 @@ def check_only_task_a_left(m, what):
     out = task_output(m)
     check(set(out) == {"A"} and len(out) == 73, f"任务 B 结束后第 6 行应只剩 A：{out!r}")
     row3 = m.screen(4)[3]
-    check(row3.startswith("memory: 3840/3840 pages free"), f"任务 B 结束后它的栈页和页表都应收回：{row3!r}")
-    check(m.gva2gpa(USER_STACK_TOP - 4096) is None, "任务 B 结束后它的栈不应再有映射")
+    check(row3.startswith("memory: 3839/3840 pages free"),
+          f"任务 B 结束后它的内核栈、页目录、栈区页表和栈页都应收回，只剩任务 A 的内核栈：{row3!r}")
     for _ in range(10):
-        check(m.registers()["TR"] != 0x28, "任务 B 结束后不应再切到它（TR=0x28）")
+        check(m.registers()["TR"] != tss_sel(2), "任务 B 结束后不应再切到它")
         time.sleep(0.03)
 
 
@@ -769,7 +797,8 @@ def test_all_tasks_exit(_m, _elf):
             if regs["HLT"] == 1:
                 break
             time.sleep(0.05)
-        check(regs["TR"] == 0x18, f"应切回任务 0（TR=0x18），实际 TR={regs['TR']:#x}")
+        check(regs["TR"] == tss_sel(0), f"应切回任务 0，实际 TR={regs['TR']:#x}")
+        check(m.screen(4)[3].startswith("memory: 3840/3840 pages free"), f"所有任务结束后应收回全部内存：{m.screen(4)[3]!r}")
         check(in_function(table, "kmain", regs["EIP"]), f"应停在 kmain 的 hlt 上，EIP={regs['EIP']:#x}")
         check(regs["CR3"] == table["page_directory"][0], f"CR3 应仍是页目录，实际是 {regs['CR3']:#x}")
 
@@ -807,7 +836,7 @@ def test_nmi_in_user_mode(_m, _elf):
         for _ in range(100):        # 暂停虚拟机，确认此刻任务 B 在用户态，再注入 NMI
             m.cmd("stop")
             regs = m.registers()
-            if regs["TR"] == 0x28 and regs["CS"] == 0x33:
+            if regs["TR"] == tss_sel(2) and regs["CS"] == 0x33:
                 break
             m.cmd("cont")
             time.sleep(0.03)
@@ -848,9 +877,7 @@ def test_deep_stack(_m, _elf):
         match = re.fullmatch(r"memory: (\d+)/3840 pages free  page faults: (\d+)", row3)
         check(match is not None, f"第 3 行不对：{row3!r}")
         check(int(match.group(2)) >= 5, f"5 页栈应各缺页一次：{row3!r}")
-        check(match.group(1) == "3840", f"任务 B 结束后栈页和页表应全部收回：{row3!r}")
-        for page in range(USER_STACK_TOP - 6 * 4096, USER_STACK_TOP, 4096):
-            check(m.gva2gpa(page) is None, f"任务 B 结束后栈区 {page:#x} 不应再有映射")
+        check(match.group(1) == "3839", f"任务 B 结束后它的页应全部收回，只剩任务 A 的内核栈：{row3!r}")
         check(not exception_screen(m)[0], f"不应出现异常面板：{exception_screen(m)[0]!r}")
 
 
@@ -862,7 +889,6 @@ def test_wild_read(_m, _elf):
         msg = message_row(m)
         check(msg.startswith("task 2 killed by #PF page fault"), f"第 7 行不对：{msg!r}")
         check(panel_fields([msg]).get("error") == 4, f"错误码应为 4（页不存在、读、用户态）：{msg!r}")
-        check(m.gva2gpa(0x50000000) is None, "内核不应给栈区以外的地址补页")
         check_only_task_a_left(m, "用户程序读野指针")
 
 

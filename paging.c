@@ -13,6 +13,10 @@
  *     特权级 3 的代码访问其他页都会触发缺页异常；其中代码所在的页对用户态只读。
  *
  * 用户栈不在这里预先映射：它在 0x40000000 起的 4 MB 里，用到哪一页才由缺页异常分配（handle_page_fault）。
+ *
+ * 这里建的是内核的页目录，任务 0 和内核任务用它。每个用户任务有一份自己的页目录（new_page_dir）：
+ * 内核部分的页目录项照抄这一份，指向同样的页表，所以切换任务时内核的地址都不变；
+ * 用户栈区那一项各管各的。硬件任务切换会从 TSS 装入 CR3，换任务就换了页目录。
  */
 #include "kernel.h"
 
@@ -96,6 +100,33 @@ _Static_assert(USER_STACK_LOW % 0x400000u == 0 && USER_STACK_TOP - USER_STACK_LO
 
 uint32_t page_faults;               /* 缺页异常补上了几页，显示在第 3 行 */
 
+uint32_t kernel_page_dir(void)
+{
+    return (uint32_t)page_directory;
+}
+
+/* 当前的页目录：CR3 里是它的物理地址，页目录都在一一对应映射的范围内，物理地址也就是虚拟地址。 */
+static uint32_t *current_page_dir(void)
+{
+    uint32_t cr3;
+    __asm__ volatile("movl %%cr3, %0" : "=r"(cr3));
+    return (uint32_t *)cr3;
+}
+
+/*
+ * 给一个用户任务建页目录：分一页，照抄内核的页目录。内核部分的项指向同样的页表，
+ * 用户栈区那一项在内核的页目录里是空的，复制过来也是空的。没有空闲页时返回 0。
+ */
+uint32_t new_page_dir(void)
+{
+    uint32_t dir = get_free_page();
+
+    if (dir != 0)
+        for (int i = 0; i < ENTRIES; i++)
+            ((uint32_t *)dir)[i] = page_directory[i];
+    return dir;
+}
+
 /*
  * 缺页异常（14 号）：出错的地址在用户栈区、而且是“页不存在”（错误码第 0 位为 0），
  * 就分配一页清零的物理页映射上去，返回 1；中断返回后 CPU 重新执行出错的那条指令，这次就能访问了。
@@ -113,7 +144,7 @@ int handle_page_fault(uint32_t addr, uint32_t error_code)
     if (addr < USER_STACK_LOW || addr >= USER_STACK_TOP)
         return 0;
 
-    uint32_t *pde = &page_directory[addr >> 22];
+    uint32_t *pde = &current_page_dir()[addr >> 22];   /* 当前任务自己的用户栈区 */
     if (!(*pde & PAGE_PRESENT)) {
         uint32_t table = get_free_page();       /* 已清零：1024 项都不存在 */
         if (table == 0)
@@ -134,23 +165,20 @@ int handle_page_fault(uint32_t addr, uint32_t error_code)
 }
 
 /*
- * 用户任务结束时，收回用户栈区的每一页和那张页表，再重新装入 CR3 清掉 TLB 里这些页的旧翻译。
+ * 用户任务结束时，收回它的用户栈区的每一页、那张页表和页目录本身。
+ * 调用者马上要切到别的任务，换 CR3 时 TLB 里这些页的旧翻译也随之作废，这里不用另外刷新。
  * Linux 0.11 的 do_exit() 调用 free_page_tables() 做同样的事。
  */
-void free_user_pages(void)
+void free_page_dir(uint32_t dir)
 {
-    uint32_t *pde = &page_directory[USER_STACK_LOW >> 22];
+    uint32_t pde = ((uint32_t *)dir)[USER_STACK_LOW >> 22];
 
-    if (!(*pde & PAGE_PRESENT))
-        return;
-    uint32_t *table = (uint32_t *)(*pde & ~0xFFFu);
-    for (int i = 0; i < ENTRIES; i++) {
-        if (table[i] & PAGE_PRESENT) {
-            free_page(table[i] & ~0xFFFu);
-            table[i] = 0;
-        }
+    if (pde & PAGE_PRESENT) {
+        uint32_t *table = (uint32_t *)(pde & ~0xFFFu);
+        for (int i = 0; i < ENTRIES; i++)
+            if (table[i] & PAGE_PRESENT)
+                free_page(table[i] & ~0xFFFu);
+        free_page(pde & ~0xFFFu);
     }
-    free_page(*pde & ~0xFFFu);
-    *pde = 0;
-    __asm__ volatile("movl %0, %%cr3" : : "r"(page_directory) : "memory");
+    free_page(dir);
 }
