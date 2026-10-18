@@ -258,6 +258,7 @@ def test_boot_screen(m, elf):
     rows = m.screen(9)
     check(rows[0] == "ABPKCVITU", f"第 0 行应为 'ABPKCVITU'，实际是 {rows[0]!r}")
     check(rows[2] == "Hello from kmain() in C!", f"第 2 行不对：{rows[2]!r}")
+    check(rows[3] == "memory: 3840/3840 pages free", f"第 3 行应显示 1 MB～16 MB 的 3840 页都空闲：{rows[3]!r}")
     check(re.fullmatch(r"ticks: \d+( +idle: +\d+%)?", rows[4]) is not None, f"第 4 行不对：{rows[4]!r}")
     check(rows[5] == "paging: on, 0xC0000000 -> 0xB8000", f"第 5 行不对：{rows[5]!r}")
     check(rows[6].startswith("tasks: "), f"第 6 行不对：{rows[6]!r}")
@@ -639,6 +640,33 @@ def test_syscalls(_m, _elf):
         check(rows[6].startswith("tasks: xyz"), f"write 的内容应出现在第 6 行开头：{rows[6]!r}")
 
 
+def test_page_alloc(_m, _elf):
+    """物理页从 16 MB 顶端往下分配；释放的页会被重新分出来，交出前已清零；分光 3840 页后再分得到 0"""
+    d = build_selftest("PAGE_ALLOC")
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        m.wait_for(lambda mm: "back=" in mm.screen(8)[7], timeout=10, what="第 7 行的分配结果")
+        rows = m.screen(8)
+        f = dict(re.findall(r"(\w+)=([0-9A-F]+)", rows[7]))
+        check(f.get("free") == "3840", f"开始时 1 MB～16 MB 的 3840 页都应空闲：{rows[7]!r}")
+        check(f.get("p1") == "00FFF000" and f.get("p2") == "00FFE000",
+              f"应从最高的页往下分配（与 Linux 0.11 相同）：{rows[7]!r}")
+        check(f.get("p3") == f.get("p1"), f"释放的页应被重新分出来：{rows[7]!r}")
+        check(f.get("zero") == "1", f"重新分出来的页应已清零，不能留着上一个使用者的数据：{rows[7]!r}")
+        check(f.get("all") == "3840" and f.get("left") == "0", f"应正好能分出 3840 页，分光后剩 0：{rows[7]!r}")
+        check(f.get("back") == "3840", f"全部还回去后应又是 3840 页空闲：{rows[7]!r}")
+        check(rows[3] == "memory: 3840/3840 pages free", f"第 3 行应跟着更新：{rows[3]!r}")
+
+
+def test_double_free(_m, _elf):
+    """同一页释放两次：内核发现自己记错了，显示 Kernel panic 并停机"""
+    d = build_selftest("DOUBLE_FREE")
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        m.wait_for(lambda mm: exception_screen(mm)[0].startswith("Kernel panic"), what="Kernel panic")
+        check(exception_screen(m)[0] == "Kernel panic: trying to free free page", f"第 19 行不对：{exception_screen(m)[0]!r}")
+        check(m.attribute(PANEL_ROW, 0) == 0x4F, "panic 信息应为红底白字")
+        check(m.screen(1)[0][9:10] != "X", "panic 之后不应继续执行")
+
+
 def message_row(m):
     return m.screen(8)[7]
 
@@ -795,7 +823,7 @@ SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, te
                 test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_console_scroll,
                 test_idle_in_hlt, test_syscall_gate, test_user_setup, test_user_task,
                 test_tasks_alternate]
-SEPARATE_TESTS = [test_syscalls, test_early_key, test_keyboard_edge_cases, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
+SEPARATE_TESTS = [test_syscalls, test_page_alloc, test_double_free, test_early_key, test_keyboard_edge_cases, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,
                   test_big_kernel, test_user_write_kernel, test_user_privileged,
                   test_user_bad_pointer, test_user_exit, test_all_tasks_exit,

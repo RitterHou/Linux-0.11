@@ -176,6 +176,23 @@ static void exception_panic(const struct interrupt_frame *frame)
 }
 
 /*
+ * 内核发现自己的数据出了错（例如同一页释放了两次），没法继续：在异常面板的位置显示原因，然后停机。
+ * Linux 0.11 的 panic() 同样打印 "Kernel panic: " 加原因，然后死循环。
+ */
+void panic(const char *msg)
+{
+    struct text_line line;
+
+    __asm__ volatile("cli");
+    line_init(&line);
+    line_append(&line, "Kernel panic: ");
+    line_append(&line, msg);
+    line_show(&line, VGA_WHITE_RED, PANEL_ROW);
+    for (;;)
+        __asm__ volatile("hlt");
+}
+
+/*
  * 这个异常是不是当前指令造成的。NMI（2）、双重错误（8）、机器检查（18）来自硬件，
  * 或者表示内核处理异常时又出了错，与用户程序无关：即使发生时 CPU 恰好在用户态，也不能算到它头上。
  */

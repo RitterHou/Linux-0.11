@@ -25,6 +25,7 @@ void kmain(void)
     /* 通过虚拟地址 0xC0000000 写显存第 0 行第 5 列：它与 0xB8000 映射到同一块物理内存。 */
     ((volatile uint16_t *)VGA_ALIAS)[5] = (uint16_t)(VGA_GRAY << 8 | 'V');
     vga_write_at(5, 0, "paging: on, 0xC0000000 -> 0xB8000", VGA_GRAY);
+    mem_init();                     /* 1 MB～16 MB 的物理页交给 mem.c 管理，第 3 行显示剩余页数 */
 
     selftest_early();               /* 正常构建为空；自检 EARLY_KEY 在这里等一次按键 */
 

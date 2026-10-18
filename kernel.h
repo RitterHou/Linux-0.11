@@ -60,12 +60,22 @@ static inline int from_user_mode(const struct interrupt_frame *frame)
 void idt_init(void);
 void pic_init(void);
 void interrupt_dispatch(struct interrupt_frame *frame);
+void panic(const char *msg) __attribute__((noreturn));
 
 /* paging.c：页目录与页表 */
+#define PAGE_SIZE 4096
 #define VGA_PHYS  0x000B8000u       /* 显存的物理地址 */
 #define VGA_ALIAS 0xC0000000u       /* 打开分页后，这个虚拟地址也指向显存 */
 void paging_init(void);
 int user_range_ok(uint32_t addr, uint32_t size);
+
+/* mem.c：物理页分配，管 LOW_MEM～HIGH_MEM 之间的页 */
+#define LOW_MEM   0x00100000u       /* 1 MB 以下归内核自己 */
+#define HIGH_MEM  0x01000000u       /* 内存假定为 16 MB */
+void mem_init(void);
+uint32_t get_free_page(void);
+void free_page(uint32_t addr);
+uint32_t free_page_count(void);
 
 /* timer.c：8253 定时器 */
 #define TIMER_HZ 100                /* 与 Linux 0.11 的 HZ 相同，每 10 ms 一次 */

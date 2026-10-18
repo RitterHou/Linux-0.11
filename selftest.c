@@ -8,7 +8,7 @@
 #include "syscall.h"
 
 
-#if defined(SELFTEST) && SELFTEST == SELFTEST_SYSCALLS
+#if defined(SELFTEST) && (SELFTEST == SELFTEST_SYSCALLS || SELFTEST == SELFTEST_PAGE_ALLOC)
 static int report_col;
 
 /* 在第 7 行接着写 "名字=值 "；base 为 16 时写 8 位十六进制。 */
@@ -108,6 +108,42 @@ void selftest_run(void)
     report("write", (uint32_t)written, 10);
     report("badfd", (uint32_t)bad_fd, 16);
     report("slept", slept, 10);
+#elif SELFTEST == SELFTEST_PAGE_ALLOC
+    /*
+     * 分两页；把第一页写脏后释放，再分一页：应当拿回同一页，而且已经清零。
+     * 然后一直分到分不出来，数一数一共几页，最后把 1 MB～16 MB 的每一页都还回去。
+     */
+    uint32_t before = free_page_count();
+    uint32_t first = get_free_page(), second = get_free_page();
+    volatile uint32_t *dirty = (volatile uint32_t *)first;
+    dirty[0] = 0x12345678;
+    dirty[PAGE_SIZE / 4 - 1] = 0x9ABCDEF0;
+    free_page(first);
+    uint32_t again = get_free_page();
+    volatile uint32_t *p = (volatile uint32_t *)again;
+    uint32_t zeroed = p[0] == 0 && p[PAGE_SIZE / 4 - 1] == 0;
+    free_page(again);
+    free_page(second);
+    uint32_t total = 0;
+    while (get_free_page() != 0)
+        total++;
+    uint32_t left = free_page_count();
+    for (uint32_t addr = LOW_MEM; addr < HIGH_MEM; addr += PAGE_SIZE)
+        free_page(addr);
+
+    report("free", before, 10);
+    report("p1", first, 16);
+    report("p2", second, 16);
+    report("p3", again, 16);
+    report("zero", zeroed, 10);
+    report("all", total, 10);
+    report("left", left, 10);
+    report("back", free_page_count(), 10);
+#elif SELFTEST == SELFTEST_DOUBLE_FREE
+    uint32_t page = get_free_page();
+    free_page(page);
+    free_page(page);                        /* 期望在这里 panic */
+    vga_write_at(0, 9, "X", VGA_GRAY);      /* 不应该走到这里 */
 #elif SELFTEST == SELFTEST_KEYBOARD_EDGE
     /*
      * 直接喂扫描码（第 1 套）：Caps Lock 按下两次（第二次是按住不放的重复）再松开，打 a；

@@ -16,6 +16,8 @@
 #define SELFTEST_SYSCALLS       9   /* 依次调用各个系统调用，把返回值写到第 7 行 */
 #define SELFTEST_EARLY_KEY     10   /* 初始化 8259 之前就有按键：期望键盘之后仍能工作 */
 #define SELFTEST_KEYBOARD_EDGE 11   /* 喂扫描码：Caps Lock 自动重复、退格跨过自动换行 */
+#define SELFTEST_PAGE_ALLOC    12   /* 分配、释放、再分配物理页，再分光全部页，把结果写到第 7 行 */
+#define SELFTEST_DOUBLE_FREE   13   /* 同一页释放两次：期望 Kernel panic */
 
 /* 20 号起是用户态自检，由任务 B 在特权级 3 执行，见 user.c。 */
 #define SELFTEST_USER_WRITE_KERNEL 20   /* 用户程序写内核的变量：期望因 #PF 被结束，错误码 7 */

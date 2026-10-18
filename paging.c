@@ -14,7 +14,6 @@
  */
 #include "kernel.h"
 
-#define PAGE_SIZE     4096
 #define PAGE_PRESENT  0x001         /* 存在位：为 0 时访问会触发 14 号缺页异常 */
 #define PAGE_WRITE    0x002         /* 可写 */
 #define PAGE_USER     0x004         /* 用户：为 0 时只有特权级 0～2 能访问 */
@@ -23,6 +22,9 @@
 #define ENTRIES       1024          /* 每张页目录或页表有 1024 项，每项 4 字节 */
 #define IDENTITY_MB   16
 #define IDENTITY_TABLES (IDENTITY_MB / 4)   /* 每张页表管 4 MB */
+
+/* mem.c 按物理地址直接清零分出去的页，所以能分配的页都必须在一一对应映射的范围内。 */
+_Static_assert(HIGH_MEM <= IDENTITY_MB * 0x100000u, "allocatable pages must be identity-mapped");
 
 /* 都在 .bss，由 entry.asm 清零，所以没有填写的项存在位都是 0。CR3 要求 4 KB 对齐。 */
 static uint32_t page_directory[ENTRIES] __attribute__((aligned(PAGE_SIZE)));
