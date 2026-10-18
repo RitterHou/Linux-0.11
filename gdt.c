@@ -8,7 +8,8 @@
  */
 #include "kernel.h"
 
-#define GDT_ENTRIES 10              /* 0 空，1～2 内核段，3～5 TSS，6～7 用户段，8～9 备用 */
+/* 0 空，1～2 内核段，6～7 用户段，9 留给自检，10 起每个任务槽一个 TSS；3～5、8 空着。 */
+#define GDT_ENTRIES (TSS_GDT_INDEX + NR_TASKS)
 
 struct gdt_pointer {                /* lgdt 的操作数：界限和基址，共 6 字节 */
     uint16_t limit;

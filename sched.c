@@ -1,15 +1,18 @@
 /*
- * 任务调度：任务 A 和任务 B 在定时器中断的驱动下轮流运行，各自把字母写到第 6 行。
+ * 任务调度：任务表、硬件任务切换、睡眠与唤醒、结束任务。
  *
  * 用 x86 的硬件任务切换，与 Linux 0.11 相同：每个任务有一个 TSS（任务状态段），
  * GDT 中有它的描述符。远跳转到 TSS 的选择子时，CPU 自动把当前的通用寄存器、段寄存器、
  * EFLAGS 和 EIP 存进当前任务的 TSS，再从目标任务的 TSS 装入这些寄存器以及 CR3，
  * 于是目标任务从它上次被切走的地方接着运行。CR3 只装入、不保存，每个 TSS 都要预先填好。
  *
- * 任务 0 是 kmain() 自己：sched_init() 用 ltr 把它登记为当前任务，调度开始后它当空闲任务，
- * 只在 A、B 都不能运行时才运行。
- * 任务 A 在内核态（特权级 0）运行 task_main()；任务 B 在用户态（特权级 3）运行 user.c 的 user_main()，
- * 两者做同样的事，都只通过系统调用输出和等待。
+ * 任务表有 NR_TASKS 个槽，槽号就是任务号（pid）：
+ *   - 任务 0 是 kmain() 自己：sched_init() 用 ltr 把它登记为当前任务，调度开始后它当空闲任务，
+ *     只在别的任务都不能运行时才运行。
+ *   - 任务 1（A）在内核态（特权级 0）运行 task_main()；任务 2（B）在用户态（特权级 3）运行
+ *     user.c 的 user_main()。两者做同样的事，都只通过系统调用输出和等待。
+ * 除任务 0 外，每个任务的内核栈是从 mem.c 分来的一页；用户任务还有自己的页目录（见 paging.c），
+ * 内核部分与别的任务共用，用户栈区各自独立。Linux 0.11 也是每个进程一页内核栈，放在 task_struct 的同一页里。
  *
  * 什么时候切换：
  *   - 任务调用 sleep：立刻把 CPU 让给别的任务，没有就让给任务 0（sched_sleep）。
@@ -21,17 +24,12 @@
 #include "selftest.h"
 #include "syscall.h"
 
-#define TASKS          3            /* 0 = kmain，1 = A，2 = B */
-#define USER_TASK      2            /* 任务 B 在用户态运行，用户栈区归它 */
-#define TSS_GDT_INDEX  3            /* 任务 n 的 TSS 描述符在 GDT 第 3 + n 项 */
-#define TSS_SEL(n)     ((TSS_GDT_INDEX + (n)) * 8)
 #define TSS_ACCESS     0x89         /* 存在、DPL 0、类型 9：32 位可用 TSS */
 #define TASK_SLICE     20           /* 不睡的任务最多连续运行 20 个 tick（200 ms）就被切走 */
 
-#define TASK_UNUSED    0            /* 没有任务，或者任务已经结束 */
+#define TASK_UNUSED    0            /* 空槽，或者任务已经结束 */
 #define TASK_RUNNING   1            /* 能运行：正在运行，或者等着轮到它 */
 #define TASK_SLEEPING  2            /* 在 sleep 里等时间到，不参与调度 */
-#define STACK_SIZE     4096
 
 #define OUTPUT_ROW     6
 #define OUTPUT_COL     7            /* 紧跟在 "tasks: " 后面 */
@@ -43,7 +41,7 @@
 /* 32 位 TSS 的格式由 CPU 规定，共 104 字节。 */
 struct tss {
     uint32_t prev_task;             /* 用 call 切换任务时的返回链，这里不用 */
-    uint32_t esp0, ss0, esp1, ss1, esp2, ss2;   /* 特权级变化时用的栈，这里都在 0 级 */
+    uint32_t esp0, ss0, esp1, ss1, esp2, ss2;   /* 从用户态进入特权级 0 时用 ss0:esp0 */
     uint32_t cr3, eip, eflags;
     uint32_t eax, ecx, edx, ebx, esp, ebp, esi, edi;
     uint32_t es, cs, ss, ds, fs, gs;
@@ -51,20 +49,21 @@ struct tss {
     uint16_t trap, iomap_base;
 } __attribute__((packed));
 
-static struct tss tss[TASKS];
-/*
- * 任务 1、2 各自的内核栈；任务 0 就是 kmain，沿用 entry.asm 设置的内核栈。
- * 任务 B 在用户态时用 user.c 中的用户栈，进入中断或系统调用时 CPU 换到这里的内核栈。
- */
-static uint8_t task_stacks[TASKS - 1][STACK_SIZE] __attribute__((aligned(16)));
+/* 任务表中 CPU 不关心的部分。TSS 单独放一个数组，GDT 的描述符指向它们。 */
+struct task {
+    int state;
+    uint32_t wake_at;               /* 睡眠的任务在 timer_ticks 到达这个值时被叫醒 */
+    uint32_t page_dir;              /* 页目录的物理地址，也就是 TSS 里的 CR3 */
+    uint32_t kstack;                /* 内核栈所在的页；任务 0 用 entry.asm 的栈，这里是 0 */
+};
+
+static struct tss tss[NR_TASKS];
+static struct task tasks[NR_TASKS];
 
 static int current_task;            /* 当前任务号，起始为 0 */
-/* 任务 1、2 的状态。任务 0 是空闲任务，不睡也不结束，它的状态不用；Linux 0.11 的 task[0] 也是这样。 */
-static int task_state[TASKS];
-static uint32_t wake_at[TASKS];     /* 睡眠的任务在 timer_ticks 到达这个值时被叫醒 */
 static int scheduling;              /* sched_start() 之后才开始切换 */
 static uint32_t slice_left;         /* 当前任务还剩几个 tick 的时间片 */
-static int output_pos;              /* 两个任务共用的输出位置 */
+static int output_pos;              /* 各任务共用的输出位置 */
 
 /*
  * 写一个字符到第 6 行，供 write 系统调用使用。各任务共用 output_pos，
@@ -106,57 +105,68 @@ static void task_main(void)
     }
 }
 
-/* 内核任务：特权级 0，栈就是它的内核栈。 */
-static void init_task(int n, void (*entry)(void), uint32_t cr3)
+/*
+ * 占用任务 n 的槽：分一页当内核栈，TSS 先填共同的部分。没有空闲页时返回 0。
+ * 新任务的 EFLAGS 是 0x202：IF=1，一开始运行就允许中断；第 1 位规定为 1。
+ */
+static int setup_task(int n, void (*entry)(void), uint32_t cr3)
 {
-    struct tss *t = &tss[n];
+    uint32_t kstack = get_free_page();
 
-    t->eip = (uint32_t)entry;
-    t->esp = (uint32_t)&task_stacks[n - 1][STACK_SIZE];
-    t->eflags = 0x202;              /* IF=1：任务一开始运行就允许中断；第 1 位规定为 1 */
+    if (kstack == 0)
+        return 0;
+    tasks[n] = (struct task){ .state = TASK_RUNNING, .page_dir = cr3, .kstack = kstack };
+    tss[n] = (struct tss){ .eip = (uint32_t)entry, .eflags = 0x202, .cr3 = cr3,
+                           .iomap_base = sizeof(struct tss) };   /* 没有 I/O 权限位图 */
+    return 1;
+}
+
+/* 内核任务：特权级 0，栈就是它的内核栈，用内核的页目录。 */
+static void init_task(int n, void (*entry)(void))
+{
+    if (!setup_task(n, entry, kernel_page_dir()))
+        panic("no memory for a kernel task");
+    struct tss *t = &tss[n];
+    t->esp = tasks[n].kstack + PAGE_SIZE;
     t->cs = KERNEL_CODE_SEL;
     t->ds = t->es = t->fs = t->gs = t->ss = KERNEL_DATA_SEL;
-    t->cr3 = cr3;                   /* 任务切换会装入 CR3，必须填当前的页目录 */
 }
 
 /*
- * 用户任务：CS 等填用户段选择子（RPL 为 3），硬件任务切换装入这个 TSS 时就直接进入特权级 3。
+ * 用户任务：有自己的页目录；CS 等填用户段选择子（RPL 为 3），硬件任务切换装入这个 TSS 时就直接进入特权级 3。
  * ss0:esp0 是它的内核栈：在用户态发生中断或系统调用时，CPU 从这里取出内核栈，
  * 再把用户态的 SS、ESP、EFLAGS、CS、EIP 压上去。EFLAGS 的 IOPL 为 0，用户态不能执行 cli、in、out。
  * Linux 0.11 的 copy_process() 也把 esp0 设为该进程内核栈的顶端。
  */
-static void init_user_task(int n, void (*entry)(void), uint32_t user_esp, uint32_t cr3)
+static void init_user_task(int n, void (*entry)(void), uint32_t user_esp)
 {
-    struct tss *t = &tss[n];
+    uint32_t dir = new_page_dir();
 
-    t->eip = (uint32_t)entry;
+    if (dir == 0 || !setup_task(n, entry, dir))
+        panic("no memory for a user task");
+    struct tss *t = &tss[n];
     t->esp = user_esp;
-    t->eflags = 0x202;
     t->cs = USER_CODE_SEL;
     t->ds = t->es = t->fs = t->gs = t->ss = USER_DATA_SEL;
     t->ss0 = KERNEL_DATA_SEL;
-    t->esp0 = (uint32_t)&task_stacks[n - 1][STACK_SIZE];
-    t->cr3 = cr3;
+    t->esp0 = tasks[n].kstack + PAGE_SIZE;
 }
 
 void sched_init(void)
 {
-    uint32_t cr3;
-    __asm__ volatile("movl %%cr3, %0" : "=r"(cr3));
-
     /*
      * 任务 0 的 TSS 也要填 CR3：任务切换时 CPU 不会把当前的 CR3 存进旧 TSS，
-     * 将来切回任务 0（所有任务都结束时）装入的就是这里的值，留 0 会把物理地址 0 当成页目录。
+     * 切回任务 0 时装入的就是这里的值，留 0 会把物理地址 0 当成页目录。
      * Linux 0.11 的 INIT_TASK 同样把 cr3 填为页目录 pg_dir。
      */
-    tss[0].cr3 = cr3;
-    for (int n = 0; n < TASKS; n++) {
-        tss[n].iomap_base = sizeof(struct tss);     /* 没有 I/O 权限位图 */
+    tss[0].cr3 = kernel_page_dir();
+    tss[0].iomap_base = sizeof(struct tss);
+    tasks[0] = (struct task){ .state = TASK_RUNNING, .page_dir = kernel_page_dir() };
+    for (int n = 0; n < NR_TASKS; n++)
         gdt_set_entry(TSS_GDT_INDEX + n, (uint32_t)&tss[n], sizeof(struct tss) - 1, TSS_ACCESS, 0);
-    }
-    init_task(1, task_main, cr3);
-    init_user_task(USER_TASK, user_main, USER_STACK_TOP, cr3);  /* 栈顶的页第一次用到时才分配 */
-    task_state[1] = task_state[2] = TASK_RUNNING;
+
+    init_task(1, task_main);
+    init_user_task(2, user_main, USER_STACK_TOP);   /* 栈顶的页第一次用到时才分配 */
 
     /* 把 kmain 登记为任务 0：第一次切换时，CPU 才知道把当前寄存器存到哪个 TSS。 */
     __asm__ volatile("ltr %w0" : : "r"(TSS_SEL(0)));
@@ -181,16 +191,16 @@ static void switch_to(int next)
 }
 
 /*
- * 按 1 → 2 → 1 … 的顺序找下一个能运行的任务（可能就是当前任务自己）。
- * 一个都没有时返回 0：任务 0 是 kmain 的 hlt 循环，正好当空闲任务。
+ * 从当前任务的下一个槽起，按 1、2、…、NR_TASKS - 1 的顺序转一圈，找第一个能运行的任务
+ * （可能就是当前任务自己）。一个都没有时返回 0：任务 0 是 kmain 的 hlt 循环，正好当空闲任务。
  */
 static int pick_next(void)
 {
     int n = current_task;
 
-    for (int k = 0; k < TASKS - 1; k++) {
-        n = n % (TASKS - 1) + 1;
-        if (task_state[n] == TASK_RUNNING)
+    for (int k = 0; k < NR_TASKS - 1; k++) {
+        n = n % (NR_TASKS - 1) + 1;
+        if (tasks[n].state == TASK_RUNNING)
             return n;
     }
     return 0;
@@ -209,9 +219,9 @@ static void reschedule(void)
 /* 叫醒睡到时间的任务。用差值比较，timer_ticks 回绕到 0 后也对。 */
 static void wake_sleepers(void)
 {
-    for (int n = 1; n < TASKS; n++)
-        if (task_state[n] == TASK_SLEEPING && (int32_t)(timer_ticks - wake_at[n]) >= 0)
-            task_state[n] = TASK_RUNNING;
+    for (int n = 1; n < NR_TASKS; n++)
+        if (tasks[n].state == TASK_SLEEPING && (int32_t)(timer_ticks - tasks[n].wake_at) >= 0)
+            tasks[n].state = TASK_RUNNING;
 }
 
 /*
@@ -266,23 +276,29 @@ void sched_sleep(uint32_t ticks)
         return;
     }
     uint32_t flags = irq_save();
-    task_state[current_task] = TASK_SLEEPING;
-    wake_at[current_task] = start + ticks;
+    tasks[current_task].state = TASK_SLEEPING;
+    tasks[current_task].wake_at = start + ticks;
     reschedule();
     irq_restore(flags);
 }
 
 /*
  * 结束当前任务，切到下一个任务，不再返回。用户态程序出错或调用 exit 时由内核调用。
- * 被结束的任务不会再被调度，它的 TSS 和栈就此闲置。Linux 0.11 的 do_exit() 做的事情更多：
- * 释放内存页、关闭文件、通知父进程，最后同样调用 schedule() 切走。
+ * 它的内存当场收回：用户栈区的页、页表、页目录和内核栈。此刻还在用这个页目录和内核栈，
+ * 但中断关着，切走之前没有人会分配内存，这几页的内容不会被改掉；切换时 CPU 把寄存器存进
+ * 静态的 tss 数组，也不碰它们。Linux 0.11 的 do_exit() 做的事情更多：关闭文件、通知父进程，
+ * 内核栈所在的那一页要等父进程调用 wait 时才释放。
  */
 void sched_exit_current(void)
 {
+    struct task *t = &tasks[current_task];
+
     __asm__ volatile("cli");        /* 不再返回，切到的任务从自己的 TSS 装入 EFLAGS，中断状态随之恢复 */
-    task_state[current_task] = TASK_UNUSED;
-    if (current_task == USER_TASK)
-        free_user_pages();          /* 收回它的栈：内核栈在 .bss 里，不受影响 */
+    t->state = TASK_UNUSED;
+    if (t->page_dir != kernel_page_dir())
+        free_page_dir(t->page_dir);
+    free_page(t->kstack);
+    t->page_dir = t->kstack = 0;
     reschedule();
     for (;;)                        /* 不会执行到这里 */
         __asm__ volatile("hlt");

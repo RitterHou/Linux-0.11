@@ -75,7 +75,9 @@ void panic(const char *msg) __attribute__((noreturn));
 void paging_init(void);
 int user_range_ok(uint32_t addr, uint32_t size);
 int handle_page_fault(uint32_t addr, uint32_t error_code);
-void free_user_pages(void);
+uint32_t kernel_page_dir(void);
+uint32_t new_page_dir(void);
+void free_page_dir(uint32_t dir);
 extern uint32_t page_faults;
 
 /* mem.c：物理页分配，管 LOW_MEM～HIGH_MEM 之间的页 */
@@ -93,7 +95,10 @@ extern volatile uint32_t timer_ticks;
 void timer_init(uint32_t hz);
 void timer_handle(void);
 
-/* sched.c：任务切换、睡眠与唤醒 */
+/* sched.c：任务表、任务切换、睡眠与唤醒 */
+#define NR_TASKS      16            /* 任务槽的个数，槽号就是任务号 */
+#define TSS_GDT_INDEX 10            /* 任务 n 的 TSS 描述符在 GDT 第 10 + n 项 */
+#define TSS_SEL(n)    ((TSS_GDT_INDEX + (n)) * 8)
 void sched_init(void);
 void sched_start(void);
 void schedule(void);

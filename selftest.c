@@ -110,7 +110,41 @@ void selftest_run(void)
     report("write", (uint32_t)written, 10);
     report("badfd", (uint32_t)bad_fd, 16);
     report("slept", slept, 10);
-#elif SELFTEST == SELFTEST_PAGE_ALLOC
+#elif SELFTEST == SELFTEST_KEYBOARD_EDGE
+    /*
+     * 直接喂扫描码（第 1 套）：Caps Lock 按下两次（第二次是按住不放的重复）再松开，打 a；
+     * 再按一次 Caps Lock 关掉，打 a；然后输入到超出一行，退格跨过行首，再打 ok。
+     */
+    static const uint8_t codes[] = { 0x3A, 0x3A, 0xBA, 0x1E, 0x3A, 0xBA, 0x1E };
+    for (unsigned i = 0; i < sizeof(codes); i++)
+        keyboard_process(codes[i]);
+    for (int i = 0; i < 70; i++)
+        keyboard_process(0x2D);             /* x */
+    for (int i = 0; i < 4; i++)
+        keyboard_process(0x0E);             /* 退格 */
+    keyboard_process(0x18);                 /* o */
+    keyboard_process(0x25);                 /* k */
+#elif SELFTEST == SELFTEST_EARLY_KEY || SELFTEST == SELFTEST_PAGE_ALLOC || SELFTEST == SELFTEST_DOUBLE_FREE
+    /* 在 selftest_early() 中完成 */
+#elif SELFTEST_IN_USER(SELFTEST)
+    /* 用户态的自检写在 user.c 中，这里不用做什么 */
+#else
+#error "未知的 SELFTEST"
+#endif
+}
+
+/*
+ * 在 pic_init() 之前调用，那时 mem_init() 已经完成，sched_init() 还没有分配内核栈和页目录。
+ *   - EARLY_KEY：显示 W，一直等到键盘控制器里有一个字节，但不读走它，模拟开中断之前就有人按键。
+ *   - PAGE_ALLOC、DOUBLE_FREE：还没有别人占用物理页，可以放心地分光再全部还回去。
+ */
+void selftest_early(void)
+{
+#if defined(SELFTEST) && SELFTEST == SELFTEST_EARLY_KEY
+    vga_write_at(0, MARK_COL, "W", VGA_GRAY);
+    while (!(inb(0x64) & 0x01))
+        ;
+#elif defined(SELFTEST) && SELFTEST == SELFTEST_PAGE_ALLOC
     /*
      * 分两页；把第一页写脏后释放，再分一页：应当拿回同一页，而且已经清零。
      * 然后一直分到分不出来，数一数一共几页，最后把 1 MB～16 MB 的每一页都还回去。
@@ -141,43 +175,10 @@ void selftest_run(void)
     report("all", total, 10);
     report("left", left, 10);
     report("back", free_page_count(), 10);
-#elif SELFTEST == SELFTEST_DOUBLE_FREE
+#elif defined(SELFTEST) && SELFTEST == SELFTEST_DOUBLE_FREE
     uint32_t page = get_free_page();
     free_page(page);
     free_page(page);                        /* 期望在这里 panic */
     vga_write_at(0, MARK_COL, "X", VGA_GRAY);      /* 不应该走到这里 */
-#elif SELFTEST == SELFTEST_KEYBOARD_EDGE
-    /*
-     * 直接喂扫描码（第 1 套）：Caps Lock 按下两次（第二次是按住不放的重复）再松开，打 a；
-     * 再按一次 Caps Lock 关掉，打 a；然后输入到超出一行，退格跨过行首，再打 ok。
-     */
-    static const uint8_t codes[] = { 0x3A, 0x3A, 0xBA, 0x1E, 0x3A, 0xBA, 0x1E };
-    for (unsigned i = 0; i < sizeof(codes); i++)
-        keyboard_process(codes[i]);
-    for (int i = 0; i < 70; i++)
-        keyboard_process(0x2D);             /* x */
-    for (int i = 0; i < 4; i++)
-        keyboard_process(0x0E);             /* 退格 */
-    keyboard_process(0x18);                 /* o */
-    keyboard_process(0x25);                 /* k */
-#elif SELFTEST == SELFTEST_EARLY_KEY
-    /* 在 selftest_early() 中完成 */
-#elif SELFTEST_IN_USER(SELFTEST)
-    /* 用户态的自检写在 user.c 中，这里不用做什么 */
-#else
-#error "未知的 SELFTEST"
-#endif
-}
-
-/*
- * 在 pic_init() 之前调用。自检 EARLY_KEY：显示 W，一直等到键盘控制器里有一个字节，
- * 但不读走它，模拟开中断之前就有人按键。
- */
-void selftest_early(void)
-{
-#if defined(SELFTEST) && SELFTEST == SELFTEST_EARLY_KEY
-    vga_write_at(0, MARK_COL, "W", VGA_GRAY);
-    while (!(inb(0x64) & 0x01))
-        ;
 #endif
 }
