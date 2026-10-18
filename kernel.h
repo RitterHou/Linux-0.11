@@ -61,6 +61,7 @@ void idt_init(void);
 void pic_init(void);
 void interrupt_dispatch(struct interrupt_frame *frame);
 void panic(const char *msg) __attribute__((noreturn));
+void pic_unmask(int irq);
 
 /* paging.c：页目录与页表 */
 #define PAGE_SIZE 4096
@@ -110,6 +111,14 @@ void sched_sleep(uint32_t ticks);
 int current_pid(void);
 void task_write_char(char ch);
 void sched_exit(uint32_t status) __attribute__((noreturn));
+void sched_idle_wakeup(void);
+
+/* 等待队列：第 n 位为 1 表示任务 n 睡在上面。调用 sleep_on 之前要关中断，检查条件和睡下之间不能被打断。 */
+struct wait_queue {
+    uint32_t sleepers;
+};
+void sleep_on(struct wait_queue *q);
+void wake_up(struct wait_queue *q);
 int sched_fork(const struct interrupt_frame *frame);
 int sched_waitpid(int pid, uint32_t *status, int options);
 #define EXIT_KILLED 0x100           /* 被异常结束时留给父进程的状态：0x100 加异常号 */
@@ -117,6 +126,13 @@ int sched_waitpid(int pid, uint32_t *status, int options);
 
 /* syscall.c：int 0x80 系统调用 */
 void syscall_dispatch(struct interrupt_frame *frame);
+
+/* hd.c：硬盘 */
+extern uint32_t hd_sectors, hd_requests;
+void hd_init(void);
+void hd_handle(void);
+int hd_read(uint32_t lba, void *buf);
+int hd_write(uint32_t lba, const void *buf);
 
 /* keyboard.c：键盘 */
 void keyboard_init(void);
@@ -129,5 +145,6 @@ void user_main(void);
 /* selftest.c：make test 构建的自检内核在这里故意制造异常 */
 void selftest_run(void);
 void selftest_early(void);
+void selftest_task_a(void);
 
 #endif

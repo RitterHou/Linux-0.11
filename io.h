@@ -19,6 +19,17 @@ static inline uint8_t inb(uint16_t port)
     return value;
 }
 
+/* 从端口连续读 count 个 16 位的字到 buf，硬盘的数据端口就这样读。 */
+static inline void insw(uint16_t port, void *buf, uint32_t count)
+{
+    __asm__ volatile("cld; rep insw" : "+D"(buf), "+c"(count) : "d"(port) : "memory");
+}
+
+static inline void outsw(uint16_t port, const void *buf, uint32_t count)
+{
+    __asm__ volatile("cld; rep outsw" : "+S"(buf), "+c"(count) : "d"(port) : "memory");
+}
+
 /*
  * 关中断并返回原来的 EFLAGS；irq_restore() 再恢复原状。
  * 比直接 cli/sti 更安全：调用者原本就关着中断时，结束后不会被意外打开。
