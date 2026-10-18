@@ -319,6 +319,72 @@ svg.fig text.halo { paint-order: stroke; stroke: var(--surface); stroke-width: 5
 .rule .r { font-family: var(--font-mono); font-size: 12.5px; color: var(--bad); }
 .rule .r.ok { color: var(--ok); }
 
+/* ---------- fork 与写时复制 ---------- */
+.cow { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr); gap: 14px; align-items: stretch; }
+@media (max-width: 760px) { .cow { grid-template-columns: minmax(0, 1fr); } }
+.cow-side, .cow-phys { border: 2px solid var(--line); border-radius: 14px; padding: 14px; display: flex; flex-direction: column; gap: 10px; min-width: 0; transition: opacity .35s, border-color .35s; }
+.cow-side.gone { opacity: .35; border-style: dashed; }
+.cow-side h3, .cow-phys h3 { font-size: 16px; display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; align-items: center; }
+.cow-side .note, .cow-phys .note { font-size: 13px; color: var(--ink-2); line-height: 1.55; }
+.pte { border: 1.5px solid var(--line); border-radius: 10px; padding: 8px 10px; font-family: var(--font-mono); font-size: 13px; display: flex; flex-direction: column; gap: 6px; transition: border-color .35s, background .35s; }
+.pte.hot { border-color: var(--disk); background: var(--disk-bg); }
+.pte .flags { display: flex; gap: 5px; flex-wrap: wrap; font-size: 11.5px; }
+.pte .flag { padding: 1px 7px; border-radius: 5px; border: 1px solid var(--line); color: var(--ink-3); }
+.pte .flag.y { border-color: var(--ok); color: var(--ok); background: var(--ok-bg); }
+.pte .flag.n { border-color: var(--bad); color: var(--bad); background: var(--bad-bg); }
+.pte .flag.c { border-color: var(--cpu); color: var(--cpu); background: var(--cpu-bg); }
+.ppage { border: 1.5px solid var(--kern); background: var(--kern-bg); border-radius: 10px; padding: 8px 10px; display: flex; justify-content: space-between; gap: 8px; font-family: var(--font-mono); font-size: 13px; transition: opacity .35s; }
+.ppage.freed { opacity: .35; border-style: dashed; background: transparent; }
+.ppage b { font-family: var(--font-body); }
+
+/* ---------- 文件系统 ---------- */
+.diskmap { display: grid; grid-template-columns: repeat(10, minmax(0, 1fr)); gap: 4px; min-width: 720px; }
+.dblk { border: 1.5px solid var(--line); border-radius: 8px; padding: 6px 6px; display: flex; flex-direction: column; gap: 1px; font-size: 12px; color: var(--ink-2); background: var(--surface); transition: border-color .3s, background .3s, transform .3s; min-height: 58px; }
+.dblk b { font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-3); font-weight: 600; }
+.dblk.meta { background: var(--sunken); }
+.dblk.hot { border-color: var(--disk); background: var(--disk-bg); color: var(--ink); transform: translateY(-3px); }
+.dblk.hit { border-color: var(--ok); background: var(--ok-bg); color: var(--ink); transform: translateY(-3px); }
+.fsw-grid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 760px) { .fsw-grid { grid-template-columns: minmax(0, 1fr); } }
+.fsw-path { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.fsw-path .crumbs { display: flex; flex-wrap: wrap; gap: 6px; font-family: var(--font-mono); font-size: 18px; align-items: center; }
+.fsw-path .crumbs span { padding: 2px 10px; border-radius: 8px; border: 1.5px solid var(--line); }
+.fsw-path .crumbs span.done { border-color: var(--kern); background: var(--kern-bg); }
+.fsw-path .crumbs span.now { border-color: var(--disk); background: var(--disk-bg); }
+.dirlist { font-family: var(--font-mono); font-size: 13px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.dirlist div { display: grid; grid-template-columns: 5ch minmax(0, 1fr); gap: 10px; padding: 3px 10px; border-bottom: 1px solid var(--line); }
+.dirlist div:last-child { border-bottom: none; }
+.dirlist div.match { background: var(--ok-bg); color: var(--ok); font-weight: 600; }
+.dirlist .head { background: var(--sunken); color: var(--ink-3); font-family: var(--font-body); font-size: 12px; }
+.cache-box { border: 1px solid var(--line); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.cache-head { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; font-size: 14px; }
+.cache-head span { font-family: var(--font-mono); font-size: 13px; color: var(--ink-2); }
+.cache { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 4px; }
+.cache i { font-style: normal; font-family: var(--font-mono); font-size: 11.5px; text-align: center; padding: 6px 0; border-radius: 6px; border: 1px dashed var(--line); color: var(--ink-3); }
+.cache i.full { border-style: solid; border-color: var(--kern); color: var(--ink); background: var(--kern-bg); }
+.cache i.new { border-color: var(--disk); background: var(--disk-bg); }
+.cache i.hit { border-color: var(--ok); background: var(--ok-bg); }
+
+/* ---------- exec 与 shell ---------- */
+.shx-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 760px) { .shx-grid { grid-template-columns: minmax(0, 1fr); } }
+.shx-con { font-family: var(--font-vga); font-size: 21px; line-height: 1.15; background: var(--vga-bg); color: var(--vga-fg); border-radius: 10px; padding: 10px 12px; margin: 0; min-height: 15.5em; white-space: pre; overflow-x: auto; }
+.shx-con .cur { background: var(--vga-fg); color: var(--vga-bg); }
+.shx-side { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.shx-procs { display: flex; flex-direction: column; gap: 8px; }
+.proc { border: 2px solid var(--line); border-radius: 12px; padding: 10px 12px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px; align-items: center; transition: border-color .3s, opacity .3s; }
+.proc.on { border-color: var(--ink); }
+.proc.gone { opacity: .35; border-style: dashed; }
+.proc b { font-size: 15px; }
+.proc small { grid-column: 1 / -1; font-size: 13px; color: var(--ink-2); line-height: 1.5; }
+.stackmap { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; font-family: var(--font-mono); font-size: 12.5px; transition: opacity .35s; }
+.stackmap.off { opacity: .25; }
+.stackmap div { display: grid; grid-template-columns: 11ch minmax(0, 1fr); gap: 10px; padding: 4px 10px; border-bottom: 1px solid var(--line); }
+.stackmap div:last-child { border-bottom: none; }
+.stackmap .head { background: var(--sunken); color: var(--ink-3); font-family: var(--font-body); font-size: 12px; display: block; }
+.stackmap .str { background: var(--user-bg); }
+.stackmap .esp { color: var(--bad); font-weight: 600; }
+
 /* ---------- 验证 ---------- */
 .big3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
 .big3 div { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; display: flex; flex-direction: column; gap: 4px; }
@@ -357,20 +423,20 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
   <div class="hero-top">
     <span class="kicker">learning 分支 · 照着 Linux 0.11 从零写的 x86 内核</span>
     <h1 id="title">从上电到用户态</h1>
-    <p class="lede">按下电源后，要经过好几段代码接力，一个普通程序才能在受保护的环境里运行。屏幕第一行每多出一个字母，就说明又走通了一段。</p>
+    <p class="lede">按下电源后，要经过好几段代码接力，一个普通程序才能在受保护的环境里运行，最后从硬盘上装入一个 shell，等你敲命令。屏幕第一行每多出一个字母，就说明又走通了一段。</p>
   </div>
   <div class="hero-main">
     <div>
-      <div class="monitor"><pre class="vga" id="hero-vga" tabindex="0" aria-label="内核运行时的屏幕，点击后可以打字"></pre></div>
-      <div class="monitor-note"><span>在浏览器里重现的内核屏幕。点一下屏幕就能打字，和在 QEMU 里一样。</span><button type="button" id="hero-replay">重新开机</button></div>
+      <div class="monitor"><pre class="vga" id="hero-vga" tabindex="0" aria-label="内核运行时的屏幕，点击后可以在 shell 里敲命令"></pre></div>
+      <div class="monitor-note"><span>在浏览器里重现的内核屏幕。开机完成后点一下屏幕，就能在 shell 里敲命令：ls /bin、ps、cat /hello.txt、letter D &amp;、exit。</span><button type="button" id="hero-replay">重新开机</button></div>
     </div>
     <ol class="milestones" id="milestones" aria-label="第一行每个字母代表的里程碑"></ol>
   </div>
   <div class="stats">
-    <span><b data-fact="loc">2,254</b>行汇编与 C</span>
-    <span><b data-fact="kernelKB">16 KB</b>内核</span>
-    <span><b data-fact="commits">32</b>个提交</span>
-    <span><b data-fact="tests">37</b>项自动化测试</span>
+    <span><b data-fact="loc">4,437</b>行汇编与 C</span>
+    <span><b data-fact="kernelKB">24 KB</b>内核</span>
+    <span><b data-fact="commits">40</b>个提交</span>
+    <span><b data-fact="tests">44</b>项自动化测试</span>
   </div>
 </header>
 
@@ -564,8 +630,8 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
     <details class="more"><summary>展开细节</summary><ul>
       <li>页目录和页表各有 1024 项，每项 4 字节，一张表正好一页（4 KB）。一张页表管 4 MB，4 张页表一一对应地映射前 16 MB：虚拟地址等于物理地址，所以打开分页的那一刻代码照常运行。</li>
       <li>第 0 页故意不映射，空指针一碰就出错；<code>0xC0000000</code> 也映射到显存，同一块内存有了两个地址，第 0 行的 <code>V</code> 就是从这个地址写进去的。</li>
-      <li>只有用户程序的代码页和用户栈区里分配了的页打开了用户位，其中代码页只读。CPU 要求页目录项和页表项两层都允许才放行。内核在特权级 0 不受只读位限制（CR0.WP 为 0）。</li>
-      <li>缺页时内核先看两件事：是不是“页不存在”（错误码第 0 位为 0），地址在不在用户栈区 <code>0x40000000</code>～<code>0x403FFFFF</code>。都是就从 <code>get_free_page()</code> 拿一页清零的物理页填进页表，返回后 CPU 重新执行那条指令；页表本身也是第一次缺页时才分配的。Linux 0.11 的 <code>do_no_page()</code> 做同样的事。任务 B 结束时，这些页全部还给分配器。</li>
+      <li>只有用户程序的代码页和用户空间里分配了的页打开了用户位，其中代码页只读。CPU 要求页目录项和页表项两层都允许才放行。内核在特权级 0 不受只读位限制（CR0.WP 为 0）。</li>
+      <li>缺页时内核先看两件事：是不是“页不存在”（错误码第 0 位为 0），地址在不在用户空间 <code>0x40000000</code>～<code>0x403FFFFF</code>。都是就从 <code>get_free_page()</code> 拿一页清零的物理页填进页表，返回后 CPU 重新执行那条指令；页表本身也是第一次缺页时才分配的。Linux 0.11 的 <code>do_no_page()</code> 做同样的事。任务 B 结束时，这些页全部还给分配器。</li>
       <li>缺页时，CPU 把出错的地址放进 CR2；错误码的三位分别表示：页存在吗、是写吗、来自用户态吗。</li>
       <li>Linux 0.11 不靠页表的用户位隔离内核：它的页表把内核也标成了用户可访问，靠的是每个进程的段基址和界限。</li>
     </ul></details>
@@ -640,7 +706,7 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
       <text id="uk-b-sub" x="215" y="120" text-anchor="middle" class="m"></text>
       <rect class="box user" x="620" y="78" width="250" height="52" rx="10" style="stroke-dasharray: 4 4"/>
       <text x="745" y="101" text-anchor="middle">它能碰的只有：</text>
-      <text x="745" y="120" text-anchor="middle" class="m">代码页（只读）+ 用到的栈页</text>
+      <text x="745" y="120" text-anchor="middle" class="m">自己用户空间里分配了的页</text>
 
       <rect class="box kern" x="80" y="290" width="200" height="56" rx="10"/>
       <text x="180" y="314" text-anchor="middle" class="t">内核变量</text>
@@ -662,7 +728,7 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
     </svg></div>
     <div class="cap" id="uk-cap" aria-live="polite"></div>
     <div class="rules">
-      <div class="rule"><b>用到栈上还没分配的页</b><span>不算错：页在用户栈区里</span><span class="r ok">→ 缺页，内核补上一页，接着运行</span></div>
+      <div class="rule"><b>用到栈上还没分配的页</b><span>不算错：页在用户空间里</span><span class="r ok">→ 缺页，内核补上一页，接着运行</span></div>
       <div class="rule"><b>直接读写内核内存</b><span>页表里内核的页没有用户位</span><span class="r">→ #PF，任务被结束</span></div>
       <div class="rule"><b>改写自己的代码</b><span>用户代码页是只读的</span><span class="r">→ #PF，任务被结束</span></div>
       <div class="rule"><b>执行 cli、hlt、in、out</b><span>特权指令，EFLAGS 的 IOPL 为 0</span><span class="r">→ #GP，任务被结束</span></div>
@@ -677,17 +743,91 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
   </div>
 </section>
 
-<!-- ============================== 8 验证 ============================== -->
+<!-- ============================== 8 fork ============================== -->
 <section class="chapter" aria-labelledby="c8">
   <div class="chapter-head">
     <span class="chapter-no">08</span>
-    <h2 id="c8">验证：怎么知道它真的对</h2>
+    <h2 id="c8">进程：fork、写时复制、exit 与 waitpid</h2>
+    <p>init 调用 fork，复制出一个子进程。内核并不复制内存，只复制页表：父子的页表项指向同一批物理页，两边都改成只读，打上写时复制的记号。谁先写，谁就在缺页异常里得到自己的一份。子进程结束后先变成僵尸，等父进程用 waitpid 取走退出码，才彻底收走。</p>
+  </div>
+  <div class="stage" id="cow">
+    <div class="cow">
+      <div class="cow-side" id="cow-parent"></div>
+      <div class="cow-phys" id="cow-phys"></div>
+      <div class="cow-side" id="cow-child"></div>
+    </div>
+    <div class="cap" id="cow-cap" aria-live="polite"></div>
+    <div class="controls" data-stepper><button type="button" class="primary" data-play>播放</button><button type="button" data-prev>上一步</button><div class="dots" data-dots></div><button type="button" data-next>下一步</button></div>
+    <details class="more"><summary>展开细节</summary><ul>
+      <li>子进程的 TSS 直接用父进程进入系统调用时栈上保存的寄存器：EIP 是 <code>int 0x80</code> 的下一条指令，只把 EAX 改成 0。子进程第一次被调度时，硬件任务切换直接把它放回用户态，好像 fork 刚返回 0。Linux 0.11 的 <code>copy_process()</code> 也是这样。</li>
+      <li>写时复制的记号是页表项的第 9 位：CPU 不用这一位，留给操作系统。本来就只读的页（程序的代码）不打记号，写它仍是错误，程序会被结束。</li>
+      <li>内核替用户写内存时（例如 waitpid 把退出码写回父进程的变量）也可能碰上共享的只读页。内核打开了 CR0 的 WP 位，特权级 0 写只读页同样会缺页，走同一条复制的路。386 没有这一位，所以 Linux 0.11 要先调用 <code>verify_area()</code>。</li>
+      <li>任务表有 16 个槽。去掉任务 0、A 和 init，测试里正好能 fork 13 次，第 14 次返回 -1。</li>
+    </ul></details>
+  </div>
+</section>
+
+<!-- ============================== 9 文件系统 ============================== -->
+<section class="chapter" aria-labelledby="c9">
+  <div class="chapter-head">
+    <span class="chapter-no">09</span>
+    <h2 id="c9">硬盘与文件系统：按路径找到一个文件</h2>
+    <p>硬盘上是 Linux 0.11 用的 Minix 文件系统：每块 1 KB，开头是超级块和两张位图，接着是 i 节点表，后面是数据块。目录也是文件，内容是一条条“名字 → i 节点号”。打开 <code>/etc/issue</code>，就是从根目录起一段段查下去。读过的块留在缓冲区缓存里，再用到就不碰硬盘。</p>
+  </div>
+  <div class="stage" id="fsw">
+    <div class="scroll-x"><div class="diskmap" id="diskmap"></div></div>
+    <div class="fsw-grid">
+      <div class="fsw-path" id="fsw-path"></div>
+      <div class="cache-box"><div class="cache-head"><b>缓冲区缓存</b><span id="cache-stat"></span></div><div class="cache" id="cache"></div></div>
+    </div>
+    <div class="cap" id="fsw-cap" aria-live="polite"></div>
+    <div class="controls" data-stepper><button type="button" class="primary" data-play>播放</button><button type="button" data-prev>上一步</button><div class="dots" data-dots></div><button type="button" data-next>下一步</button></div>
+    <details class="more"><summary>展开细节</summary><ul>
+      <li>每次未命中都要读两个扇区：<code>hd_read()</code> 写好 LBA，发 READ SECTORS 命令，然后睡在等待队列上；硬盘准备好数据后拉 IRQ14，中断处理函数用 <code>rep insw</code> 读走 256 个字，再叫醒它。CPU 正闲着的话马上切回去，不必等下一个定时器中断。</li>
+      <li>i 节点里有 9 个块号：前 7 个直接指向数据块；第 8 个指向一个间接块，里面是 512 个块号；第 9 个指向二级间接块。600 KB 的测试文件 <code>/big</code> 要用到二级间接块。</li>
+      <li>缓冲区缓存只有 16 个缓冲区。没有的块，就挑一个没人在用、最久没用过的缓冲区换掉。别的任务正在读同一块，就睡下等它读完。</li>
+      <li>打开的文件在文件表里占一项，记下 i 节点和读写位置，文件描述符指向它。fork 之后父子共用这一项，读写位置也共用。</li>
+    </ul></details>
+  </div>
+</section>
+
+<!-- ============================== 10 exec 与 shell ============================== -->
+<section class="chapter" aria-labelledby="c10">
+  <div class="chapter-head">
+    <span class="chapter-no">10</span>
+    <h2 id="c10">exec 与 shell：敲下 ls /bin 之后</h2>
+    <p>shell 是硬盘上的一个普通程序。它读一行命令，fork 出子进程，子进程用 exec 把自己换成硬盘上的 <code>/bin/ls</code>：内核建一份新的地址空间，把程序装进去，在栈顶摆好参数，系统调用一返回，CPU 就从新程序的第一条指令开始执行。</p>
+  </div>
+  <div class="stage" id="shx">
+    <div class="shx-grid">
+      <pre class="shx-con" id="shx-con" aria-label="控制台窗口"></pre>
+      <div class="shx-side">
+        <div class="shx-procs" id="shx-procs"></div>
+        <div class="stackmap" id="shx-stack"></div>
+      </div>
+    </div>
+    <div class="cap" id="shx-cap" aria-live="polite"></div>
+    <div class="controls" data-stepper><button type="button" class="primary" data-play>播放</button><button type="button" data-prev>上一步</button><div class="dots" data-dots></div><button type="button" data-next>下一步</button></div>
+    <details class="more"><summary>展开细节</summary><ul>
+      <li>终端按“规范模式”工作：敲的字符先放进当前这一行，内核回显；退格只删自己敲的；回车后这一行才交给 <code>read(0)</code>。shell 在等待队列上睡着等，ps 里它的状态是 B。</li>
+      <li>程序找到终端靠设备文件：<code>/dev/tty0</code> 是控制台，<code>/dev/tty1</code> 是第 6 行。i 节点的类型是字符设备，第一个块号存着设备号 4,0 或 4,1，与 Linux 0.11 相同。init 把 <code>/dev/tty0</code> 打开三次，得到 0、1、2 号描述符，再 exec shell。</li>
+      <li>用户程序是 ELF 文件，链接在用户空间的底部 0x40000000：代码页只读，数据页可写，<code>.bss</code> 是 exec 分出来的清零的页。中途任何一步失败，exec 就收回新的页目录、返回 -1，原来的程序不受影响。</li>
+      <li>Linux 0.11 读的是 a.out 格式，程序的页在缺页时才从文件里读，同一个程序的进程可以共用代码页。</li>
+    </ul></details>
+  </div>
+</section>
+
+<!-- ============================== 11 验证 ============================== -->
+<section class="chapter" aria-labelledby="c11">
+  <div class="chapter-head">
+    <span class="chapter-no">11</span>
+    <h2 id="c11">验证：怎么知道它真的对</h2>
     <p><code>make test</code> 在后台启动没有窗口的 QEMU，通过它的监视器读显存、读寄存器、翻译地址、模拟按键，逐项核对。需要故意出错的场景，就另外编一个自检内核。</p>
   </div>
   <div class="big3">
-    <div><b data-fact="tests">37</b><span>项测试，一条 <code>make test</code> 全部跑完</span></div>
-    <div><b data-fact="selftests">22</b><span>个自检内核：除零、越权、坏指针、重复释放、栈用掉 5 页……</span></div>
-    <div><b data-fact="commits">32</b><span>个提交：每加一个机制，测试通过后单独提交</span></div>
+    <div><b data-fact="tests">44</b><span>项测试，一条 <code>make test</code> 全部跑完</span></div>
+    <div><b data-fact="selftests">27</b><span>个自检内核：除零、越权、坏指针、重复释放、fork、waitpid、读文件、exec……</span></div>
+    <div><b data-fact="commits">40</b><span>个提交：每加一个机制，测试通过后单独提交</span></div>
   </div>
   <p style="color: var(--ink-2); max-width: 70ch">新加的测试都先在临时副本里把代码故意改坏，确认测试真的会失败，再改回来。</p>
   <h3 style="margin-top: 8px">代码审查发现的问题（节选）</h3>
@@ -700,17 +840,17 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
   <details><summary>全部提交</summary><ol class="commits" id="commits"></ol></details>
 </section>
 
-<footer>源码在仓库的 <code>learning</code> 分支，<code>main</code> 分支是 Linux 0.11 原始源码。页面里的地址取自提交 <span class="mono" data-fact="head">82410b6</span> 构建出的 kernel.elf。在仓库里运行 <code>make run</code> 可以在 QEMU 中看到真实的屏幕。</footer>
+<footer>源码在仓库的 <code>learning</code> 分支，<code>main</code> 分支是 Linux 0.11 原始源码。页面里的地址取自提交 <span class="mono" data-fact="head">5fd688d</span> 构建出的 kernel.elf。在仓库里运行 <code>make run</code> 可以在 QEMU 中看到真实的屏幕。</footer>
 </main>
 
 <script>
 /* ===================== 构建事实：来自 objdump -h / -t build/kernel.elf ===================== */
 const FACTS = {
-  head: "82410b6", loc: "2,254", kernelKB: "16 KB", kernelSectors: 32, commits: 32, tests: 37,
-  text: 0x10000, rodata: 0x11c48, data: 0x1207c, user: 0x13000, userData: 0x14000, userEnd: 0x14000,
-  bss: 0x14000, bssEnd: 0x1f090, stackTop: 0x15000, gdt: 0x15010, idt: 0x15060,
-  identity: 0x16000, pageDir: 0x1a000, alias: 0x1b000, ticks: 0x1cf08, tss: 0x1cf18,
-  taskStacks: 0x1d070, userMain: 0x13000, kmain: 0x101c0, selftests: 22,
+  head: "5fd688d", loc: "4,437", kernelKB: "24 KB", kernelSectors: 48, commits: 40, tests: 44,
+  text: 0x10000, rodata: 0x14998, data: 0x14ee0, user: 0x15000, userData: 0x16000, userEnd: 0x16000,
+  bss: 0x16000, bssEnd: 0x243d8, stackTop: 0x17000, gdt: 0x17010, idt: 0x170e0,
+  identity: 0x18000, pageDir: 0x1c000, alias: 0x1d000, ticks: 0x238a8, tss: 0x23d34,
+  userMain: 0x15000, kmain: 0x101c0, selftests: 27,
 };
 const $ = id => document.getElementById(id);
 const hex = (n, w = 5) => "0x" + (n >>> 0).toString(16).toUpperCase().padStart(w, "0");
@@ -790,9 +930,11 @@ const MILESTONES = [
   ["C", "C 语言代码跑起来了", "kmain()"],
   ["V", "分页打开，换个地址也能写显存", "paging_init()"],
   ["I", "中断打开，定时器和键盘开始工作", "sti"],
-  ["T", "两个任务开始轮流运行", "sched_start()"],
+  ["T", "任务开始轮流运行", "sched_start()"],
   ["U", "用户程序第一次请内核帮忙", "int 0x80"],
   ["F", "第一次缺页被内核补上：用户栈用到才分配", "handle_page_fault()"],
+  ["W", "fork 之后第一次写时复制", "copy_on_write()"],
+  ["E", "第一次从硬盘装入程序", "do_exec()"],
 ];
 (() => {
   const list = $("milestones");
@@ -800,35 +942,149 @@ const MILESTONES = [
   const items = [...list.children];
   const scr = new Screen($("hero-vga"));
   const OUT = 7, W = 73, TOP = 8, BOTTOM = 18;
+  const BANNER = "shell on hda: try help, ls /bin, cat /hello.txt, ps";
+  const MEM = (free, faults, cow) => `memory: ${free}/3840 pages free  page faults: ${faults}  copy-on-write: ${cow}`;
   let st, timers = [], raf = 0;
   const mark = n => items.forEach((li, i) => { li.classList.toggle("done", i < n); li.classList.toggle("now", i === n - 1); });
+
+  /* 开机的每一步：在屏幕上写什么，点亮几个里程碑。数字取自真实的启动过程。 */
   const steps = [
-    s => { s.clear(); s.write(0, 0, "A"); },
-    s => s.write(0, 1, "B"),
-    s => s.write(0, 2, "P"),
-    s => s.write(0, 3, "K"),
-    s => { s.write(0, 4, "C"); s.write(2, 0, "Hello from kmain() in C!"); },
-    s => { s.write(0, 5, "V"); s.write(5, 0, "paging: on, 0xC0000000 -> 0xB8000"); s.write(3, 0, "memory: 3840/3840 pages free  page faults: 0"); },
-    s => { s.write(4, 0, "ticks: 0"); s.write(6, 0, "tasks: "); s.write(8, 0, "keyboard: "); s.write(0, 6, "I"); st.cur = [8, 10]; },
-    s => { s.write(0, 7, "T"); st.running = true; st.last = performance.now(); },
+    [1, s => { s.clear(); s.write(0, 0, "A"); }],
+    [2, s => s.write(0, 1, "B")],
+    [3, s => s.write(0, 2, "P")],
+    [4, s => s.write(0, 3, "K")],
+    [5, s => { s.write(0, 4, "C"); s.write(2, 0, "Hello from kmain() in C!"); }],
+    [6, s => { s.write(0, 5, "V"); s.write(5, 0, "paging: on, 0xC0000000 -> 0xB8000"); s.write(3, 0, MEM(3840, 0, 0)); }],
+    [7, s => { s.write(1, 0, "disk: 8192 sectors (4096 KB), QEMU HARDDISK"); s.write(4, 0, "ticks: 0"); s.write(6, 0, "tasks: "); s.write(0, 6, "I"); }],
+    [8, s => { s.write(0, 7, "T"); st.running = true; st.last = performance.now(); st.letters = "AB"; }],
+    [10, s => { s.write(0, 9, "F"); s.write(0, 8, "U"); s.write(3, 0, MEM(3835, 1, 0)); }],
+    [11, s => { s.write(0, 10, "W"); s.write(3, 0, MEM(3831, 1, 2)); }],
+    [12, s => { s.write(0, 11, "E"); s.write(1, 46, "minix fs: 128 inodes, 4096 blocks"); s.write(3, 0, MEM(3830, 1, 2)); st.letters = "ABC"; }],
+    [12, s => { s.write(3, 0, MEM(3825, 1, 3)); startShell(); }],
   ];
+
+  /* ---------- 模拟的 shell：命令和输出照着真机上 /bin 里的程序 ---------- */
+  const DIRS = {
+    "/": [["d", 112, 1, "."], ["d", 112, 1, ".."], ["-", 614400, 2, "big"], ["d", 160, 3, "bin"], ["d", 64, 12, "dev"], ["d", 48, 15, "etc"], ["-", 41, 17, "hello.txt"]],
+    "/bin": [["d", 160, 3, "."], ["d", 112, 1, ".."], ["-", 5140, 4, "cat"], ["-", 8820, 5, "check"], ["-", 4964, 6, "echo"], ["-", 4968, 7, "hello"], ["-", 4968, 8, "letter"], ["-", 5520, 9, "ls"], ["-", 5144, 10, "ps"], ["-", 5792, 11, "sh"]],
+    "/dev": [["d", 64, 12, "."], ["d", 112, 1, ".."], ["c", 0, 13, "tty0"], ["c", 0, 14, "tty1"]],
+    "/etc": [["d", 48, 15, "."], ["d", 112, 1, ".."], ["-", 27, 16, "issue"]],
+  };
+  const TEXT = { "/hello.txt": "Hello from the Minix file system on hda!", "/etc/issue": "Linux 0.11 learning kernel" };
+  const PROGS = ["cat", "check", "echo", "hello", "letter", "ls", "ps", "sh"];
+  const norm = p => (p.length > 1 && p.endsWith("/") ? p.slice(0, -1) : p);
+
+  function freePid() { for (let p = 1; p < 16; p++) if (!st.tasks.some(t => t.pid === p)) return p; return -1; }
+  function out(text) {
+    for (const ch of text) { scr.put(st.cur[0], st.cur[1], ch); if (st.cur[1] + 1 >= COLS) newline(); else st.cur = [st.cur[0], st.cur[1] + 1]; }
+  }
+  const println = text => { out(text); newline(); };
+  function prompt() { out("$ "); st.line = ""; st.ready = true; }
+  function startShell() {
+    const sh = { pid: freePid(), ppid: 2, state: "W", name: "sh" };
+    st.tasks.push(sh);
+    st.shells.push(sh);
+    sh.state = "B";
+    st.cur = st.cur || [TOP, 0];
+    println(BANNER);
+    prompt();
+  }
+  function message(text) { scr.write(7, 0, text.padEnd(COLS)); }
+
+  /* 运行一条命令，返回 [输出的行, 退出码]；null 表示命令不会结束（前台的 letter） */
+  function runProgram(name, args) {
+    if (name === "ls") {
+      const dir = norm(args[0] || "/");
+      if (!DIRS[dir]) return [[`ls: ${args[0]}: not a directory`], 1];
+      return [DIRS[dir].map(([t, size, ino, n]) => t + String(size).padStart(8) + String(ino).padStart(4) + "  " + n), 0];
+    }
+    if (name === "cat") {
+      const lines = []; let code = 0;
+      for (const a of args) {
+        if (TEXT[a]) lines.push(TEXT[a]);
+        else if (a === "/big") lines.push("(/big is 600 KB of binary test data; try it in QEMU)");
+        else { lines.push(`cat: ${a}: cannot open`); code = 1; }
+      }
+      return [lines, code];
+    }
+    if (name === "echo") return [[args.join(" ")], 0];
+    if (name === "hello") return [["hello" + args.map(a => " " + a).join("")], 0];
+    if (name === "check") return args[0] === "crash" ? [[], "crash"] : [["check ok"], 7];
+    if (name === "ps") {
+      const me = { pid: freePid(), ppid: st.shells.at(-1).pid, state: "R", name: "ps" };
+      const all = [{ pid: 0, ppid: 0, state: "R", name: "idle" }, ...st.tasks, me].sort((a, b) => a.pid - b.pid);
+      return [["PID PPID S NAME", ...all.map(t => String(t.pid).padStart(2) + "   " + String(t.ppid).padStart(2) + " " + t.state + " " + t.name)], 0];
+    }
+    return null;
+  }
+
+  function execute(line) {
+    let args = line.split(" ").filter(Boolean);
+    if (!args.length) return prompt();
+    const background = args.at(-1) === "&";
+    if (background) args.pop();
+    if (!args.length) return prompt();
+    const sh = st.shells.at(-1);
+    let name = args[0];
+    if (name === "exit") {
+      st.shells.pop();
+      st.tasks = st.tasks.filter(t => t !== sh);
+      message(`task ${sh.pid} exited with code 0`);
+      if (st.shells.length) { st.shells.at(-1).state = "B"; return prompt(); }
+      return startShell();                    /* init 发现 shell 退出了，再拉起一个 */
+    }
+    if (name === "help") { println("commands: ls [dir], cat file..., echo text, ps, hello, check, letter X &, exit"); return prompt(); }
+    const path = name.includes("/") ? name : "/bin/" + name;
+    const prog = path.startsWith("/bin/") ? path.slice(5) : "";
+    const pid = freePid();
+    if (!PROGS.includes(prog)) { println(`sh: ${name}: not found`); message(`task ${pid} exited with code 127`); return prompt(); }
+    if (prog === "sh") {
+      sh.state = "W";
+      const child = { pid, ppid: sh.pid, state: "B", name: "sh" };
+      st.tasks.push(child); st.shells.push(child);
+      println(BANNER);
+      return prompt();
+    }
+    if (prog === "letter") {
+      const letter = (args[1] || "?")[0];
+      st.tasks.push({ pid, ppid: sh.pid, state: "S", name: "letter" });
+      st.letters += letter;
+      if (background) { println(`[${pid}]`); return prompt(); }
+      sh.state = "W";                          /* 前台的 letter 永远不结束，shell 一直等它，就像真机上一样 */
+      st.ready = false;
+      return;
+    }
+    if (background) println(`[${pid}]`);
+    if (!background) sh.state = "W";        /* 前台命令运行时，shell 在 waitpid 里等它 */
+    const [lines, code] = runProgram(prog, args.slice(1));
+    sh.state = "B";                          /* 回到 read(0) 里等下一行 */
+    lines.forEach(println);
+    if (code === "crash") {
+      message(`task ${pid} killed by #PF page fault: EIP=0x400000DA error=0x00000007`);
+      if (!background) println("sh: check killed by exception 14");
+    } else {
+      message(`task ${pid} exited with code ${code}`);
+    }
+    prompt();
+  }
+
   function reset() {
     timers.forEach(clearTimeout); timers = []; cancelAnimationFrame(raf);
-    st = { ticks: 0, running: false, acc: 0, last: 0, cur: null, len: 0, window: 0, wake: [0, 0, 0], pos: 0, u: false };
+    st = { ticks: 0, running: false, acc: 0, last: 0, cur: null, window: 0, pos: 0, wake: 0, letters: "",
+           tasks: [{ pid: 1, ppid: 0, state: "S", name: "task_a" }, { pid: 2, ppid: 0, state: "S", name: "init" }, { pid: 3, ppid: 2, state: "S", name: "letter" }],
+           shells: [], line: "", ready: false };
     scr.clear(); mark(0); draw();
-    if (reduce) { steps.forEach(f => f(scr)); for (let i = 0; i < 300; i++) tick(); st.last = performance.now(); mark(10); draw(); }
-    else steps.forEach((f, i) => timers.push(setTimeout(() => { f(scr); mark(i + 1); draw(); }, 400 + i * 700)));
+    if (reduce) { steps.forEach(([, f]) => f(scr)); for (let i = 0; i < 300; i++) tick(); st.last = performance.now(); mark(12); draw(); }
+    else steps.forEach(([n, f], i) => timers.push(setTimeout(() => { f(scr); mark(n); draw(); }, 400 + i * 650)));
     raf = requestAnimationFrame(loop);
   }
-  /* 和 sched.c 一样：任务写一个字母就睡 2 个 tick，把 CPU 让给对方；两个都睡着时 CPU 空闲。 */
+  /* 和真机一样：每个写字母的任务写一个就睡 2 个 tick，CPU 几乎一直空闲。 */
   function tick() {
     st.ticks++; scr.write(4, 7, String(st.ticks));
     if (++st.window === 100) { scr.write(4, 20, "idle: 100%"); st.window = 0; }
-    for (const t of [1, 2]) if (st.wake[t] <= st.ticks) {
-      scr.put(6, OUT + st.pos, t === 1 ? "A" : "B"); st.pos = (st.pos + 1) % W; st.wake[t] = st.ticks + 2;
-      if (t === 2 && !st.u) {           /* 任务 B 第一条指令就压栈：先缺页（F），再做第一次系统调用（U） */
-        st.u = true; scr.write(0, 9, "F"); scr.write(3, 0, "memory: 3838/3840 pages free  page faults: 1"); scr.write(0, 8, "U"); mark(10);
-      }
+    if (st.ticks >= st.wake && st.letters) {
+      for (const ch of st.letters) { scr.put(6, OUT + st.pos, ch); st.pos = (st.pos + 1) % W; }
+      st.wake = st.ticks + 2;
     }
   }
   function loop(now) {
@@ -849,15 +1105,16 @@ const MILESTONES = [
       st.cur = [BOTTOM, 0];
     }
   }
+  /* 终端：回显、退格只删自己敲的字符，回车把这一行交给 shell */
   $("hero-vga").addEventListener("keydown", e => {
-    if (!st.cur || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (!st.ready || e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.key === "Backspace") {
       e.preventDefault();
-      if (st.len > 0) { st.len--; st.cur = st.cur[1] > 0 ? [st.cur[0], st.cur[1] - 1] : [st.cur[0] - 1, COLS - 1]; scr.put(st.cur[0], st.cur[1], " "); }
-    } else if (e.key === "Enter") { e.preventDefault(); newline(); st.len = 0; }
-    else if (e.key.length === 1 && e.key >= " " && e.key <= "~") {
-      e.preventDefault(); scr.put(st.cur[0], st.cur[1], e.key); st.len++;
-      if (st.cur[1] + 1 >= COLS) newline(); else st.cur = [st.cur[0], st.cur[1] + 1];
+      if (st.line.length > 0) { st.line = st.line.slice(0, -1); st.cur = st.cur[1] > 0 ? [st.cur[0], st.cur[1] - 1] : [st.cur[0] - 1, COLS - 1]; scr.put(st.cur[0], st.cur[1], " "); }
+    } else if (e.key === "Enter") {
+      e.preventDefault(); newline(); st.ready = false; execute(st.line.trim());
+    } else if (e.key.length === 1 && e.key >= " " && e.key <= "~" && st.line.length < 127) {
+      e.preventDefault(); st.line += e.key; out(e.key);
     } else return;
     draw();
   });
@@ -932,12 +1189,13 @@ const MILESTONES = [
     ["mem_init()", "1 MB～16 MB 的 3840 个物理页交给分配器，第 3 行显示还剩几页", "ABPKCV"],
     ["pic_init() · keyboard_init()", "把外设中断挪到 0x20 以后；读光键盘缓冲区", "ABPKCV"],
     ["timer_init(100)", "8253 每秒发 100 次中断", "ABPKCV"],
-    ["sched_init()", "填好任务 0、A、B 的寄存器快照（TSS）", "ABPKCV"],
+    ["sched_init()", "任务表：任务 0 是 kmain 自己；分配任务 A、init 的内核栈，给 init 建页目录，填好 TSS", "ABPKCV"],
+    ["hd_init()", "用 IDENTIFY 命令问出硬盘的大小，第 1 行显示；打开 IRQ14", "ABPKCV"],
     ["sti", "打开中断：从这一刻起，定时器和键盘可以随时打断 CPU", "ABPKCVI"],
-    ["sched_start()", "打开调度开关，写出 T。下一个 tick 起任务 A、B 轮流运行；任务 B 一开始就缺页（F），接着第一次系统调用（U）", "ABPKCVITUF"],
+    ["sched_start()", "打开调度开关，写出 T。init 一开始就缺页（F），第一次系统调用（U），fork 后写时复制（W），子进程 exec 硬盘上的 /bin/letter（E），再拉起 shell", "ABPKCVITUFWE"],
   ];
   const box = $("pipeline");
-  box.innerHTML = P.map(([f, d, row]) => `<div class="pipe"><i class="dot"></i><b>${f}</b><span>${d}</span><span class="mini-vga">${row.padEnd(10, " ")}</span></div>`).join("");
+  box.innerHTML = P.map(([f, d, row]) => `<div class="pipe"><i class="dot"></i><b>${f}</b><span>${d}</span><span class="mini-vga">${row.padEnd(12, " ")}</span></div>`).join("");
   const rows = [...box.children];
   stepper($("init"), P.length, i => rows.forEach((r, k) => { r.classList.toggle("done", k < i); r.classList.toggle("now", k === i); }), 1700);
 })();
@@ -1062,11 +1320,11 @@ const MILESTONES = [
   const userFirst = FACTS.user >>> 12, userDataFirst = FACTS.userData >>> 12, userEnd = FACTS.userEnd >>> 12;
   /*
    * 与 paging.c 一致：前 4 个页目录项可写且带用户位，第 768 项（别名）不带用户位；
-   * 第 256 项是用户栈区，页表在第一次缺页时分到 0xFFF000，此刻只有栈顶那一页（0xFFE000）。
+   * 第 256 项是用户空间，页表在第一次缺页时分到 0xFFF000，此刻只有栈顶那一页（0xFFE000）。
    */
   function pde(d) {
     if (d < 4) return { p: 1, w: 1, u: 1, name: `页表 ${d}`, note: "前 16 MB 一一对应" };
-    if (d === 256) return { p: 1, w: 1, u: 1, name: "页表 0x00FFF000", note: "用户栈区：第一次缺页时才分配" };
+    if (d === 256) return { p: 1, w: 1, u: 1, name: "用户空间的页表", note: "每个用户任务一张，第一次缺页时才分配" };
     if (d === 768) return { p: 1, w: 1, u: 0, name: "别名页表", note: "只映射了显存那一页" };
     return { p: 0 };
   }
@@ -1078,7 +1336,7 @@ const MILESTONES = [
       return { p: 1, w: isUser && page < userDataFirst ? 0 : 1, u: isUser ? 1 : 0, frame: page * 4096 };
     }
     if (d === 768) return t === 0 ? { p: 1, w: 1, u: 0, frame: 0xB8000 } : { p: 0, why: "别名只映射了一页" };
-    if (d === 256) return t === 1023 ? { p: 1, w: 1, u: 1, frame: 0xFFE000 } : { p: 0, demand: true, why: "用户栈区里这一页还没用到" };
+    if (d === 256) return t === 1023 ? { p: 1, w: 1, u: 1, frame: 0xFFE000 } : { p: 0, demand: true, why: "用户空间里这一页还没用到" };
     return { p: 0 };
   }
   const flag = (n, v) => `<span class="flag ${v ? "y" : "n"}">${n}=${v}</span>`;
@@ -1109,7 +1367,7 @@ const MILESTONES = [
     const v = $("verdict");
     if (fail && fail.demand) {
       v.className = "verdict fix";
-      v.innerHTML = `<b>↻ 缺页，内核当场补上</b><span>${fail.why}。CR2 = <code>${hex8(va)}</code>，错误码 ${fail.err}（页不存在、${fail.err & 2 ? "写" : "读"}、${fail.err & 4 ? "来自用户态" : "来自内核"}）。地址在用户栈区，<code>handle_page_fault()</code> 分一页清零的物理页填进这一项，返回后 CPU 重新执行这条指令，这次就能访问了。</span>`;
+      v.innerHTML = `<b>↻ 缺页，内核当场补上</b><span>${fail.why}。CR2 = <code>${hex8(va)}</code>，错误码 ${fail.err}（页不存在、${fail.err & 2 ? "写" : "读"}、${fail.err & 4 ? "来自用户态" : "来自内核"}）。地址在用户空间，<code>handle_page_fault()</code> 分一页清零的物理页填进这一项，返回后 CPU 重新执行这条指令，这次就能访问了。</span>`;
     } else if (fail) {
       v.className = "verdict bad";
       v.innerHTML = `<b>✗ 缺页异常 #PF</b><span>${fail.why}。CR2 = <code>${hex8(va)}</code>，错误码 ${fail.err}（${fail.err & 1 ? "页存在但没权限" : "页不存在"}、${fail.err & 2 ? "写" : "读"}、${fail.err & 4 ? "来自用户态" : "来自内核"}）。${user ? "内核只结束这个用户程序。" : "内核自己出错，显示红色异常面板并停机。"}</span>`;
@@ -1312,7 +1570,144 @@ const MILESTONES = [
   intro();
 })();
 
-/* ===================== 08 验证、附录 ===================== */
+/* ===================== 08 fork 与写时复制 ===================== */
+(() => {
+  const P1w = { page: "P1", w: 1, cow: 0 }, P1ro = { page: "P1", w: 0, cow: 1 }, P2w = { page: "P2", w: 1, cow: 0 };
+  const S = [
+    { t: "fork 之前", d: "init 的用户空间里只有栈顶一页，指向物理页 P1，可写。P1 的引用次数是 1。",
+      parent: { state: "运行", pte: P1w }, child: null, phys: [["P1", 1]] },
+    { t: "fork：复制页表，不复制页", d: "子进程有了自己的页目录和页表，页表项也指向 P1。两边都去掉可写位、打上写时复制的记号，P1 的引用次数变成 2。子进程的 TSS 用 init 进系统调用时的寄存器，只把 EAX 改成 0。", hot: ["parent", "child"],
+      parent: { state: "运行 · fork 返回 3", pte: P1ro }, child: { state: "能运行 · fork 将返回 0", pte: P1ro }, phys: [["P1", 2]] },
+    { t: "父进程先写栈：缺页，错误码 7", d: "页存在、写、用户态。handle_page_fault() 看到这一页打着写时复制的记号，引用次数是 2：分一页 P2，把 P1 的内容复制过去，换成 P2，可写；P1 的引用次数减成 1。改的是存在的页表项，要刷新 TLB。", hot: ["parent"],
+      parent: { state: "运行", pte: P2w }, child: { state: "能运行", pte: P1ro }, phys: [["P1", 1], ["P2", 1]] },
+    { t: "子进程写栈：只剩它在用 P1", d: "又是一次写时复制的缺页，但 P1 的引用次数已经是 1：不用复制，直接改回可写、去掉记号。fork 之后两个进程一共只多用了一页。", hot: ["child"],
+      parent: { state: "运行", pte: P2w }, child: { state: "运行", pte: P1w }, phys: [["P1", 1], ["P2", 1]] },
+    { t: "子进程 exit(5)：变成僵尸", d: "内核当场收回它的用户内存：P1、页表和页目录。内核栈和任务槽留着，退出码 5 记在任务表里。父进程正在 waitpid 里睡着，就把它叫醒。",
+      parent: { state: "在 waitpid 里等", pte: P2w }, child: { state: "僵尸 · 退出码 5", pte: null }, phys: [["P1", 0], ["P2", 1]] },
+    { t: "父进程 waitpid：取走退出码", d: "找到僵尸，把退出码写回父进程的变量（这一页要是还共享着，内核写它也会先复制），释放子进程的内核栈和任务槽，返回它的任务号 3。",
+      parent: { state: "运行 · waitpid 返回 3", pte: P2w }, child: null, phys: [["P1", 0], ["P2", 1]] },
+  ];
+  const flag = (n, v) => `<span class="flag ${v ? "y" : "n"}">${n}=${v}</span>`;
+  function side(id, title, s, hot) {
+    const el = $(id);
+    if (!s) {
+      el.className = "cow-side gone";
+      el.innerHTML = `<h3>${title}</h3><span class="note">还没有这个进程，或者已经被收走</span>`;
+      return;
+    }
+    el.className = "cow-side";
+    const pte = s.pte
+      ? `<div class="pte${hot ? " hot" : ""}"><span>栈顶 0x403FF000 → ${s.pte.page}</span><span class="flags">${flag("存在", 1)}${flag("可写", s.pte.w)}${s.pte.cow ? '<span class="flag c">写时复制</span>' : ""}</span></div>`
+      : `<div class="pte"><span>用户空间已经收回</span></div>`;
+    el.innerHTML = `<h3>${title} <span class="tag user">${s.state}</span></h3>${pte}`;
+  }
+  function run(i) {
+    const s = S[i], hot = s.hot || [];
+    side("cow-parent", "init（任务 2）", s.parent, hot.includes("parent"));
+    side("cow-child", "子进程（任务 3）", s.child, hot.includes("child"));
+    $("cow-phys").innerHTML = `<h3>物理页 <span class="note">mem_map 里的引用次数</span></h3>` +
+      s.phys.map(([p, r]) => `<div class="ppage${r === 0 ? " freed" : ""}"><b>${p}</b><span>${r === 0 ? "已释放" : "引用 " + r}</span></div>`).join("");
+    $("cow-cap").innerHTML = `<b>${s.t}</b><span>${s.d}</span>`;
+  }
+  stepper($("cow"), S.length, run, 3800);
+})();
+
+/* ===================== 09 文件系统 ===================== */
+(() => {
+  const BLOCKS = [["0", "0", "引导块", 1], ["1", "1", "超级块", 1], ["2", "2", "i 节点位图", 1], ["3", "3", "区块位图", 1],
+    ["4", "4–7", "i 节点表", 1], ["8", "8", "根目录 /", 0], ["big", "9–611", "/big 的数据", 0], ["612", "612", "/bin 目录", 0],
+    ["663", "663", "/etc 目录", 0], ["664", "664", "/etc/issue", 0]];
+  const ROOT = [[".", 1], ["..", 1], ["big", 2], ["bin", 3], ["dev", 12], ["etc", 15], ["hello.txt", 17]];
+  const ETC = [[".", 15], ["..", 1], ["issue", 16]];
+  const S = [
+    { t: "open(\"/etc/issue\")：先挂载", d: "第一次用到文件系统：读超级块（块 1），检查魔数 0x137F，记下 i 节点表和数据块从哪里开始。", blocks: ["1"], kind: "miss", crumb: -1 },
+    { t: "读根目录的 i 节点（1 号）", d: "i 节点表从块 4 开始，每块放 32 个 i 节点，1 号在块 4。缓存里没有：发命令读硬盘，任务睡下，IRQ14 来了被叫醒。", blocks: ["4"], kind: "miss", crumb: 0 },
+    { t: "在根目录里找 etc", d: "根目录的内容在块 8：一条条 16 字节的目录项。逐条比较名字，etc 对应 i 节点 15。", blocks: ["8"], kind: "miss", crumb: 1, dir: ["/", ROOT, "etc"] },
+    { t: "读 i 节点 15", d: "15 号也在块 4：缓存命中，不碰硬盘。它是目录，内容在块 663。", blocks: ["4"], kind: "hit", crumb: 1, dir: ["/", ROOT, "etc"] },
+    { t: "在 /etc 里找 issue", d: "读块 663，issue 对应 i 节点 16。", blocks: ["663"], kind: "miss", crumb: 2, dir: ["/etc", ETC, "issue"] },
+    { t: "读 i 节点 16：open 完成", d: "还在块 4，命中。文件表里占一项，记下 i 节点和读写位置 0；文件描述符表里最小的空位指向它，返回这个描述符。", blocks: ["4"], kind: "hit", crumb: 3, dir: ["/etc", ETC, "issue"] },
+    { t: "read(fd, buf, 100)", d: "文件只有 27 个字节，只读到 27 个。bmap() 算出文件的第 0 块就是 i 节点里的第一个块号 664，读进来，复制给用户：Linux 0.11 learning kernel。", blocks: ["664"], kind: "miss", crumb: 3, text: "Linux 0.11 learning kernel" },
+    { t: "再打开一次 /etc/issue", d: "块 4、8、663、664 都还在缓存里：一路命中，一次硬盘都不用读。缓冲区缓存就是为这个。", blocks: ["4", "8", "663", "664"], kind: "hit", crumb: 3, text: "Linux 0.11 learning kernel" },
+  ];
+  $("diskmap").innerHTML = BLOCKS.map(([k, n, label, meta]) => `<div class="dblk${meta ? " meta" : ""}" data-k="${k}"><b>块 ${n}</b><span>${label}</span></div>`).join("");
+  function run(i) {
+    const cache = [];
+    let hits = 0, misses = 0;
+    for (let k = 0; k <= i; k++) {
+      for (const b of S[k].blocks) {
+        if (cache.includes(b)) hits++;
+        else { cache.push(b); misses++; }
+      }
+    }
+    const s = S[i];
+    document.querySelectorAll("#diskmap .dblk").forEach(el => {
+      el.classList.toggle("hot", s.kind === "miss" && s.blocks.includes(el.dataset.k));
+      el.classList.toggle("hit", s.kind === "hit" && s.blocks.includes(el.dataset.k));
+    });
+    const parts = ["/", "etc", "issue"];
+    const crumbs = parts.map((p, k) => `<span class="${k < s.crumb ? "done" : k === s.crumb ? "now" : ""}">${p}</span>`).join("");
+    let body = "";
+    if (s.dir) {
+      const [name, entries, want] = s.dir;
+      body = `<div class="dirlist"><div class="head"><span>i 节点</span><span>${name} 的目录项</span></div>` +
+        entries.map(([n, ino]) => `<div class="${n === want ? "match" : ""}"><span>${ino}</span><span>${n}</span></div>`).join("") + `</div>`;
+    } else if (s.text) {
+      body = `<pre class="mini-vga" style="font-size: 20px">${s.text}</pre>`;
+    }
+    $("fsw-path").innerHTML = `<div class="crumbs">${crumbs}</div>${body}`;
+    $("cache").innerHTML = Array.from({ length: 16 }, (_, k) => {
+      const b = cache[k];
+      if (!b) return `<i>空</i>`;
+      const now = s.blocks.includes(b);
+      return `<i class="full${now ? (s.kind === "hit" ? " hit" : " new") : ""}">${b === "big" ? "…" : b}</i>`;
+    }).join("");
+    $("cache-stat").textContent = `命中 ${hits} · 未命中 ${misses}`;
+    $("fsw-cap").innerHTML = `<b>${s.t}</b><span>${s.d}</span>`;
+  }
+  stepper($("fsw"), S.length, run, 3400);
+})();
+
+/* ===================== 10 exec 与 shell ===================== */
+(() => {
+  const BANNER = "shell on hda: try help, ls /bin, cat /hello.txt, ps";
+  const LS = ["d     160   3  .", "d     112   1  ..", "-    5140   4  cat", "-    8820   5  check", "-    4964   6  echo",
+    "-    4968   7  hello", "-    4968   8  letter", "-    5520   9  ls", "-    5144  10  ps", "-    5792  11  sh"];
+  const STACK = [["0x403FFFFB", '"/bin\\0"', "str"], ["0x403FFFF8", '"ls\\0"', "str"], ["0x403FFFF4", "argv[2] = 0", ""],
+    ["0x403FFFF0", "argv[1] = 0x403FFFFB", ""], ["0x403FFFEC", "argv[0] = 0x403FFFF8", ""], ["0x403FFFE8", "argv = 0x403FFFEC", ""],
+    ["0x403FFFE4", "argc = 2", ""], ["0x403FFFE0", "返回地址 = 0   ← ESP", "esp"]];
+  const sh = (state, note) => ({ name: "sh（任务 4）", state, note });
+  const S = [
+    { t: "shell 打出提示符，读一行", d: "read(0) 读控制台。还没有敲完的行，shell 就睡在终端的等待队列上，CPU 去干别的。",
+      con: [BANNER, "$ |"], procs: [sh("B", "在 read(0) 里等一行"), null] },
+    { t: "敲下 ls /bin", d: "每个键产生一次键盘中断，字符先放进终端里正在编辑的这一行，同时回显在屏幕上。shell 还在睡：这一行还没敲完。",
+      con: [BANNER, "$ ls /bin|"], procs: [sh("B", "在 read(0) 里等一行"), null] },
+    { t: "回车", d: "终端把这一行连同换行符放进 ready 缓冲区，叫醒 shell。read 返回 8 个字节：ls /bin 和换行。",
+      con: [BANNER, "$ ls /bin", "|"], procs: [sh("R", "read 返回了 \"ls /bin\\n\""), null] },
+    { t: "fork", d: "shell 把这一行切成 ls 和 /bin，到 /bin 下找 ls，fork 出任务 5，再调用 waitpid 等它。子进程此刻还是 shell 的副本，页都和 shell 共用。",
+      con: [BANNER, "$ ls /bin", "|"], procs: [sh("W", "在 waitpid 里等任务 5"), { name: "任务 5", state: "R", note: "shell 的副本：fork 返回 0" }] },
+    { t: "子进程 exec /bin/ls", d: "读 ELF 头和程序头，建一份新的页目录：0x40000000 起放代码（只读），0x40001000 起放数据（可写），.bss 是清零的页。成功后才换上新页目录，收回 shell 副本的旧地址空间。",
+      con: [BANNER, "$ ls /bin", "|"], procs: [sh("W", "在 waitpid 里等任务 5"), { name: "ls（任务 5）", state: "R", note: "新的地址空间，程序从硬盘读进来" }] },
+    { t: "在栈顶摆好参数", d: "从栈顶往下：参数字符串、argv 数组、argv、argc，最下面是一个假的返回地址，于是入口 _start(argc, argv) 就是一个普通的 C 函数。系统调用返回时 EIP = 0x40000000，ESP = 0x403FFFE0。",
+      con: [BANNER, "$ ls /bin", "|"], procs: [sh("W", "在 waitpid 里等任务 5"), { name: "ls（任务 5）", state: "R", note: "EIP = 0x40000000（_start），ESP = 0x403FFFE0" }], stack: 1 },
+    { t: "ls 运行", d: "iret 落到 _start，它调用 main(2, argv)。ls 读目录 /bin，一条条目录项再问 stat，把类型、大小、i 节点号和名字打印出来。",
+      con: [BANNER, "$ ls /bin", ...LS, "|"], procs: [sh("W", "在 waitpid 里等任务 5"), { name: "ls（任务 5）", state: "R", note: "write(1, …) 写到控制台" }], stack: 1 },
+    { t: "ls 退出，shell 收走它", d: "ls 调用 exit(0)：用户内存收回，变成僵尸，叫醒在 waitpid 里睡着的 shell。shell 取走退出码，内核释放 ls 的内核栈和任务槽，第 7 行写出 task 5 exited with code 0，shell 打出新的提示符。",
+      con: [BANNER, "$ ls /bin", ...LS, "$ |"], procs: [sh("B", "又在 read(0) 里等下一行"), { name: "ls（任务 5）", state: "", note: "已经收走", gone: 1 }], stack: 1 },
+  ];
+  const STATE = { R: "能运行", B: "在等待队列上", W: "在 waitpid 里" };
+  function run(i) {
+    const s = S[i];
+    $("shx-con").innerHTML = s.con.map(l => l.replace("&", "&amp;").replace("<", "&lt;").replace("|", '<span class="cur"> </span>')).join("\n");
+    $("shx-procs").innerHTML = s.procs.filter(Boolean).map(p => `<div class="proc${p.gone ? " gone" : p.state === "R" ? " on" : ""}"><b>${p.name}</b>${p.state ? `<span class="tag user">${STATE[p.state]}</span>` : ""}<small>${p.note}</small></div>`).join("");
+    const st = $("shx-stack");
+    st.className = "stackmap" + (s.stack ? "" : " off");
+    st.innerHTML = `<div class="head">用户栈顶那一页（高地址在上）</div>` + STACK.map(([a, v, k]) => `<div class="${k}"><span>${a}</span><span>${v}</span></div>`).join("");
+    $("shx-cap").innerHTML = `<b>${s.t}</b><span>${s.d}</span>`;
+  }
+  stepper($("shx"), S.length, run, 3600);
+})();
+
+/* ===================== 11 验证、附录 ===================== */
 const FINDINGS = [
   ["所有任务结束时三重错误", "任务 0 的 TSS 没填 CR3。CPU 切换任务时只装入、不保存 CR3，切回任务 0 就把物理地址 0 当成了页目录。", "补上 tss[0].cr3", "自检内核让任务 A、B 都调用 exit，检查 CPU 回到任务 0 空转", "11b0148"],
   ["开机时按住键，键盘就永远失灵", "没人读的字节让 IRQ1 一直是高电平；8259 是边沿触发，再也等不到上升沿。", "开中断前先读光键盘缓冲区", "自检内核在初始化 8259 前等一次按键，之后检查回显", "c423036"],
@@ -1330,11 +1725,19 @@ const FILES = [
   ["kernel.c", "kmain()：按顺序初始化", "init/main.c"],
   ["gdt.c", "内核 GDT：内核段、TSS、用户段", "boot/head.s"],
   ["interrupt.c", "IDT、8259、分发、异常面板", "kernel/traps.c"],
-  ["paging.c", "页表、用户位、缺页时补页、收回用户页", "boot/head.s、mm/memory.c、mm/page.s"],
-  ["mem.c", "物理页分配：mem_map、get_free_page()、free_page()", "mm/memory.c"],
-  ["sched.c", "TSS、任务切换、睡眠与唤醒、结束任务", "kernel/sched.c、kernel/exit.c"],
+  ["paging.c", "页表、每个进程的页目录、缺页时补页、写时复制", "boot/head.s、mm/memory.c、mm/page.s"],
+  ["mem.c", "物理页分配和引用计数：mem_map、get_free_page()、free_page()", "mm/memory.c"],
+  ["hd.c", "ATA 硬盘驱动：IDENTIFY、按 LBA 读写扇区、IRQ14", "kernel/blk_drv/hd.c"],
+  ["buffer.c", "缓冲区缓存：bread()、brelse()", "fs/buffer.c"],
+  ["fs.c · fs.h", "Minix 文件系统（只读）：超级块、i 节点、bmap()、namei()", "fs/super.c、fs/inode.c、fs/namei.c"],
+  ["file.c", "打开的文件、文件表、设备文件", "fs/open.c、fs/read_write.c、fs/file_table.c"],
+  ["exec.c", "exec：读 ELF，建新的地址空间，摆好参数", "fs/exec.c"],
+  ["tty.c", "终端：一行的编辑、回显、退格", "kernel/chr_drv/tty_io.c"],
+  ["user/*.c", "硬盘上的程序：sh、ls、cat、echo、ps、letter……", "（Linux 0.11 的 /bin 下是用 libc 编的程序）"],
+  ["tools/mkfs.py", "把 rootfs/ 打包成 Minix 镜像，建设备文件", "Minix 的 mkfs"],
+  ["sched.c", "任务表、TSS、任务切换、睡眠与唤醒、等待队列、fork、exit、waitpid", "kernel/sched.c、kernel/fork.c、kernel/exit.c"],
   ["syscall.c / syscall.h", "系统调用表与调用方式", "kernel/system_call.s、include/unistd.h"],
-  ["user.c", "用户程序 user_main()", "（Linux 的用户程序在磁盘上）"],
+  ["user.c", "init：内核映像里的第一个用户程序，拉起 letter 和 shell", "init/main.c 中的 init()"],
   ["timer.c · keyboard.c · vga.c", "定时器、键盘、显存输出", "kernel/sched.c、kernel/chr_drv/"],
   ["tests/test_kernel.py", "make test", "无"],
 ];
@@ -1350,7 +1753,10 @@ const COMMITS = [
   ["c423036", "审查：开中断前清空键盘缓冲"], ["3bb073a", "审查：Caps Lock 重复、换行退格"], ["7a54d0e", "审查：NMI 不算用户的错"],
   ["83bb84f", "审查：读盘重试、关马达"], ["949996f", "审查：加固测试脚本"], ["ba981d2", "审查：改正 Linux 0.11 对照"], ["ed9baf1", "用户代码页只读"],
   ["0d76fa0", "介绍网页"], ["fbb3639", "重新设计介绍网页"], ["3ee724e", "睡眠时让出 CPU，空闲时回到任务 0"],
-  ["5db62ab", "网页：睡眠让出 CPU"], ["d537d47", "物理页分配"], ["82410b6", "用户栈用到才分配：缺页处理"],
+  ["5db62ab", "网页：睡眠让出 CPU"], ["d537d47", "物理页分配"], ["82410b6", "用户栈用到才分配：缺页处理"], ["824502d", "网页：物理页分配和缺页处理"],
+  ["88ec60f", "任务表，每个用户任务自己的页目录"], ["5edafb3", "fork 与写时复制"], ["bde959d", "僵尸进程与 waitpid"],
+  ["4b5c374", "ATA 硬盘驱动，等待队列"], ["63dab3b", "Minix 文件系统：open、read、close"], ["cfc4e0a", "exec：从硬盘装入 ELF 程序"],
+  ["5fd688d", "终端输入，硬盘上的 shell"],
 ];
 $("commits").innerHTML = COMMITS.map(([h, s]) => `<li><span class="h">${h}</span><span>${s}</span></li>`).join("");
 </script>
