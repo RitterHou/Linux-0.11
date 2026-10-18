@@ -24,6 +24,7 @@ QEMU 打开窗口后应看到：
 | 行 | 内容 | 来源 |
 | --- | --- | --- |
 | 0 | `ABPKCVITUFW` | `A` 第一阶段；`B` 第二阶段在实模式下调用 BIOS；`P` 第二阶段进入保护模式后写显存；`K` 内核汇编入口 `entry.asm`；`C` C 函数 `kmain()`；`V` 打开分页后通过虚拟地址 `0xC0000000` 写入；`I` 打开中断之后；`T` 开始任务调度之后；`U` 内核第一次收到来自用户态的系统调用；`F` 内核第一次补上缺页（任务 B 第一次用到栈）；`W` 第一次写时复制（fork 之后父进程先写栈） |
+| 1 | `disk: 2048 sectors (1024 KB), QEMU HARDDISK` | 硬盘驱动开机时用 IDENTIFY 命令问出的扇区数和型号，见下文“硬盘” |
 | 2 | `Hello from kmain() in C!` | `kmain()` |
 | 3 | `memory: 3831/3840 pages free  page faults: 1  copy-on-write: 2` | 1 MB～16 MB 之间还有几个 4 KB 的物理页空闲，缺页异常补上了几页，写时复制处理了几次，见下文“物理页分配”“缺页处理”和“fork 与写时复制” |
 | 4 | `ticks: N        idle: N%` | 定时器中断，每秒加 100；右边每秒更新一次上一秒 CPU 空闲的比例，两个任务都在睡眠时接近 100% |
@@ -54,6 +55,7 @@ make test
 - 启动后各行的输出；内存中内核的 `.text` 和 `.rodata` 与 `kernel.bin` 一致（`.data` 运行时会被改写，不比较）；处于保护模式，各段寄存器的值正确，GDTR 指向内核自己的 `gdt`。
 - 分页已打开，CR3 指向 `page_directory`；用监视器的 `gva2gpa` 逐个检查虚拟地址：`0xC0000000` 映射到 `0xB8000`，第 0 页和 16 MB 以上未映射，其余一一对应。
 - 定时器频率约为 100 Hz（允许 90～110）。
+- 硬盘（自检 `HD_RW`，由内核任务 A 执行）：第 1 行显示 2048 个扇区和型号；读回的第 0 和第 2047 扇区开头是 `tools/mkdisk.py` 写的 `SECTOR 00000000` 和 `SECTOR 00002047`；读第 2048 扇区返回 -1；写进第 100 扇区的内容能原样读回；连续读 64 个扇区不到 10 个 tick，读完后任务 A 照常运行。测试给 QEMU 的硬盘带 `snapshot=on`，写入只留在临时文件里。
 - 物理页分配（自检 `PAGE_ALLOC`）：开始时 3840 页空闲；从最高的 `0xFFF000` 往下分配；把一页写脏后释放再分配，拿回的是同一页且已清零；一共正好能分出 3840 页，分光后再分得到 0；全部还回去后又是 3840 页，第 3 行跟着更新。同一页释放两次（自检 `DOUBLE_FREE`）时显示 `Kernel panic: trying to free free page` 并停机。
 - 直接喂扫描码（自检 `KEYBOARD_EDGE`）：按住 Caps Lock 产生的重复按下码只切换一次；输入超出一行后，退格能跨过行首回到上一行行尾。
 - 初始化 8259 之前就有一次按键时，键盘之后仍能正常回显（自检 `EARLY_KEY` 在 `pic_init()` 之前等到键盘控制器里有一个字节，故意不读走）。
@@ -419,6 +421,31 @@ loader 进入保护模式时用的是写在 `loader.bin` 里的 GDT。进入内�
 
 选择子的低 3 位是 RPL 和 TI，所以第 n 项的选择子是 n × 8。两个段都是平坦段，保护模式下的偏移就等于物理地址，写 `[0xb8004]` 访问的就是物理地址 `0xB8004`，`jmp eax` 跳到的也就是物理地址 `0x10000`。C 代码中的指针值同样直接就是物理地址。
 
+## 硬盘
+
+`make` 用 `tools/mkdisk.py` 生成 1 MB 的 `build/hd.img`，`make run` 和测试把它接在 QEMU 的主 IDE 通道上（主盘）。镜像里第 k 个扇区以 `SECTOR %08d` 开头，方便检查读到的是不是对的扇区。
+
+`hd.c` 是 ATA 硬盘的驱动，用 PIO 方式一次读写一个 512 字节的扇区：
+
+```text
+任务调用 hd_read(lba, buf)                         硬盘
+  关中断；别人在用硬盘就 sleep_on(&hd_wait) 排队
+  写 0x1F6 = 0xE0 | LBA 高 4 位（主盘、LBA 寻址）
+  写 0x1F2 = 1，0x1F3～0x1F5 = LBA 低 24 位
+  写 0x1F7 = 0x20（READ SECTORS）  ──────────────▶  找扇区、读数据
+  sleep_on(&hd_wait)：睡下，CPU 去运行别的任务
+                                                   数据准备好，拉 IRQ14
+  IRQ14 → hd_handle()：读 0x1F7 状态（也是在应答中断），
+          rep insw 从 0x1F0 读 256 个字，wake_up(&hd_wait)
+  醒来：done 为 1，返回 0
+```
+
+- 写扇区时发 WRITE SECTORS（`0x30`），硬盘先要数据、不发中断：轮询到状态的 DRQ 位后用 `rep outsw` 写进 256 个字，再睡下等它写完后的 IRQ14。
+- `hd_init()` 在开机时用 IDENTIFY（`0xEC`）命令问出扇区数（第 60、61 个字）和型号（第 27～46 个字，每个字里两个字符的顺序是反的），显示在第 1 行，再打开 8259 上的 IRQ14。此时还是任务 0 在运行，不能睡，所以先在设备控制寄存器 `0x3F6` 里关掉硬盘的中断，用轮询等它回答。IRQ14 在从片上，打开它还要打开主片上接从片的 IRQ2。
+- 一次只处理一个请求：`busy` 为 1 时后来的任务排队，用完的任务 `wake_up` 叫醒它们。Linux 0.11 的 `kernel/blk_drv/` 有请求队列和电梯算法，用 CHS 寻址，`hd_out()` 发命令，`read_intr()` 和 `write_intr()` 在中断里搬数据，`end_request()` 唤醒等待的进程，结构与这里相同。
+- 等待队列 `struct wait_queue` 是一个位图，第 n 位为 1 表示任务 n 睡在上面。`sleep_on(q)` 把当前任务标成 `TASK_BLOCKED` 并切走，`wake_up(q)` 把睡在上面的任务都改回能运行，它们醒来后各自重新检查条件，所以总是写成 `while (条件不满足) sleep_on(&q);`。调用 `sleep_on` 之前要关中断：否则检查完条件、还没睡下时中断恰好来了，`wake_up` 就落空了。任务 0 不能睡，它睡了，没事做的时候 CPU 无处可去。Linux 0.11 的 `sleep_on()` 用每个睡眠者栈上的 `tmp` 变量把它们串成一条链，这里任务最多 16 个，用一个位图更简单。
+- 中断处理函数叫醒任务时，CPU 多半正停在任务 0 的 `hlt` 上。`interrupt_dispatch()` 处理完键盘、硬盘这些外设中断后调用 `sched_idle_wakeup()`：此刻是任务 0 在运行，就马上切到能运行的任务。不这样做的话，被叫醒的任务要等下一个定时器中断，每读一个扇区就要多等最多 10 毫秒，读 64 个扇区要半秒多。Linux 0.11 的任务 0 不停地调用 `pause()`，在 `schedule()` 里转圈，同样能马上切过去。
+
 ## 修改实验
 
 - 改 `boot.asm` 中的 `mov al, 'A'`：改变第一阶段输出。
@@ -467,7 +494,9 @@ loader 进入保护模式时用的是写在 `loader.bin` 里的 GDT。进入内�
 | `timer.c` | 8253 定时器 | `kernel/sched.c` 中的 `sched_init()`、`do_timer()` |
 | `syscall.c`、`syscall.h` | 系统调用：内核一侧的分发表，调用方使用的编号和包装函数 | `kernel/system_call.s`、`include/unistd.h` |
 | `user.c` | 用户程序：任务 B 在用户态运行的 `user_main()`，它 `fork` 出任务 3 | 无（Linux 0.11 的用户程序是磁盘上的可执行文件） |
-| `sched.c` | 任务表、TSS、硬件任务切换、睡眠与唤醒、fork、exit、waitpid | `kernel/sched.c` 中的 `schedule()`、`sleep_on()`，`kernel/fork.c` 中的 `copy_process()`，`kernel/exit.c` 中的 `do_exit()`、`sys_waitpid()`、`include/linux/sched.h` 中的 `switch_to`、`kernel/exit.c` 中的 `do_exit()` |
+| `sched.c` | 任务表、TSS、硬件任务切换、睡眠与唤醒、等待队列、fork、exit、waitpid | `kernel/sched.c` 中的 `schedule()`、`sleep_on()`，`kernel/fork.c` 中的 `copy_process()`，`kernel/exit.c` 中的 `do_exit()`、`sys_waitpid()`、`include/linux/sched.h` 中的 `switch_to`、`kernel/exit.c` 中的 `do_exit()` |
+| `hd.c` | ATA 硬盘驱动：IDENTIFY、按 LBA 读写扇区、IRQ14 | `kernel/blk_drv/hd.c`、`ll_rw_blk.c` |
+| `tools/mkdisk.py` | 生成测试用的硬盘镜像 | 无 |
 | `keyboard.c` | 键盘扫描码转字符并回显，支持 Shift 和 Caps Lock | `kernel/chr_drv/keyboard.S` |
 | `vga.c` | 直接写 VGA 显存、移动硬件光标、整数转字符串 | `kernel/chr_drv/console.c` |
 | `kernel.h`、`io.h` | 各模块共用的声明；端口读写 `inb`、`outb` | `include/asm/io.h` |

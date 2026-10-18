@@ -25,12 +25,12 @@ KERNEL_CFLAGS += -DSELFTEST=SELFTEST_$(SELFTEST)
 endif
 
 KERNEL_OBJS := $(addprefix $(BUILD)/, entry.o isr.o kernel.o vga.o gdt.o \
-	interrupt.o paging.o mem.o timer.o sched.o syscall.o keyboard.o selftest.o user.o)
+	interrupt.o paging.o mem.o hd.o timer.o sched.o syscall.o keyboard.o selftest.o user.o)
 KERNEL_HEADERS := kernel.h io.h syscall.h selftest.h
 
 .PHONY: all run test clean
 
-all: $(BUILD)/floppy.img $(BUILD)/kernel.elf
+all: $(BUILD)/floppy.img $(BUILD)/kernel.elf $(BUILD)/hd.img
 
 $(BUILD):
 	mkdir -p $@
@@ -64,10 +64,15 @@ $(BUILD)/floppy.img: $(BUILD)/boot.bin $(BUILD)/loader.bin $(BUILD)/kernel.bin M
 	dd if=$(BUILD)/loader.bin of=$@ bs=512 seek=1 conv=notrunc
 	dd if=$(BUILD)/kernel.bin of=$@ bs=512 seek=2 conv=notrunc
 
-run: $(BUILD)/floppy.img
+# 硬盘镜像：接在主 IDE 通道上。
+$(BUILD)/hd.img: tools/mkdisk.py | $(BUILD)
+	$(PYTHON) tools/mkdisk.py $@
+
+run: $(BUILD)/floppy.img $(BUILD)/hd.img
 	$(QEMU) -name "Two-stage boot - C kernel" \
 		-machine pc -accel tcg -m 16M \
 		-drive file=$<,format=raw,if=floppy,index=0 \
+		-drive file=$(BUILD)/hd.img,format=raw,if=ide,index=0 \
 		-boot order=a -display $(QEMU_DISPLAY) \
 		-nic none -serial none -monitor none -no-reboot $(QEMU_FLAGS)
 

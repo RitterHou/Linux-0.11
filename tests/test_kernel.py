@@ -40,10 +40,13 @@ class Machine:
         self.log_path = os.path.join(tmp, "qemu.log")
         self.sock = None
         # QEMU 的错误输出写进文件：用管道却不读，输出多了会把 QEMU 卡住
+        # 同一目录下的 hd.img 接在主 IDE 通道上；snapshot=on 让写入只留在临时文件里，镜像本身不变
+        hd = os.path.join(os.path.dirname(image), "hd.img")
+        disk = ["-drive", f"file={hd},format=raw,if=ide,index=0,snapshot=on"] if os.path.exists(hd) else []
         with open(self.log_path, "w") as log:
             self.proc = subprocess.Popen(
                 [QEMU, "-machine", "pc", "-accel", "tcg", "-m", "16M",
-                 "-drive", f"file={image},format=raw,if=floppy,index=0", "-boot", "order=a",
+                 "-drive", f"file={image},format=raw,if=floppy,index=0", *disk, "-boot", "order=a",
                  "-display", "none", "-nic", "none", "-serial", "none",
                  "-monitor", f"unix:{self.sock_path},server,nowait", "-no-reboot"],
                 stdout=subprocess.DEVNULL, stderr=log)
@@ -283,6 +286,7 @@ def test_boot_screen(m, elf):
     """启动后各行的输出"""
     m.wait_for(lambda mm: mm.screen(1)[0] == "ABPKCVITUFW", timeout=2, what="第 0 行的 ABPKCVITUFW")
     rows = m.screen(9)
+    check(rows[1] == "disk: 2048 sectors (1024 KB), QEMU HARDDISK", f"第 1 行应显示硬盘的扇区数和型号：{rows[1]!r}")
     check(rows[2] == "Hello from kmain() in C!", f"第 2 行不对：{rows[2]!r}")
     check(rows[3] == "memory: 3831/3840 pages free  page faults: 1  copy-on-write: 2",
           f"第 3 行应显示用掉了 9 页（3 个内核栈，B 和 C 各自的页目录、栈区页表，原来的栈页和复制出的一页）、"
@@ -728,6 +732,24 @@ def test_double_free(_m, _elf):
         check(m.screen(1)[0][12:13] != "X", "panic 之后不应继续执行")
 
 
+def test_hd_rw(_m, _elf):
+    """硬盘：读回第 0 和最后一个扇区，越界的读失败，写进去的扇区能读回来；读写时任务睡下等 IRQ14"""
+    d = build_selftest("HD_RW")
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        m.wait_for(lambda mm: "reqs=" in mm.screen(8)[7], what="第 7 行的硬盘读写结果")
+        row = m.screen(8)[7]
+        f = dict(re.findall(r"(\w+)=([0-9A-F]+)", row))
+        check(f.get("first") == "1" and f.get("last") == "1", f"第 0 和第 2047 扇区应读出 SECTOR 00000000 和 SECTOR 00002047：{row!r}")
+        check(f.get("beyond") == "FFFFFFFF", f"读第 2048 扇区（超出硬盘）应返回 -1：{row!r}")
+        check(f.get("write") == "1", f"写进第 100 扇区的内容应能原样读回：{row!r}")
+        check(f.get("many") == "1", f"连续读 64 个扇区，每个的开头都应对：{row!r}")
+        # 中断叫醒任务后 CPU 正闲着就马上切过去；要是等下一个定时器中断，每个扇区就要多花 10 ms
+        check(int(f.get("ticks", "999")) < 10, f"读 64 个扇区应在 0.1 秒内完成：{row!r}")
+        check(f.get("reqs") == "68", f"一共应发出 68 个读写请求（越界的那次不算）：{row!r}")
+        check(set(task_output(m)) >= {"A", "B", "C"}, f"读完后任务 A 照常运行：{task_output(m)!r}")
+        check(not exception_screen(m)[0], f"不应出现异常面板：{exception_screen(m)[0]!r}")
+
+
 def message_row(m):
     return m.screen(8)[7]
 
@@ -945,7 +967,7 @@ SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, te
                 test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_console_scroll,
                 test_idle_in_hlt, test_demand_paging, test_fork_address_spaces, test_syscall_gate, test_user_setup, test_user_task,
                 test_tasks_alternate]
-SEPARATE_TESTS = [test_syscalls, test_page_alloc, test_double_free, test_early_key, test_keyboard_edge_cases, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
+SEPARATE_TESTS = [test_syscalls, test_page_alloc, test_double_free, test_hd_rw, test_early_key, test_keyboard_edge_cases, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,
                   test_big_kernel, test_user_write_kernel, test_user_privileged,
                   test_user_bad_pointer, test_user_exit, test_all_tasks_exit,

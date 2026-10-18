@@ -23,6 +23,7 @@
 #define IRQ_BASE_PIC2 0x28          /* 从片 IRQ8～15 映射到 0x28～0x2F */
 #define IRQ_TIMER     (IRQ_BASE + 0)
 #define IRQ_KEYBOARD  (IRQ_BASE + 1)
+#define IRQ_DISK      (IRQ_BASE + 14)   /* 主 IDE 通道 */
 #define PAGE_FAULT_VECTOR 14
 
 struct idt_entry {
@@ -91,6 +92,17 @@ void pic_init(void)
 
     outb(PIC1_DATA, 0xFC);                  /* 屏蔽字：位为 1 表示屏蔽，只打开 IRQ0 和 IRQ1 */
     outb(PIC2_DATA, 0xFF);                  /* 从片全部屏蔽 */
+}
+
+/* 打开第 irq 根 IRQ 线。从片上的线还要打开主片的 IRQ2，从片的中断经它才能送到 CPU。 */
+void pic_unmask(int irq)
+{
+    if (irq < 8) {
+        outb(PIC1_DATA, inb(PIC1_DATA) & ~(1 << irq));
+    } else {
+        outb(PIC2_DATA, inb(PIC2_DATA) & ~(1 << (irq - 8)));
+        outb(PIC1_DATA, inb(PIC1_DATA) & ~(1 << 2));
+    }
 }
 
 /* 告诉 8259 这个中断已处理完。不发 EOI，同级及更低优先级的 IRQ 就不会再送来。 */
@@ -251,8 +263,13 @@ void interrupt_dispatch(struct interrupt_frame *frame)
      */
     pic_send_eoi(vector);
 
-    if (vector == IRQ_TIMER)
+    if (vector == IRQ_TIMER) {
         timer_handle();
-    else if (vector == IRQ_KEYBOARD)
+        return;
+    }
+    if (vector == IRQ_KEYBOARD)
         keyboard_handle();
+    else if (vector == IRQ_DISK)
+        hd_handle();
+    sched_idle_wakeup();            /* 叫醒了谁、CPU 又正闲着，就马上切过去 */
 }

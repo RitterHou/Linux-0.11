@@ -32,6 +32,7 @@
 #define TASK_SLEEPING  2            /* 在 sleep 里等时间到，不参与调度 */
 #define TASK_ZOMBIE    3            /* 已经结束，内存已收回，等父进程用 waitpid 取走退出码 */
 #define TASK_WAITING   4            /* 在 waitpid 里等子进程结束，不参与调度 */
+#define TASK_BLOCKED   5            /* 睡在某个等待队列上（例如等硬盘），等 wake_up 叫醒 */
 
 #define OUTPUT_ROW     6
 #define OUTPUT_COL     7            /* 紧跟在 "tasks: " 后面 */
@@ -94,6 +95,7 @@ int current_pid(void)
  */
 static void task_main(void)
 {
+    selftest_task_a();              /* 正常构建为空；自检 HD_RW 在这里读写硬盘 */
     char letter = (char)('A' + getpid() - 1);
 
 #if defined(SELFTEST) && SELFTEST == SELFTEST_ALL_EXIT
@@ -259,6 +261,40 @@ void schedule(void)
     wake_sleepers();
     if (current_task == 0 || --slice_left == 0)
         reschedule();
+}
+
+/*
+ * 外设中断处理完时调用：此刻要是空闲的任务 0 在运行，而中断处理函数叫醒了某个任务，就马上切过去，
+ * 不必等下一个定时器中断。任务 0 停在 hlt 上，只有中断能让它往下走。
+ */
+void sched_idle_wakeup(void)
+{
+    if (scheduling && current_task == 0)
+        reschedule();
+}
+
+/*
+ * 在等待队列 q 上睡下，直到有人 wake_up(q)。调用者关着中断，醒来时中断仍是关着的：
+ * 典型的用法是 while (条件不满足) sleep_on(&q);，醒来后要重新检查条件，可能有别的任务抢先了。
+ * 任务 0 不能睡：它是空闲任务，没有它，没事做的时候 CPU 无处可去。
+ * Linux 0.11 的 sleep_on() 用每个睡眠者栈上的 tmp 变量把它们串成一条链；任务最多 16 个，这里用一个位图。
+ */
+void sleep_on(struct wait_queue *q)
+{
+    if (!scheduling || current_task == 0)
+        panic("task 0 trying to sleep");
+    q->sleepers |= 1u << current_task;
+    tasks[current_task].state = TASK_BLOCKED;
+    reschedule();
+}
+
+/* 叫醒睡在 q 上的所有任务。它们醒来后各自重新检查条件。 */
+void wake_up(struct wait_queue *q)
+{
+    for (int n = 1; n < NR_TASKS; n++)
+        if ((q->sleepers & (1u << n)) && tasks[n].state == TASK_BLOCKED)
+            tasks[n].state = TASK_RUNNING;
+    q->sleepers = 0;
 }
 
 /*

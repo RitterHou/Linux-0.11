@@ -34,6 +34,7 @@ void kmain(void)
     keyboard_init();                /* 读光开中断前就到达的按键，否则键盘中断可能再也不来 */
     timer_init(TIMER_HZ);
     sched_init();                   /* 建好两个任务的 TSS，把 kmain 登记为任务 0 */
+    hd_init();                      /* 问出硬盘的大小，第 1 行显示；打开 IRQ14 */
 
     vga_write_at(4, 0, "ticks: 0", VGA_GRAY);
     vga_write_at(6, 0, "tasks: ", VGA_GRAY);

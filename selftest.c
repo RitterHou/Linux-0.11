@@ -10,7 +10,7 @@
 /* 自检的标记写在第 0 行第 12 列，避开内核自己的 ABPKCVITUF。 */
 #define MARK_COL 12
 
-#if defined(SELFTEST) && (SELFTEST == SELFTEST_SYSCALLS || SELFTEST == SELFTEST_PAGE_ALLOC)
+#if defined(SELFTEST) && (SELFTEST == SELFTEST_SYSCALLS || SELFTEST == SELFTEST_PAGE_ALLOC || SELFTEST == SELFTEST_HD_RW)
 static int report_col;
 
 /* 在第 7 行接着写 "名字=值 "；base 为 16 时写 8 位十六进制。 */
@@ -126,6 +126,8 @@ void selftest_run(void)
     keyboard_process(0x25);                 /* k */
 #elif SELFTEST == SELFTEST_EARLY_KEY || SELFTEST == SELFTEST_PAGE_ALLOC || SELFTEST == SELFTEST_DOUBLE_FREE
     /* 在 selftest_early() 中完成 */
+#elif SELFTEST == SELFTEST_HD_RW
+    /* 在 selftest_task_a() 中完成：读硬盘要睡，只能在任务里做 */
 #elif SELFTEST_IN_USER(SELFTEST)
     /* 用户态的自检写在 user.c 中，这里不用做什么 */
 #else
@@ -180,5 +182,53 @@ void selftest_early(void)
     free_page(page);
     free_page(page);                        /* 期望在这里 panic */
     vga_write_at(0, MARK_COL, "X", VGA_GRAY);      /* 不应该走到这里 */
+#endif
+}
+
+#if defined(SELFTEST) && SELFTEST == SELFTEST_HD_RW
+/* 扇区 k 的开头应是 tools/mkdisk.py 写的 "SECTOR %08d"。 */
+static int sector_ok(const uint8_t *buf, uint32_t k)
+{
+    char expect[16] = "SECTOR 00000000";
+    for (int i = 14; i >= 7; i--, k /= 10)
+        expect[i] = (char)('0' + k % 10);
+    for (int i = 0; i < 15; i++)
+        if (buf[i] != (uint8_t)expect[i])
+            return 0;
+    return 1;
+}
+#endif
+
+/*
+ * 任务 A 开始运行时调用（特权级 0，已经开始调度，可以睡）。
+ * HD_RW：读第 0 和最后一个扇区；读越界的扇区应失败；把第 100 扇区改写后读回来；
+ * 再连续读 64 个扇区，看要多少个 tick。结果写到第 7 行。
+ */
+void selftest_task_a(void)
+{
+#if defined(SELFTEST) && SELFTEST == SELFTEST_HD_RW
+    static uint8_t buf[512], data[512];
+    uint32_t first = hd_read(0, buf) == 0 && sector_ok(buf, 0);
+    uint32_t last = hd_read(hd_sectors - 1, buf) == 0 && sector_ok(buf, hd_sectors - 1);
+    uint32_t beyond = (uint32_t)hd_read(hd_sectors, buf);
+
+    for (int i = 0; i < 512; i++)
+        data[i] = (uint8_t)(i * 7);
+    uint32_t written = hd_write(100, data) == 0 && hd_read(100, buf) == 0;
+    for (int i = 0; i < 512; i++)
+        written &= buf[i] == data[i];
+
+    uint32_t start = timer_ticks, many = 1;
+    for (uint32_t k = 200; k < 264; k++)
+        many &= hd_read(k, buf) == 0 && sector_ok(buf, k);
+    uint32_t ticks = timer_ticks - start;
+
+    report("first", first, 10);
+    report("last", last, 10);
+    report("beyond", beyond, 16);
+    report("write", written, 10);
+    report("many", many, 10);
+    report("ticks", ticks, 10);
+    report("reqs", hd_requests, 10);
 #endif
 }
