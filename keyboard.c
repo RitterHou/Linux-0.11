@@ -14,6 +14,7 @@
 #define SC_LSHIFT    0x2A
 #define SC_RSHIFT    0x36
 #define SC_CAPS_LOCK 0x3A
+#define SC_CTRL      0x1D           /* 左 Ctrl；右 Ctrl 带 0xE0 前缀，和其他扩展键一起忽略 */
 
 static const char normal_map[0x3A] = {
     [0x02] = '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b',
@@ -35,6 +36,7 @@ static int shift_held;              /* 位 0：左 Shift 按住；位 1：右 Sh
 static int caps_lock;               /* Caps Lock 是否打开（键盘上的指示灯暂不控制） */
 static int caps_held;               /* Caps Lock 是否正被按住：按住不放时键盘会重复发送按下码 */
 static int skip_next;               /* 上一个字节是 0xE0，下一个字节属于扩展键 */
+static int ctrl_held;               /* 左 Ctrl 是否按住：按住时字母变成控制字符，Ctrl+D 是 0x04 */
 
 /* 由扫描码得到字符：Caps Lock 只影响字母，与 Shift 同时生效时字母反而是小写。 */
 static char translate(uint8_t key)
@@ -83,6 +85,10 @@ void keyboard_process(uint8_t scancode)
         shift_held = released ? (shift_held & ~bit) : (shift_held | bit);
         return;
     }
+    if (key == SC_CTRL) {
+        ctrl_held = !released;
+        return;
+    }
     if (key == SC_CAPS_LOCK) {
         /* 只在真正按下时切换；按住不放产生的重复按下码不算 */
         if (!released && !caps_held)
@@ -95,5 +101,8 @@ void keyboard_process(uint8_t scancode)
     if (key >= sizeof(normal_map) || normal_map[key] == 0)
         return;
 
-    tty_input(translate(key));
+    char ch = translate(key);
+    if (ctrl_held && ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')))
+        ch &= 0x1F;                 /* Ctrl+字母：A 是 1，D 是 4 */
+    tty_input(ch);
 }

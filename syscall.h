@@ -24,7 +24,9 @@
 #define SYS_EXEC   9                /* exec(path, argv)：换成磁盘上的程序；成功时不返回 */
 #define SYS_STAT   10               /* stat(path, &st)：取文件的类型、大小、i 节点号 */
 #define SYS_TASKINFO 11             /* taskinfo(pid, &info)：取任务的状态、父进程和名字，给 ps 用 */
-#define SYS_CALLS  12
+#define SYS_PIPE   12               /* pipe(fd)：建一个管道，fd[0] 是读的一头，fd[1] 是写的一头 */
+#define SYS_DUP    13               /* dup(fd)：复制描述符，返回最小的空闲描述符，指向同一个打开的文件 */
+#define SYS_CALLS  14
 
 /* stat 写回的内容：取自磁盘上的 i 节点 */
 struct stat {
@@ -87,6 +89,16 @@ static inline int32_t stat(const char *path, struct stat *st)
 static inline int32_t taskinfo(int32_t pid, struct taskinfo *info)
 {
     return syscall3(SYS_TASKINFO, (uint32_t)pid, (uint32_t)info, 0);
+}
+
+static inline int32_t pipe(int32_t fd[2])
+{
+    return syscall3(SYS_PIPE, (uint32_t)fd, 0, 0);
+}
+
+static inline int32_t dup(int32_t fd)
+{
+    return syscall3(SYS_DUP, (uint32_t)fd, 0, 0);
 }
 
 static inline int32_t getpid(void)

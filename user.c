@@ -260,6 +260,59 @@ void user_main(void)
     }
     write(1, waitpid(pid, &st, 0) == pid && st == (0x100 | 14) ? "c" : "C", 1);
     exit(0);
+#elif SELFTEST == SELFTEST_USER_PIPE
+    /*
+     * 每项检查通过就写一个字母，期望是 pbwed：
+     *   p：pipe 返回最小的两个空闲描述符 0 和 2（1 号是第 6 行）；写进 5 个字节，读出同样的 5 个
+     *   b：子进程往管道里写 10000 个字节，比一页的缓冲区大，写满了就睡下等；父进程边读边核对，
+     *      子进程退出、写的一头全关了之后，read 返回 0
+     *   w：子进程以 0 退出
+     *   e：读的一头关了，再写返回 -1
+     *   d：dup 返回最小的空闲描述符（0 号是刚打开的文件，1 号是第 6 行，所以是 2），和原来的描述符共用读写位置
+     */
+    int32_t p[2];
+    char buf[512];
+    int ok = pipe(p) == 0 && p[0] == 0 && p[1] == 2;
+    ok &= write(p[1], "hello", 5) == 5 && read(p[0], buf, sizeof(buf)) == 5 && buf[0] == 'h' && buf[4] == 'o';
+    write(1, ok ? "p" : "P", 1);
+
+    int32_t child = fork();
+    if (child == 0) {
+        close(p[0]);
+        for (int k = 0; k < 100; k++) {
+            for (int i = 0; i < 100; i++)
+                buf[i] = (char)((k * 100 + i) * 13);
+            if (write(p[1], buf, 100) != 100)
+                exit(1);
+        }
+        exit(0);
+    }
+    close(p[1]);
+    uint32_t total = 0;
+    int good = 1;
+    int32_t n;
+    while ((n = read(p[0], buf, sizeof(buf))) > 0) {
+        for (int32_t i = 0; i < n; i++)
+            good &= (uint8_t)buf[i] == (uint8_t)((total + (uint32_t)i) * 13);
+        total += (uint32_t)n;
+    }
+    write(1, good && n == 0 && total == 10000 ? "b" : "B", 1);
+    int32_t st = -1;
+    write(1, waitpid(child, &st, 0) == child && st == 0 ? "w" : "W", 1);
+    close(p[0]);
+
+    pipe(p);
+    close(p[0]);
+    write(1, write(p[1], "x", 1) == -1 ? "e" : "E", 1);
+    close(p[1]);
+
+    int32_t fd = open("/hello.txt", 0);
+    int32_t copy = dup(fd);
+    ok = fd == 0 && copy == 2 && read(fd, buf, 6) == 6 && read(copy, buf, 4) == 4 && buf[0] == 'f' && buf[3] == 'm';
+    close(fd);
+    close(copy);
+    write(1, ok ? "d" : "D", 1);
+    exit(0);
 #elif SELFTEST == SELFTEST_ALL_EXIT
     write(1, "bye", 3);
     exit(2);

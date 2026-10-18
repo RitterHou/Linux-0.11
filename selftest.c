@@ -203,7 +203,7 @@ static int starts_with(const uint8_t *buf, const char *s)
  */
 void selftest_task_a(void)
 {
-#if defined(SELFTEST) && (SELFTEST == SELFTEST_USER_FS || SELFTEST == SELFTEST_USER_EXEC)
+#if defined(SELFTEST) && (SELFTEST == SELFTEST_USER_FS || SELFTEST == SELFTEST_USER_EXEC || SELFTEST == SELFTEST_USER_PIPE)
     exit(0);                        /* 任务 A 不写字母，第 6 行只留任务 B 的输出，免得被 A 盖掉 */
 #elif defined(SELFTEST) && SELFTEST == SELFTEST_HD_RW
     static uint8_t buf[512], data[512];
