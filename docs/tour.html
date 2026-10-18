@@ -267,34 +267,38 @@ svg.fig text.halo { paint-order: stroke; stroke: var(--surface); stroke-width: 5
 .presets button[aria-pressed="true"] small { color: inherit; opacity: .7; }
 
 /* ---------- 任务切换 ---------- */
-.ts { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr) minmax(0, 1fr); gap: 16px; align-items: stretch; }
-@media (max-width: 760px) { .ts { grid-template-columns: minmax(0, 1fr); } }
-.tss { border: 2px solid var(--line); border-radius: 14px; padding: 14px; display: flex; flex-direction: column; gap: 8px; transition: border-color .35s, opacity .35s, background .35s; }
+.ts { display: grid; grid-template-columns: minmax(0, 1.35fr) repeat(3, minmax(0, 1fr)); gap: 14px; align-items: stretch; }
+@media (max-width: 900px) { .ts { grid-template-columns: repeat(3, minmax(0, 1fr)); } .cpu-card { grid-column: 1 / -1; } }
+@media (max-width: 560px) { .ts { grid-template-columns: minmax(0, 1fr); } }
+.tss { border: 2px solid var(--line); border-radius: 14px; padding: 14px; display: flex; flex-direction: column; gap: 8px; min-width: 0; transition: border-color .35s, background .35s, box-shadow .35s; }
 .tss h3 { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; align-items: center; font-size: 16px; }
-.tss dl { margin: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 12px; font-family: var(--font-mono); font-size: 12.5px; }
-.tss dt { color: var(--ink-3); }
-.tss dd { margin: 0; overflow-wrap: anywhere; }
-.tss .state { font-size: 13px; color: var(--ink-3); min-height: 3em; line-height: 1.5; }
+.tss .state { font-size: 13px; color: var(--ink-2); line-height: 1.5; min-height: 3em; }
+.tss .k { font-family: var(--font-mono); font-size: 12px; color: var(--ink-3); margin-top: auto; }
+.tss.on { border-color: var(--ink); background: var(--surface); box-shadow: 0 8px 20px -14px rgba(15, 23, 42, .6); }
 .tss.save { border-color: var(--bad); }
 .tss.load { border-color: var(--ok); }
-.tss.dead { opacity: .5; }
-.tss.dead .state { color: var(--bad); }
-.cpu-card { border: 2px solid var(--cpu); background: var(--cpu-bg); border-radius: 14px; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
-.cpu-card .who { font-size: 22px; font-weight: 900; transition: opacity .25s; }
-.cpu-card .who.swap { opacity: 0; }
-.cpu-card .note { font-size: 13px; color: var(--ink-2); line-height: 1.55; }
-.slice { display: grid; grid-template-columns: repeat(20, minmax(0, 1fr)); gap: 2px; }
+.chip { align-self: flex-start; font-size: 12.5px; font-weight: 500; padding: 1px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--ink-3); background: var(--sunken); line-height: 1.7; }
+.chip.run { color: var(--ok); border-color: var(--ok); background: var(--ok-bg); }
+.chip.sleep { color: var(--cpu); border-color: var(--cpu); background: var(--cpu-bg); }
+.chip.wait { color: var(--disk); border-color: var(--disk); background: var(--disk-bg); }
+.cpu-card { border: 2px solid var(--cpu); background: var(--cpu-bg); border-radius: 14px; padding: 14px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.cpu-card .who { font-size: 22px; font-weight: 900; }
+.slice { display: grid; grid-template-columns: repeat(20, minmax(0, 1fr)); gap: 2px; transition: opacity .3s; }
+.slice.off { opacity: .3; }
 .slice i { height: 12px; border-radius: 2px; background: var(--surface); border: 1px solid var(--line); }
 .slice i.f { background: var(--cpu); border-color: var(--cpu); }
-.ticks { font-family: var(--font-mono); font-size: 13px; color: var(--ink-2); display: flex; justify-content: space-between; gap: 8px; font-variant-numeric: tabular-nums; }
+.ticks { font-family: var(--font-mono); font-size: 13px; color: var(--ink-2); display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; font-variant-numeric: tabular-nums; }
+.history-bar { display: grid; grid-template-columns: repeat(80, minmax(0, 1fr)); gap: 1px; height: 16px; }
+.history-bar i { border-radius: 1px; box-shadow: inset 0 0 0 1px var(--line); }
+.history-bar i.A, .hist-legend i.A { background: var(--kern); box-shadow: none; }
+.history-bar i.B, .hist-legend i.B { background: var(--user); box-shadow: none; }
+.history-bar i.I, .hist-legend i.I { background: var(--ink-3); opacity: .45; box-shadow: none; }
+.hist-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; font-size: 12.5px; color: var(--ink-2); }
+.hist-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.hist-legend b { margin-left: auto; font-family: var(--font-mono); font-size: 13px; color: var(--ink); }
 .outrow { font-family: var(--font-vga); font-size: 22px; background: var(--vga-bg); color: var(--vga-fg); padding: 8px 12px; border-radius: 8px; white-space: pre; overflow-x: auto; line-height: 1.15; margin: 0; }
 .outrow .a { color: var(--vga-a); }
 .outrow .b { color: var(--vga-b); }
-.outrow .msg { color: var(--vga-hi); }
-.history-bar { display: grid; grid-template-columns: repeat(80, minmax(0, 1fr)); gap: 1px; height: 14px; }
-.history-bar i { background: var(--surface); border-radius: 1px; }
-.history-bar i.A { background: var(--kern); }
-.history-bar i.B { background: var(--user); }
 
 /* ---------- 用户态 ---------- */
 .uk text.band { font-weight: 700; font-size: 15px; }
@@ -360,10 +364,10 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
     <ol class="milestones" id="milestones" aria-label="第一行每个字母代表的里程碑"></ol>
   </div>
   <div class="stats">
-    <span><b data-fact="loc">1,904</b>行汇编与 C</span>
+    <span><b data-fact="loc">1,982</b>行汇编与 C</span>
     <span><b data-fact="kernelKB">16 KB</b>内核</span>
-    <span><b data-fact="commits">27</b>个提交</span>
-    <span><b data-fact="tests">31</b>项自动化测试</span>
+    <span><b data-fact="commits">29</b>个提交</span>
+    <span><b data-fact="tests">32</b>项自动化测试</span>
   </div>
 </header>
 
@@ -515,7 +519,7 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
     <h3>处理之前，先把现场存到栈上</h3>
     <div class="controls">
       <div class="seg" role="group" aria-label="选择场景">
-        <button type="button" data-sc="k" aria-pressed="true">打断内核态的任务 A</button>
+        <button type="button" data-sc="k" aria-pressed="true">打断空闲的任务 0</button>
         <button type="button" data-sc="u" aria-pressed="false">用户态的任务 B 执行 int 0x80</button>
       </div>
     </div>
@@ -568,34 +572,34 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
 <section class="chapter" aria-labelledby="c6">
   <div class="chapter-head">
     <span class="chapter-no">06</span>
-    <h2 id="c6">轮流：两个任务分享一个 CPU</h2>
-    <p>每个任务有一张寄存器快照（TSS）。定时器每响 20 次（0.2 秒），内核就执行一条 <code>ljmp</code>：CPU 把当前寄存器存进当前任务的快照，再把下一个任务的快照装进来，那个任务就从上次停下的地方接着跑。</p>
+    <h2 id="c6">轮流：谁在等，就把 CPU 让出去</h2>
+    <p>任务 A、B 写一个字母就调用 <code>sleep(2)</code>。内核把它标成睡眠，马上执行一条 <code>ljmp</code> 切到别的任务：CPU 把当前寄存器存进这个任务的快照（TSS），再装入下一个任务的快照。两个都睡着了，就切回空闲的任务 0，CPU 停在 <code>hlt</code> 上。定时器每 10 毫秒响一次，谁睡到时间就叫醒谁；一直不睡的任务，用完 20 个 tick 的时间片也会被强行切走。</p>
   </div>
   <div class="stage" id="tasks">
     <div class="controls">
-      <button type="button" class="primary" id="ts-play">暂停</button>
+      <div class="seg" role="group" aria-label="任务 B 的行为"><button type="button" data-mode="sleep" aria-pressed="true">两个任务都会睡</button><button type="button" data-mode="spin" aria-pressed="false">任务 B 一直空转</button></div>
       <div class="seg" role="group" aria-label="速度"><button type="button" data-speed="slow" aria-pressed="true">慢放</button><button type="button" data-speed="real" aria-pressed="false">真实速度</button></div>
-      <button type="button" id="ts-kill">让任务 B 越权写内核</button>
-      <button type="button" id="ts-reset">重来</button>
+      <button type="button" class="primary" id="ts-play">暂停</button>
     </div>
     <div class="ts">
-      <div class="tss" id="tss-a"></div>
       <div class="cpu-card">
         <span class="tag cpu" style="align-self: flex-start">CPU</span>
         <div class="who" id="cpu-who"></div>
         <div class="slice" id="slice" aria-hidden="true"></div>
-        <div class="ticks"><span id="tick-n"></span><span>时间片 20 tick</span></div>
+        <div class="ticks"><span id="tick-n"></span><span id="slice-n"></span></div>
         <div class="history-bar" id="hist" aria-hidden="true"></div>
-        <span class="note" id="cpu-note2"></span>
+        <div class="hist-legend"><span><i class="A"></i>任务 A</span><span><i class="B"></i>任务 B</span><span><i class="I"></i>空闲</span><b id="idle-n"></b></div>
       </div>
-      <div class="tss" id="tss-b"></div>
+      <div id="ts-cards" style="display: contents"></div>
     </div>
-    <pre class="outrow" id="ts-out" aria-label="屏幕第 6、7 行"></pre>
+    <div class="cap" id="ts-cap"></div>
+    <pre class="outrow" id="ts-out" aria-label="屏幕第 4、6 行"></pre>
     <details class="more"><summary>展开细节</summary><ul>
       <li>TSS 是 CPU 规定格式的 104 字节。GDT 第 3、4、5 项分别指向任务 0（开机时的 kmain）、A、B 的 TSS，选择子 0x18、0x20、0x28。</li>
-      <li>切换总发生在定时器中断里的 <code>switch_to()</code>，所以快照里保存的 CS 都是内核的 0x08。任务 B 在用户态的那套寄存器，此刻在它内核栈顶由 CPU 压入的现场里。</li>
-      <li>CR3 只装入不保存，每个 TSS（包括任务 0 的）都要预先填好页目录地址。审查时发现任务 0 的漏填了：所有任务都结束、切回任务 0 时，CPU 会把物理地址 0 当成页目录，直接三重错误重启。</li>
-      <li>任务 A、B 写一个字母就 <code>sleep(2)</code>，在内核里用 <code>hlt</code> 等着，不会主动让出 CPU，所以每段约 10 个字母。Linux 0.11 的 <code>sleep_on()</code> 会立刻调用 <code>schedule()</code> 把 CPU 让给别的进程。</li>
+      <li><code>sleep</code> 先把任务标成睡眠、记下醒来的 tick，再调用 <code>reschedule()</code> 切走，这两步之间关着中断。Linux 0.11 的 <code>sleep_on()</code> 也是先改 <code>current-&gt;state</code>，再调用 <code>schedule()</code>。</li>
+      <li>空闲比例是抽样算出来的：每个 tick 看一眼此刻谁占着 CPU。Linux 0.11 的 <code>do_timer()</code> 用同样的办法给当前进程记 <code>utime</code>、<code>stime</code>。正常运行时接近 100%：两个任务每 2 个 tick 才醒来写一个字母。</li>
+      <li>被叫醒的任务不会马上抢走别人的 CPU，要等正在运行的任务睡下或用完时间片。Linux 0.11 也是这样：<code>do_timer()</code> 只在当前进程的 <code>counter</code> 减到 0 时才调用 <code>schedule()</code>。</li>
+      <li>CR3 只装入不保存，每个 TSS（包括任务 0 的）都要预先填好页目录地址。审查时发现任务 0 的漏填了：切回任务 0 时，CPU 会把物理地址 0 当成页目录，直接三重错误重启。现在每 2 个 tick 就要切回任务 0 一次，不修这个问题内核根本跑不起来。</li>
     </ul></details>
   </div>
 </section>
@@ -676,9 +680,9 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
     <p><code>make test</code> 在后台启动没有窗口的 QEMU，通过它的监视器读显存、读寄存器、翻译地址、模拟按键，逐项核对。需要故意出错的场景，就另外编一个自检内核。</p>
   </div>
   <div class="big3">
-    <div><b data-fact="tests">31</b><span>项测试，一条 <code>make test</code> 全部跑完</span></div>
+    <div><b data-fact="tests">32</b><span>项测试，一条 <code>make test</code> 全部跑完</span></div>
     <div><b data-fact="selftests">18</b><span>个自检内核：除零、越权、坏指针、所有任务退出……</span></div>
-    <div><b data-fact="commits">27</b><span>个提交：每加一个机制，测试通过后单独提交</span></div>
+    <div><b data-fact="commits">29</b><span>个提交：每加一个机制，测试通过后单独提交</span></div>
   </div>
   <p style="color: var(--ink-2); max-width: 70ch">新加的测试都先在临时副本里把代码故意改坏，确认测试真的会失败，再改回来。</p>
   <h3 style="margin-top: 8px">代码审查发现的问题（节选）</h3>
@@ -691,15 +695,15 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
   <details><summary>全部提交</summary><ol class="commits" id="commits"></ol></details>
 </section>
 
-<footer>源码在仓库的 <code>learning</code> 分支，<code>main</code> 分支是 Linux 0.11 原始源码。页面里的地址取自提交 <span class="mono" data-fact="head">0d76fa0</span> 构建出的 kernel.elf。在仓库里运行 <code>make run</code> 可以在 QEMU 中看到真实的屏幕。</footer>
+<footer>源码在仓库的 <code>learning</code> 分支，<code>main</code> 分支是 Linux 0.11 原始源码。页面里的地址取自提交 <span class="mono" data-fact="head">3ee724e</span> 构建出的 kernel.elf。在仓库里运行 <code>make run</code> 可以在 QEMU 中看到真实的屏幕。</footer>
 </main>
 
 <script>
 /* ===================== 构建事实：来自 objdump -h / -t build/kernel.elf ===================== */
 const FACTS = {
-  head: "0d76fa0", loc: "1,904", kernelKB: "16 KB", kernelSectors: 32, commits: 27, tests: 31,
-  text: 0x10000, rodata: 0x11608, data: 0x119c4, user: 0x12000, userData: 0x13000, userEnd: 0x14000,
-  bss: 0x14000, bssEnd: 0x1e188, stackTop: 0x15000, gdt: 0x15010, idt: 0x15060,
+  head: "3ee724e", loc: "1,982", kernelKB: "16 KB", kernelSectors: 32, commits: 29, tests: 32,
+  text: 0x10000, rodata: 0x117a8, data: 0x11b6c, user: 0x12000, userData: 0x13000, userEnd: 0x14000,
+  bss: 0x14000, bssEnd: 0x1e190, stackTop: 0x15000, gdt: 0x15010, idt: 0x15060,
   identity: 0x16000, pageDir: 0x1a000, alias: 0x1b000, ticks: 0x1c000, tss: 0x1c018,
   taskStacks: 0x1c170, userMain: 0x12000, userStack: 0x13000, kmain: 0x101c0,
 };
@@ -804,18 +808,17 @@ const MILESTONES = [
   ];
   function reset() {
     timers.forEach(clearTimeout); timers = []; cancelAnimationFrame(raf);
-    st = { ticks: 0, running: false, acc: 0, last: 0, cur: null, len: 0, task: 0, slice: 1, wake: [0, 0, 0], pos: 0, u: false };
+    st = { ticks: 0, running: false, acc: 0, last: 0, cur: null, len: 0, window: 0, wake: [0, 0, 0], pos: 0, u: false };
     scr.clear(); mark(0); draw();
     if (reduce) { steps.forEach(f => f(scr)); for (let i = 0; i < 300; i++) tick(); st.last = performance.now(); mark(9); draw(); }
     else steps.forEach((f, i) => timers.push(setTimeout(() => { f(scr); mark(i + 1); draw(); }, 400 + i * 700)));
     raf = requestAnimationFrame(loop);
   }
-  /* 和 sched.c 一样：每 20 个 tick 在任务 1、2 之间切换，每个任务写一个字母后睡 2 个 tick。 */
+  /* 和 sched.c 一样：任务写一个字母就睡 2 个 tick，把 CPU 让给对方；两个都睡着时 CPU 空闲。 */
   function tick() {
     st.ticks++; scr.write(4, 7, String(st.ticks));
-    if (--st.slice <= 0) { st.slice = 20; st.task = st.task === 1 ? 2 : 1; }
-    const t = st.task;
-    if (st.wake[t] <= st.ticks) {
+    if (++st.window === 100) { scr.write(4, 20, "idle: 100%"); st.window = 0; }
+    for (const t of [1, 2]) if (st.wake[t] <= st.ticks) {
       scr.put(6, OUT + st.pos, t === 1 ? "A" : "B"); st.pos = (st.pos + 1) % W; st.wake[t] = st.ticks + 2;
       if (t === 2 && !st.u) { st.u = true; scr.write(0, 8, "U"); mark(9); }
     }
@@ -948,7 +951,7 @@ const MILESTONES = [
       ["cp", "CPU", "执行完当前指令", "CPU 停下，保存现场，关中断。"],
       ["kn", "IDT[0x20]", "中断描述符表", "第 0x20 项指向 isr32。"],
       ["kn", "isr32", "isr.asm", "保存寄存器，调用 interrupt_dispatch()，它先发 EOI。"],
-      ["kn", "timer_handle()", "timer.c", "ticks 加 1，再调用 schedule()：时间片用完就切换任务。"],
+      ["kn", "timer_handle()", "timer.c", "ticks 加 1，再调用 schedule()：叫醒睡到时间的任务；CPU 正闲着就马上切过去，一直不睡的任务用完时间片也会被切走。"],
       ["sc", "显存", "第 4 行", "刷新 ticks 计数。iret 回到原处，或者回到另一个任务里。"],
     ],
   };
@@ -960,7 +963,7 @@ const MILESTONES = [
     spark.classList.remove("on");
     $("irq-cap").innerHTML = src === "key"
       ? `<b>按“发送”，跟着信号走一遍</b><span>共 7 站。真实世界里整条路只要几微秒。</span>`
-      : `<b>定时器每秒触发 100 次，这是其中一次</b><span>它是任务切换的闹钟：每 20 次切换一次任务。</span>`;
+      : `<b>定时器每秒触发 100 次，这是其中一次</b><span>它是叫醒睡眠任务的闹钟，也负责从一直不睡的任务手里收回 CPU。</span>`;
   }
   async function go() {
     if (busy) return; busy = true; $("irq-go").disabled = true;
@@ -991,15 +994,15 @@ const MILESTONES = [
 /* ===================== 04 栈 ===================== */
 (() => {
   const K = [
-    { t: "任务 A 正在内核里等待", d: "它停在 sleep 系统调用的 hlt 上，用的是自己的内核栈。这时定时器中断来了。" },
-    { who: "cpu", l: "EFLAGS", v: "0x00000202", t: "CPU 压入 EFLAGS", d: "特权级没变（都是 0），不用换栈，直接压在任务 A 当前的栈上。压完把 IF 清零，处理期间不会再被打断。" },
+    { t: "任务 0 正停在 hlt 上", d: "任务 A、B 都在睡觉，CPU 交给了空闲的任务 0，停在 kmain() 的 hlt 上，用的是 entry.asm 设的内核栈。这时定时器中断来了。" },
+    { who: "cpu", l: "EFLAGS", v: "0x00000202", t: "CPU 压入 EFLAGS", d: "特权级没变（都是 0），不用换栈，直接压在任务 0 当前的栈上。压完把 IF 清零，处理期间不会再被打断。" },
     { who: "cpu", l: "CS", v: "0x0008", t: "CPU 压入 CS", d: "被打断代码所在的代码段：内核代码段 0x08。" },
-    { who: "cpu", l: "EIP", v: "sys_sleep+…", t: "CPU 压入 EIP", d: "返回地址，然后跳到 IDT 登记的入口 isr32。" },
+    { who: "cpu", l: "EIP", v: "kmain+…", t: "CPU 压入 EIP", d: "返回地址，hlt 的下一条指令。然后跳到 IDT 登记的入口 isr32。" },
     { who: "stub", l: "错误码", v: "0", t: "isr32 补一个 0", d: "定时器没有错误码，补 0 让所有中断的栈长得一样。" },
     { who: "stub", l: "中断号", v: "0x20", t: "isr32 压入中断号", d: "然后跳到所有入口共用的 isr_common。" },
     { who: "common", l: "EAX … EDI", v: "pushad ×8", t: "保存 8 个通用寄存器", d: "一条 pushad 指令全部压入。" },
     { who: "common", l: "DS ES FS GS", v: "0x0010 ×4", t: "保存段寄存器，换成内核的", d: "如果被打断的是用户程序，这里存下的是用户段 0x3B。" },
-    { t: "现场保存好了，调用 C 函数", d: "从栈顶往上，这一摞正好是 C 里的 struct interrupt_frame。把它的地址交给 interrupt_dispatch()，处理完原路弹出，iret 回到 hlt 后面。" },
+    { t: "现场保存好了，调用 C 函数", d: "从栈顶往上，这一摞正好是 C 里的 struct interrupt_frame。把它的地址交给 interrupt_dispatch()。这次中断要是叫醒了任务 A，就先切过去，等以后切回任务 0 时再原路弹出，iret 回到 hlt 后面。" },
   ];
   const U = [
     { t: "任务 B 在用户态执行 int 0x80", d: "此刻 ESP 指向用户栈。EAX=0（write），EBX=1，ECX=&letter，EDX=1。" },
@@ -1020,11 +1023,11 @@ const MILESTONES = [
   function run(i) {
     const pushed = sc.slice(0, i + 1).filter(s => s.who);
     const onUserStack = sc === U && i === 0;
-    const label = sc === U ? (onUserStack ? "任务 B 的用户栈" : "任务 B 的内核栈（来自 TSS 的 esp0）") : "任务 A 的内核栈";
+    const label = sc === U ? (onUserStack ? "任务 B 的用户栈" : "任务 B 的内核栈（来自 TSS 的 esp0）") : "任务 0 的内核栈";
     const body = onUserStack
       ? `<div class="slot ghost">用户栈上的数据<span class="v">…</span></div><div class="slot ghost top">letter</div>`
       : pushed.length ? pushed.map((s, k) => `<div class="slot ${s.who}${k === pushed.length - 1 ? " top" + (sc[i].who ? " new" : "") : ""}">${s.l}<span class="v">${s.v}</span></div>`).join("")
-      : `<div class="slot ghost${sc === K ? " top" : ""}">${sc === K ? "sleep 调用里的局部数据" : "空的内核栈"}<span class="v">…</span></div>`;
+      : `<div class="slot ghost${sc === K ? " top" : ""}">${sc === K ? "kmain 的局部数据" : "空的内核栈"}<span class="v">…</span></div>`;
     $("stack").innerHTML = `<div class="hint"><span>${label}</span><span>高地址 ↑</span></div>${body}<div class="hint" style="margin-top: auto"><span>栈向下长</span><span>低地址 ↓</span></div>`;
     $("stk-cap").innerHTML = `<b>${sc[i].t}</b><span>${sc[i].d}</span>`;
   }
@@ -1111,72 +1114,106 @@ const MILESTONES = [
 
 /* ===================== 06 任务切换 ===================== */
 (() => {
-  const SLICE = 20, W = 66;
-  let s, timer = 0, playing = !reduce, visible = false, speed = 140, stepping = false;
-  const fresh = () => ({ tick: 0, cur: 1, left: SLICE, out: [], wake: [0, 0, 0], alive: [true, true, true], hist: [], msg: "", kill: false, phase: "",
-    tss: { 1: { cs: "0x0008", eip: "task_main", esp: "A 的内核栈", note: "初始值" }, 2: { cs: "0x0033", eip: "user_main", esp: "用户栈", note: "初始值：段寄存器都是用户段" } } });
+  const SLICE = 20, W = 66, RUN = 1, SLEEP = 2;
+  const NAME = ["任务 0", "任务 A", "任务 B"], TSS = ["0x18", "0x20", "0x28"];
+  const TAG = [["cpu", "空闲任务"], ["kern", "内核态 · 0 级"], ["user", "用户态 · 3 级"]];
+  let s, gen = 0, playing = !reduce, visible = false, real = false, mode = "sleep", driving = false;
+  const fresh = () => ({ tick: 0, cur: 0, left: 0, state: [RUN, RUN, RUN], wake: [0, 0, 0], out: [], hist: [], phase: {},
+    cap: ["还没开始调度", "此刻运行的是任务 0（kmain）。下一个 tick 起，任务 A、B 开始轮流。"] });
+  /* 与 sched.c 的 pick_next() 相同：按 1 → 2 → 1 … 找能运行的任务，没有就是任务 0。 */
+  const pick = () => { let n = s.cur; for (let k = 0; k < 2; k++) { n = n % 2 + 1; if (s.state[n] === RUN) return n; } return 0; };
+  const say = (t, d) => { s.cap = [t, d]; };
   function card(n) {
-    const t = s.tss[n], el = $(n === 1 ? "tss-a" : "tss-b");
-    el.className = "tss" + (s.phase === "save" + n ? " save" : "") + (s.phase === "load" + n ? " load" : "") + (!s.alive[n] ? " dead" : "");
-    const state = !s.alive[n] ? "已结束：越权写内核，被缺页异常拦下"
-      : s.phase === "save" + n ? "← 正在保存当前寄存器"
-      : s.phase === "load" + n ? "→ 正在装入 CPU"
-      : s.cur === n ? "正在 CPU 上运行，快照里还是上次存的值" : t.note;
-    el.innerHTML = `<h3>任务 ${n === 1 ? "A" : "B"} 的快照 <span class="tag ${n === 1 ? "kern" : "user"}">${n === 1 ? "内核态 · 0 级" : "用户态 · 3 级"}</span></h3>
-      <dl><dt>TSS</dt><dd>${n === 1 ? "0x20" : "0x28"}</dd><dt>CS</dt><dd>${t.cs}</dd><dt>EIP</dt><dd>${t.eip}</dd><dt>ESP</dt><dd>${t.esp}</dd></dl>
-      <span class="state">${state}</span>`;
+    const on = s.cur === n;
+    let chip, note;
+    if (n === 0) { chip = on ? ["run", "正在运行"] : ["", "被切走"]; note = on ? "停在 kmain() 的 hlt 上，等下一个中断" : "停在上次被切走的定时器中断里"; }
+    else if (on) { chip = ["run", "正在运行"]; note = n === 2 && mode === "spin" ? "在用户态空转，从不调用 sleep" : "写一个字母，马上就要睡"; }
+    else if (s.state[n] === SLEEP) { chip = ["sleep", `睡眠中 · tick ${s.wake[n]} 醒`]; note = "睡着的任务不参与调度"; }
+    else { chip = ["wait", "能运行 · 排队"]; note = s.cur === 2 && mode === "spin" ? "等任务 B 的时间片用完" : "等着轮到它"; }
+    if (s.phase[n] === "save") note = "← CPU 正把寄存器存进它的 TSS";
+    if (s.phase[n] === "load") note = "→ CPU 正从它的 TSS 装入寄存器";
+    return `<div class="tss${on ? " on" : ""}${s.phase[n] ? " " + s.phase[n] : ""}"><h3>${NAME[n]} <span class="tag ${TAG[n][0]}">${TAG[n][1]}</span></h3>
+      <span class="chip ${chip[0]}">${chip[1]}</span><span class="state">${note}</span><span class="k">TSS ${TSS[n]}</span></div>`;
   }
   function render() {
-    card(1); card(2);
-    $("cpu-who").textContent = s.cur === 1 ? "正在运行：任务 A" : s.cur === 2 ? "正在运行：任务 B" : "空闲";
-    $("slice").innerHTML = Array.from({ length: SLICE }, (_, k) => `<i class="${k < SLICE - s.left ? "f" : ""}"></i>`).join("");
+    $("ts-cards").innerHTML = [0, 1, 2].map(card).join("");
+    const counted = s.cur !== 0;
+    $("cpu-who").textContent = counted ? `正在运行：${NAME[s.cur]}` : "空闲：任务 0";
+    $("slice").className = "slice" + (counted ? "" : " off");
+    $("slice").innerHTML = Array.from({ length: SLICE }, (_, k) => `<i class="${counted && k < SLICE - s.left ? "f" : ""}"></i>`).join("");
     $("tick-n").textContent = `tick ${s.tick}`;
-    const h = s.hist.slice(-80);
-    $("hist").innerHTML = h.concat(Array(80 - h.length).fill("")).map(x => `<i class="${x}"></i>`).join("");
-    $("cpu-note2").textContent = s.cur === 2 ? "任务 B 的代码运行在 3 级；写字母、睡觉都要通过系统调用进内核。" : "任务 A 的代码本来就在内核里，运行在 0 级。";
+    $("slice-n").textContent = counted ? `时间片还剩 ${s.left} tick` : "空闲任务不计时间片";
+    const h = s.hist.slice(-80), cls = ["I", "A", "B"];
+    $("hist").innerHTML = h.map(x => `<i class="${cls[x]}"></i>`).join("") + "<i></i>".repeat(80 - h.length);
+    const idle = s.hist.length ? Math.round(100 * s.hist.filter(x => x === 0).length / s.hist.length) : 0;
+    $("idle-n").textContent = s.hist.length ? `空闲 ${idle}%` : "";
+    $("ts-cap").innerHTML = `<b>${s.cap[0]}</b><span>${s.cap[1]}</span>`;
     const out = s.out.slice(-W).map(c => `<span class="${c === "A" ? "a" : "b"}">${c}</span>`).join("");
-    $("ts-out").innerHTML = `tasks: ${out}\n<span class="msg">${s.msg || " "}</span>`;
+    const idleText = s.hist.length >= 100 ? `idle: ${String(idle).padStart(3)}%` : "";
+    $("ts-out").innerHTML = `ticks: ${s.tick}`.padEnd(20) + idleText + `\ntasks: ${out}`;
   }
-  async function switchTo(next) {
-    const prev = s.cur;
-    if (prev && s.alive[prev]) { s.tss[prev] = { cs: "0x0008", eip: "switch_to()", esp: "内核栈中", note: "被切走时保存：此刻正在内核的定时器中断里" }; s.phase = "save" + prev; render(); await sleep(speed * 3); }
-    $("cpu-who").classList.add("swap"); await sleep(120);
-    s.cur = next; s.phase = "load" + next; render(); $("cpu-who").classList.remove("swap");
-    await sleep(speed * 3); s.phase = ""; render();
-  }
-  async function step() {
-    if (stepping) return; stepping = true;
-    s.tick++; s.left--;
-    const t = s.cur;
-    if (s.alive[t] && s.wake[t] <= s.tick) {
-      if (t === 2 && s.kill) {
-        s.alive[2] = false; s.kill = false;
-        s.msg = `task 2 killed by #PF page fault: EIP=${hex8(FACTS.userMain + 8)} error=0x00000007`;
-        s.hist.push("B"); s.left = SLICE; render();
-        await switchTo(1); stepping = false; return;
-      }
-      s.out.push(t === 1 ? "A" : "B"); s.wake[t] = s.tick + 2;
+  /* 一个 tick 里发生的事：和 sched.c 的 schedule()、sched_sleep() 一样的规则，慢放时一步一停。 */
+  async function runTick() {
+    const g = gen;
+    const show = async ms => { render(); if (!real && !reduce && ms) await sleep(ms); return g === gen; };
+    async function switchTo(next) {
+      const prev = s.cur;
+      s.left = SLICE;
+      if (next === prev) return true;
+      s.phase = { [prev]: "save" }; if (!(await show(450))) return false;
+      s.cur = next; s.phase = { [next]: "load" }; if (!(await show(450))) return false;
+      s.phase = {}; return true;
     }
-    s.hist.push(t === 1 ? "A" : "B");
-    if (s.left <= 0) { s.left = SLICE; const n = s.cur === 1 ? 2 : 1; if (s.alive[n]) await switchTo(n); }
-    render(); stepping = false;
+    s.tick++;
+    s.hist.push(s.cur); if (s.hist.length > 100) s.hist.shift();
+    const woke = [1, 2].filter(n => s.state[n] === SLEEP && s.wake[n] <= s.tick);
+    woke.forEach(n => { s.state[n] = RUN; });
+    const head = `tick ${s.tick}：`;
+    if (s.cur === 0) {
+      const next = pick();
+      if (!next) { say(head + "没人睡到时间", "任务 0 继续停在 hlt 上，等下一个 tick。"); return show(380); }
+      say(head + (woke.length ? `叫醒${woke.map(n => NAME[n]).join("、")}` : `${NAME[next]} 能运行`), "CPU 正闲着，马上从任务 0 切过去。");
+      if (!(await show(1000)) || !(await switchTo(next))) return false;
+    } else if (--s.left > 0) {
+      say(head + `${NAME[s.cur]} 还在空转`, `时间片还剩 ${s.left} 个 tick。${s.state[1] === RUN ? "任务 A 已经醒了，只能排队。" : ""}`);
+      return show(170);
+    } else {
+      const next = pick();
+      if (next === s.cur) { s.left = SLICE; say(head + "时间片用完", "没有别的任务能运行，它接着跑。"); return show(500); }
+      say(head + `${NAME[s.cur]} 的时间片用完了`, `它一直不睡，内核在定时器中断里把它切走（这就是抢占），换${NAME[next]} 上。`);
+      if (!(await show(1500)) || !(await switchTo(next))) return false;
+    }
+    while (s.cur !== 0) {
+      const n = s.cur;
+      if (n === 2 && mode === "spin") { say("任务 B 在用户态空转", "它从不调用 sleep，CPU 只能等它的时间片用完再收回来。"); return show(1000); }
+      s.out.push(n === 1 ? "A" : "B"); s.state[n] = SLEEP; s.wake[n] = s.tick + 2;
+      const next = pick();
+      say(`${NAME[n]} 写一个 ${n === 1 ? "A" : "B"}，然后 sleep(2)`, `内核把它标成睡眠，tick ${s.wake[n]} 再叫醒；${next ? `马上切到${NAME[next]}` : "没有能运行的任务了，切回任务 0"}。`);
+      if (!(await show(1400)) || !(await switchTo(next))) return false;
+    }
+    return show(0);
   }
-  function loop() { clearInterval(timer); timer = 0; if (playing && visible) timer = setInterval(step, speed); }
-  const setPlaying = p => { playing = p; $("ts-play").textContent = playing ? "暂停" : "继续"; loop(); };
+  async function drive() {
+    if (driving) return;
+    driving = true;
+    while (playing && visible) {
+      await runTick();
+      await new Promise(r => setTimeout(r, real || reduce ? 10 : 0));
+    }
+    driving = false;
+  }
+  const press = (sel, b) => document.querySelectorAll(sel).forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+  const setPlaying = p => { playing = p; $("ts-play").textContent = playing ? "暂停" : "继续"; drive(); };
   $("ts-play").addEventListener("click", () => setPlaying(!playing));
-  document.querySelectorAll("#tasks [data-speed]").forEach(b => b.addEventListener("click", () => {
-    speed = b.dataset.speed === "slow" ? 140 : 10;
-    document.querySelectorAll("#tasks [data-speed]").forEach(x => x.setAttribute("aria-pressed", String(x === b))); loop();
+  document.querySelectorAll("#tasks [data-speed]").forEach(b => b.addEventListener("click", () => { real = b.dataset.speed === "real"; press("#tasks [data-speed]", b); }));
+  document.querySelectorAll("#tasks [data-mode]").forEach(b => b.addEventListener("click", () => {
+    mode = b.dataset.mode; press("#tasks [data-mode]", b); gen++; s = fresh(); render(); drive();
   }));
-  $("ts-kill").addEventListener("click", () => { if (s.alive[2]) { s.kill = true; if (!playing) setPlaying(true); } });
-  $("ts-reset").addEventListener("click", () => { s = fresh(); render(); });
-  s = fresh();
-  for (let i = 0; i < 14; i++) { s.tick++; s.left--; if (s.wake[1] <= s.tick) { s.out.push("A"); s.wake[1] = s.tick + 2; } s.hist.push("A"); }
-  render();
+  s = fresh(); render();
   $("ts-play").textContent = playing ? "暂停" : "继续";
   if ("IntersectionObserver" in window) {
-    new IntersectionObserver(es => { visible = es.some(e => e.isIntersecting); loop(); }, { threshold: 0.2 }).observe($("tasks"));
-  } else { visible = true; loop(); }
+    new IntersectionObserver(es => { visible = es.some(e => e.isIntersecting); drive(); }, { threshold: 0.1 }).observe($("tasks"));
+  } else { visible = true; drive(); }
 })();
 
 /* ===================== 07 用户态与系统调用 ===================== */
@@ -1203,7 +1240,7 @@ const MILESTONES = [
     tok.setAttribute("class", "token"); tok.style.opacity = 0; tok.setAttribute("cx", P.b[0]); tok.setAttribute("cy", P.b[1]);
     ["uk-ok", "uk-no", "uk-burst"].forEach(id => $(id).classList.remove("on")); $("uk-pf").style.opacity = 0;
     $("uk-b").setAttribute("class", "box user"); $("uk-b").style.opacity = 1;
-    $("uk-screen").textContent = "tasks: AAAAB";
+    $("uk-screen").textContent = "tasks: ABABA";
   }
   const SUB = { ok: "write(1, &letter, 1)", ptr: "write(1, (void *)0x10000, 1)", wall: "timer_ticks = 0;" };
   const INTRO = {
@@ -1235,11 +1272,11 @@ const MILESTONES = [
         $("uk-ok").classList.add("on");
         cap("④ 检查指针：在用户的页里", "user_range_ok() 确认 buf 到 buf+1 都落在用户程序的那两页内，通过。");
         await sleep(1400); await move(P.scr);
-        $("uk-screen").textContent = "tasks: AAAABB";
+        $("uk-screen").textContent = "tasks: ABABAB";
         cap("⑤ 内核替它写屏幕", "task_write_char('B') 写进显存，返回值 1 写回栈上存下的 EAX。");
         await sleep(1300); tok.setAttribute("class", "token ok");
         await back();
-        cap("⑥ iret 回到用户态", "write 返回 1。接下来的 sleep(2) 又是一次 int 0x80。");
+        cap("⑥ iret 回到用户态", "write 返回 1。接下来的 sleep(2) 又是一次 int 0x80：内核把任务 B 标成睡眠，切到别的任务。");
       } else {
         $("uk-no").classList.add("on"); tok.setAttribute("class", "token bad");
         cap("④ 检查指针：不在用户的页里", "0x10000 是内核代码，不在用户程序那两页内。内核一个字节也不读。");
@@ -1277,7 +1314,7 @@ const FILES = [
   ["gdt.c", "内核 GDT：内核段、TSS、用户段", "boot/head.s"],
   ["interrupt.c", "IDT、8259、分发、异常面板", "kernel/traps.c"],
   ["paging.c", "页表、用户位", "boot/head.s、mm/memory.c"],
-  ["sched.c", "TSS、任务切换、结束任务", "kernel/sched.c、kernel/exit.c"],
+  ["sched.c", "TSS、任务切换、睡眠与唤醒、结束任务", "kernel/sched.c、kernel/exit.c"],
   ["syscall.c / syscall.h", "系统调用表与调用方式", "kernel/system_call.s、include/unistd.h"],
   ["user.c", "用户程序 user_main()", "（Linux 的用户程序在磁盘上）"],
   ["timer.c · keyboard.c · vga.c", "定时器、键盘、显存输出", "kernel/sched.c、kernel/chr_drv/"],
@@ -1294,7 +1331,7 @@ const COMMITS = [
   ["1c2ef8f", "任务 B 进入用户态"], ["03a8d01", "用户程序出错只结束自己；exit"], ["11b0148", "审查：任务 0 的 CR3"],
   ["c423036", "审查：开中断前清空键盘缓冲"], ["3bb073a", "审查：Caps Lock 重复、换行退格"], ["7a54d0e", "审查：NMI 不算用户的错"],
   ["83bb84f", "审查：读盘重试、关马达"], ["949996f", "审查：加固测试脚本"], ["ba981d2", "审查：改正 Linux 0.11 对照"], ["ed9baf1", "用户代码页只读"],
-  ["0d76fa0", "介绍网页"],
+  ["0d76fa0", "介绍网页"], ["fbb3639", "重新设计介绍网页"], ["3ee724e", "睡眠时让出 CPU，空闲时回到任务 0"],
 ];
 $("commits").innerHTML = COMMITS.map(([h, s]) => `<li><span class="h">${h}</span><span>${s}</span></li>`).join("");
 </script>
