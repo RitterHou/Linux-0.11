@@ -514,9 +514,9 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
     <ol class="milestones" id="milestones" aria-label="第一行每个字母代表的里程碑"></ol>
   </div>
   <div class="stats">
-    <span><b data-fact="loc">7,176</b>行汇编与 C</span>
+    <span><b data-fact="loc">7,411</b>行汇编与 C</span>
     <span><b data-fact="kernelKB">40 KB</b>内核</span>
-    <span><b data-fact="commits">52</b>个提交</span>
+    <span><b data-fact="commits">54</b>个提交</span>
     <span><b data-fact="tests">52</b>项自动化测试</span>
   </div>
 </header>
@@ -987,8 +987,8 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
     <div class="cap" id="heap-cap" aria-live="polite"></div>
     <div class="controls" data-stepper><button type="button" class="primary" data-play>播放</button><button type="button" data-prev>上一步</button><div class="dots" data-dots></div><button type="button" data-next>下一步</button></div>
     <details class="more"><summary>展开细节</summary><ul>
-      <li><code>brk(addr)</code> 不能低于程序的末尾，也不能伸进顶端 64 KB 的栈区，做不到就不动，返回现在的末尾；<code>brk(0)</code> 就是问“堆到哪儿了”。fork 照抄父进程的堆，exec 换了程序，堆从新程序的末尾重新开始。</li>
-      <li>malloc 是用户程序自己的代码（<code>user/ulib.c</code>）：堆上的块一个挨一个，每块前面 8 个字节记着大小、空着没有；先找够大的空块，大得多就切开，找不到就 sbrk 一块新的；free 把块标成空的，和后面紧挨着的空块并成一块。</li>
+      <li><code>brk(addr)</code> 不能低于程序的末尾，最高到栈区往下 16 KB，做不到就不动，返回现在的末尾；<code>brk(0)</code> 就是问“堆到哪儿了”。fork 照抄父进程的堆，exec 换了程序，堆从新程序的末尾重新开始。</li>
+      <li>malloc 是用户程序自己的代码（<code>user/ulib.c</code>）：堆上的块一个挨一个，每块前面 8 个字节记着大小、空着没有；先找够大的空块（路上把挨着的空块并起来），大得多就切开，找不到就 sbrk 一块新的；free 把块标成空的，和后面紧挨着的空块并成一块；realloc 遇到堆末尾的块，直接往上推 brk。</li>
       <li>挪低 brk 也不收回已经补上的页，进程结束时 <code>free_page_dir()</code> 一起收回。Linux 0.11 的 <code>sys_brk()</code> 也只是记下这个数，页同样在缺页时由 <code>do_no_page()</code> 补上；不过它数据段以上的地方缺页都补，不区分堆和栈。</li>
     </ul></details>
   </div>
@@ -1004,7 +1004,7 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
   <div class="big3">
     <div><b data-fact="tests">52</b><span>项测试，一条 <code>make test</code> 全部跑完</span></div>
     <div><b data-fact="selftests">31</b><span>个自检内核：除零、越权、坏指针、重复释放、fork、waitpid、读写文件、exec、管道、信号、堆……</span></div>
-    <div><b data-fact="commits">52</b><span>个提交：每加一个机制，测试通过后单独提交</span></div>
+    <div><b data-fact="commits">54</b><span>个提交：每加一个机制，测试通过后单独提交</span></div>
   </div>
   <p style="color: var(--ink-2); max-width: 70ch">新加的测试都先在临时副本里把代码故意改坏，确认测试真的会失败，再改回来。</p>
   <h3 style="margin-top: 8px">代码审查发现的问题（节选）</h3>
@@ -1017,20 +1017,20 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
   <details><summary>全部提交</summary><ol class="commits" id="commits"></ol></details>
 </section>
 
-<footer>源码在仓库的 <code>learning</code> 分支，<code>main</code> 分支是 Linux 0.11 原始源码。页面里的地址取自提交 <span class="mono" data-fact="head">497f028</span> 构建出的 kernel.elf。在仓库里运行 <code>make run</code> 可以在 QEMU 中看到真实的屏幕。</footer>
+<footer>源码在仓库的 <code>learning</code> 分支，<code>main</code> 分支是 Linux 0.11 原始源码。页面里的地址取自提交 <span class="mono" data-fact="head">551bc82</span> 构建出的 kernel.elf。在仓库里运行 <code>make run</code> 可以在 QEMU 中看到真实的屏幕。</footer>
 </main>
 
 <script>
 /* ===================== 构建事实：来自 objdump -h / -t build/kernel.elf ===================== */
 const FACTS = {
-  head: "497f028", loc: "7,176", kernelKB: "40 KB", kernelSectors: 80, commits: 52, tests: 52,
-  text: 0x10000, rodata: 0x17a20, data: 0x18088, user: 0x19000, userData: 0x1a000, userEnd: 0x1a000,
+  head: "551bc82", loc: "7,411", kernelKB: "40 KB", kernelSectors: 80, commits: 54, tests: 52,
+  text: 0x10000, rodata: 0x17a50, data: 0x180b8, user: 0x19000, userData: 0x1a000, userEnd: 0x1a000,
   bss: 0x1a000, bssEnd: 0x298ac, stackTop: 0x1b000, gdt: 0x1b010, idt: 0x1b0e0,
   identity: 0x1c000, pageDir: 0x20000, alias: 0x21000, ticks: 0x27b78, tss: 0x29204,
   userMain: 0x19010, kmain: 0x101c0, selftests: 31,
 };
 /* 硬盘镜像里的 i 节点号、块号，sh 和 check 里的地址：也由 tools/tour_data.py 回填，各章只引用它 */
-const DISK = {"firstData":8,"itable":[4,7],"imap":2,"zmap":3,"ino":{"bin":3,"dev":21,"etc":24,"issue":25,"hello":26,"tmp":27,"big":2},"blk":{"root":8,"bin":612,"etc":784,"issue":785,"tmp":787,"big":[9,611]},"root":[[".",1],["..",1],["big",2],["bin",3],["dev",21],["etc",24],["hello.txt",26],["tmp",27]],"etc":[[".",24],["..",1],["issue",25]],"issueSize":27,"tmpSize":32,"newIno":28,"newInoBlock":4,"newBit":781,"newBlock":788,"owners":[[783,"/dev"],[784,"/etc"],[785,"/etc/issue"],[786,"/hello.txt"],[787,"/tmp"]],"df":{"blocks":4088,"used":780,"inodes":128,"inodesUsed":27},"lsBin":["d     304   3  .","d     128   1  ..","-    8888   4  cat","-    8988   5  check","-    8884   6  df","-    8888   7  echo","-    8932   8  grep","-    8888   9  hello","-    8888  10  kill","-    8888  11  letter","-    8884  12  ls","-    8888  13  mkdir","-    8912  14  ps","-    8888  15  pwd","-    8884  16  rm","-    8888  17  rmdir","-    8908  18  sh","-    9080  19  sort","-    8952  20  wc"],"sortEnd":"0x40001024","onIntr":"0x40000780","sigRestore":"0x40000790","waitRet":"0x40000439","crashEip":"0x40000250"};
+const DISK = {"firstData":8,"itable":[4,7],"imap":2,"zmap":3,"ino":{"bin":3,"dev":21,"etc":24,"issue":25,"hello":26,"tmp":27,"big":2},"blk":{"root":8,"bin":612,"etc":784,"issue":785,"tmp":787,"big":[9,611]},"root":[[".",1],["..",1],["big",2],["bin",3],["dev",21],["etc",24],["hello.txt",26],["tmp",27]],"etc":[[".",24],["..",1],["issue",25]],"issueSize":27,"tmpSize":32,"newIno":28,"newInoBlock":4,"newBit":781,"newBlock":788,"owners":[[783,"/dev"],[784,"/etc"],[785,"/etc/issue"],[786,"/hello.txt"],[787,"/tmp"]],"df":{"blocks":4088,"used":780,"inodes":128,"inodesUsed":27},"lsBin":["d     304   3  .","d     128   1  ..","-    8912   4  cat","-    9108   5  check","-    8908   6  df","-    8912   7  echo","-    8956   8  grep","-    8912   9  hello","-    8912  10  kill","-    8912  11  letter","-    8908  12  ls","-    8912  13  mkdir","-    8936  14  ps","-    8912  15  pwd","-    8908  16  rm","-    8912  17  rmdir","-    8932  18  sh","-    9104  19  sort","-    8976  20  wc"],"sortEnd":"0x40001024","onIntr":"0x40000780","sigRestore":"0x40000790","waitRet":"0x40000439","crashEip":"0x40000282"};
 const $ = id => document.getElementById(id);
 const hex = (n, w = 5) => "0x" + (n >>> 0).toString(16).toUpperCase().padStart(w, "0");
 const hex8 = n => hex(n, 8);
@@ -1144,7 +1144,7 @@ const MILESTONES = [
   ];
 
   /* ---------- 模拟的 shell：文件系统取自 make 生成的 build/hd.img，各个命令照着 /bin 里的程序写 ---------- */
-  const FS0 = {"ninodes":128,"blocks":4088,"nFreeBlocks":3308,"inodes":{"1":["d",128],"2":["-",614400],"3":["d",304],"4":["-",8888],"5":["-",8988],"6":["-",8884],"7":["-",8888],"8":["-",8932],"9":["-",8888],"10":["-",8888],"11":["-",8888],"12":["-",8884],"13":["-",8888],"14":["-",8912],"15":["-",8888],"16":["-",8884],"17":["-",8888],"18":["-",8908],"19":["-",9080],"20":["-",8952],"21":["d",64],"22":["c",0],"23":["c",0],"24":["d",48],"25":["-",27],"26":["-",41],"27":["d",32]},"dirs":{"1":[[".",1],["..",1],["big",2],["bin",3],["dev",21],["etc",24],["hello.txt",26],["tmp",27]],"3":[[".",3],["..",1],["cat",4],["check",5],["df",6],["echo",7],["grep",8],["hello",9],["kill",10],["letter",11],["ls",12],["mkdir",13],["ps",14],["pwd",15],["rm",16],["rmdir",17],["sh",18],["sort",19],["wc",20]],"21":[[".",21],["..",1],["tty0",22],["tty1",23]],"24":[[".",24],["..",1],["issue",25]],"27":[[".",27],["..",1]]},"texts":{"25":"Linux 0.11 learning kernel\n","26":"Hello from the Minix file system on hda!\n"}};
+  const FS0 = {"ninodes":128,"blocks":4088,"nFreeBlocks":3308,"inodes":{"1":["d",128],"2":["-",614400],"3":["d",304],"4":["-",8912],"5":["-",9108],"6":["-",8908],"7":["-",8912],"8":["-",8956],"9":["-",8912],"10":["-",8912],"11":["-",8912],"12":["-",8908],"13":["-",8912],"14":["-",8936],"15":["-",8912],"16":["-",8908],"17":["-",8912],"18":["-",8932],"19":["-",9104],"20":["-",8976],"21":["d",64],"22":["c",0],"23":["c",0],"24":["d",48],"25":["-",27],"26":["-",41],"27":["d",32]},"dirs":{"1":[[".",1],["..",1],["big",2],["bin",3],["dev",21],["etc",24],["hello.txt",26],["tmp",27]],"3":[[".",3],["..",1],["cat",4],["check",5],["df",6],["echo",7],["grep",8],["hello",9],["kill",10],["letter",11],["ls",12],["mkdir",13],["ps",14],["pwd",15],["rm",16],["rmdir",17],["sh",18],["sort",19],["wc",20]],"21":[[".",21],["..",1],["tty0",22],["tty1",23]],"24":[[".",24],["..",1],["issue",25]],"27":[[".",27],["..",1]]},"texts":{"25":"Linux 0.11 learning kernel\n","26":"Hello from the Minix file system on hda!\n"}};
   const ROOT_INO = name => FS0.dirs[1].find(e => e[0] === name)[1];   /* 根目录里各项的 i 节点号：/bin 多一个程序，后面的号都会变 */
   const BIN = FS0.dirs[ROOT_INO("bin")], DEV = FS0.dirs[ROOT_INO("dev")];
   const PROGS = BIN.map(e => e[0]).filter(n => n !== "." && n !== "..");
@@ -1367,7 +1367,8 @@ const MILESTONES = [
         parts.push(d);
       }
       if (parts.some(isElf)) { print("(sort: the bytes of the programs in /bin are not in this page)\n"); return 0; }
-      const text = parts.join(""), lines = text.split("\n");
+      /* 每个文件的最后一行没有换行，也补上一个，不和下一个文件的第一行接在一起 */
+      const text = parts.map(p => p && !p.endsWith("\n") ? p + "\n" : p).join(""), lines = text.split("\n");
       if (text.endsWith("\n") || text === "") lines.pop();
       lines.sort((a, b) => a < b ? -1 : a > b ? 1 : 0);   /* 字符都在 0～255 之内：按字符比较就是按字节比较 */
       if (reverse) lines.reverse();
@@ -2398,8 +2399,11 @@ const MILESTONES = [
 (() => {
   /* sort 的程序末尾取自 build/user/sort.elf 的 __end（tools/tour_data.py 回填 DISK.sortEnd）；排 /big 时的数字是在 QEMU 里看到的 */
   const END = DISK.sortEnd, endNum = parseInt(END, 16);
-  /* 读 /big 时缓冲区翻倍 12 次，malloc 依次要 520、1032、2056……1048584 字节（连 8 字节的块头），旧块不再用，加起来这么多 */
-  const BIG = 2096736, PEAK = ((endNum + 7) & ~7) + BIG;
+  /*
+   * 排 /big 时堆上的三块（连 8 字节的块头）：输入的缓冲区一直在堆末尾，realloc 原地翻倍到 1 MB（1048584）；
+   * 每一行的位置，数组翻到 4096 项（32776）；归并排序的临时数组，2401 行（19216）。
+   */
+  const BIG = 1048584 + 32776 + 19216, PEAK = ((endNum + 7) & ~7) + BIG;
   const hexA = n => "0x" + n.toString(16).toUpperCase().padStart(8, "0");
   const S = [
     { t: "exec /bin/sort", d: `程序占用户空间的底部：0x40000000 起是代码（只读），再往上是数据和 .bss，到 ${END} 为止。exec 把堆的起点和末尾都设在这里：堆是空的。栈区是顶端的 64 KB，exec 只放好了参数那一页。`,
@@ -2408,16 +2412,16 @@ const MILESTONES = [
       brk: ((endNum + 7) & ~7) + 520, heap: 1, pages: "0", hot: ["brk"], gap: 0 },
     { t: "写进去：缺页时才补", d: "read 把输入写进这块内存。那一页还不存在，CPU 触发缺页异常；handle_page_fault() 看地址在 brk 以下，是堆，就补一页清零的物理页。第 3 行的 page faults 加一，空闲页少一页。",
       brk: ((endNum + 7) & ~7) + 520, heap: 1, pages: "1", hot: ["pages"], gap: 0 },
-    { t: "不够了就翻倍", d: "512 字节满了，sort 再 malloc 一块两倍大的，把内容搬过去，free 旧的。读完 600 KB 的 /big，缓冲区已经翻到 1 MB，算上搬家时留下的旧块，brk 推高了 2 MB；真正写过的 400 多页才分了内存，第 3 行的空闲页一度少了 400 多页。",
-      brk: PEAK, heap: 2, pages: "400 多", hot: ["brk", "pages"], gap: 0 },
-    { t: "碰了没要过的地方", d: "要是程序写到堆的末尾以上、栈区以下的空地，缺页时 handle_page_fault() 不补：这里没要过，一定是程序的错。它被缺页异常结束，就像访问野指针。系统调用的缓冲区落在这里，系统调用返回 -1。",
-      brk: PEAK, heap: 2, pages: "400 多", hot: ["gap"], gap: 1 },
+    { t: "不够了就翻倍", d: "512 字节满了，sort 用 realloc 把它扩到两倍：它是堆上最后一块，往上推 brk 就行，不用搬。读完 600 KB 的 /big，缓冲区已经翻到 1 MB；再加上记每一行位置的数组和排序用的临时数组，brk 推高了 1 MB 多。真正写过的 170 多页才分了内存，第 3 行的空闲页一度少了 170 多页。",
+      brk: PEAK, heap: 2, pages: "170 多", hot: ["brk", "pages"], gap: 0 },
+    { t: "碰了没要过的地方", d: "要是程序写到堆的末尾以上、栈区以下的空地，缺页时 handle_page_fault() 不补：这里没要过，一定是程序的错。它被缺页异常结束，就像访问野指针；系统调用的缓冲区落在这里，系统调用返回 -1。堆最高也离栈区 16 KB，栈用超了 64 KB 碰到的也是空地，不会悄悄写进堆里。",
+      brk: PEAK, heap: 2, pages: "170 多", hot: ["gap"], gap: 1 },
     { t: "退出：一起收回", d: "sort 打印完、退出。sched_exit() 调用 free_page_dir()，把用户空间里每个存在的页、页表和页目录都还给分配器，堆的页也在里面。第 3 行的空闲页回到原来的数。",
       brk: PEAK, heap: 3, pages: "0", hot: ["pages"], gap: 0 },
   ];
   function run(i) {
     const s = S[i], hot = k => s.hot.includes(k) ? "hot" : "";
-    const heapLabel = ["堆：空的", "堆：520 字节", "堆：约 2 MB", "已经收回"][s.heap];
+    const heapLabel = ["堆：空的", "堆：520 字节", "堆：1 MB 多", "已经收回"][s.heap];
     $("heap-map").innerHTML =
       `<div class="stack"><span>栈区（顶端 64 KB）</span><small>0x403F0000～0x403FFFFF</small></div>` +
       `<div class="gap${s.gap ? " bad" : ""}" style="min-height: ${s.heap === 2 || s.heap === 3 ? 70 : 130}px"><span>${s.gap ? "空地：碰了就被结束" : "空地：没要过，缺页不补"}</span><small></small></div>` +
@@ -2426,7 +2430,7 @@ const MILESTONES = [
     $("heap-kv").innerHTML = `<span>堆的起点 start_brk</span><span>${END}</span><span>堆的末尾 brk</span><span class="${hot("brk")}">${hexA(s.brk)}</span>` +
       `<span>堆里补上的页</span><span class="${hot("pages")}">${s.pages}</span>`;
     const mem = $("heap-mem");
-    mem.textContent = s.pages === "0" ? "memory: 照常" : s.pages === "1" ? "page faults 加 1，空闲页少 1" : "空闲页少了 400 多页";
+    mem.textContent = s.pages === "0" ? "memory: 照常" : s.pages === "1" ? "page faults 加 1，空闲页少 1" : "空闲页少了 170 多页";
     mem.className = "dfline" + (s.hot.includes("pages") ? " hot" : "");
     $("heap-cap").innerHTML = `<b>${s.t}</b><span>${s.d}</span>`;
   }
@@ -2442,6 +2446,7 @@ const FINDINGS = [
   ["没有硬盘时 init 一刻不停地 fork", "shell 装不进来就马上退出，init 立刻再拉起一个，CPU 全花在 fork 上。", "shell 一下子就退出了，隔 1 秒再试", "不接硬盘开机，2 秒里写时复制的次数涨得不超过 30", "36d66bf"],
   ["第 17 个参数并进了第 16 个", "参数满了以后没有截断，这一行剩下的部分整个连在最后一个参数上。", "满 16 个就在那里截断，多余的不要", "echo 1 到 17：只打印 1 到 15（argv[0] 是 echo）", "36d66bf"],
   ["空转的程序能不能被 kill，测试没管", "收信号的进程在测试里都睡在 sleep、read 或 waitpid 上，信号总是在系统调用返回时处理。把内核改成只在系统调用返回时检查信号，测试照样全过，可这样一个 for(;;) 的程序就永远杀不掉。", "补一项测试：子进程在用户态空转，kill 之后必须被 SIGTERM 结束；再补一项检查处理函数前后的寄存器", "改错的版本现在会卡住，测试超时失败", "3c699d1"],
+  ["栈用超了会悄悄写坏堆", "brk 能推到紧贴栈区。栈一用超 64 KB，伸进去的就是堆的页：它们在 brk 以下，缺页照补，不出任何错，堆的内容被栈盖掉。", "像 Linux 0.11 一样，堆最高也离栈区 16 KB，中间总留着空地", "子进程想把堆推到紧贴栈区，再把栈一下子用掉 70 KB：必须被缺页异常结束", "551bc82"],
   ["几处与 Linux 0.11 的对照写错了", "Linux 0.11 靠段而不是页表隔离内核；verify_area() 是为写时复制预先触发缺页，不是范围检查；do_timer() 不抢占内核态。", "对照源码逐条改正", "以后每条对照都先用 git show main:… 核实", "ba981d2"],
 ];
 $("findings").innerHTML = FINDINGS.map(([h, bug, fix, test, c]) => `<div class="finding"><h3>${h}</h3>
@@ -2492,7 +2497,7 @@ const COMMITS = [
   ["36d66bf", "审查：坏指针、读写位置、参数截断"], ["02d44c6", "写文件、建目录、重定向"], ["a8f4acc", "当前目录、cd、pwd"],
   ["f6ceb33", "测试：ps 可能看到刚醒的任务"], ["7b669cd", "help 每行都放得下"], ["7a4ad50", "网页：管道、写文件、当前目录"],
   ["3bda4b5", "信号：kill、Ctrl+C、进程组"], ["04113e4", "信号处理函数"], ["3c699d1", "审查：信号的测试缺口和小问题"],
-  ["497f028", "brk、malloc 和 sort"],
+  ["497f028", "brk、malloc 和 sort"], ["551bc82", "审查：堆和栈之间的保护区、realloc、sort"],
 ];
 $("commits").innerHTML = COMMITS.map(([h, s]) => `<li><span class="h">${h}</span><span>${s}</span></li>`).join("");
 </script>
