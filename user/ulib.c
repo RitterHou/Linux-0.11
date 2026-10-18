@@ -9,6 +9,20 @@ __attribute__((section(".text.start"), noreturn)) void _start(int argc, char **a
     exit(main(argc, argv));
 }
 
+/*
+ * 信号处理函数返回到这里：内核把它的地址放在处理函数的返回地址上（见 interrupt.c 的 handle_signals()）。
+ * 此时栈上依次是信号编号、eax、ecx、edx、EFLAGS、被打断的地方：跳过信号编号，弹回这几个寄存器，
+ * 再 ret 回去。Linux 0.11 的 libc 里的 __sig_restore 一模一样。
+ */
+__asm__(".globl sig_restore\n"
+        "sig_restore:\n"
+        "    addl $4, %esp\n"
+        "    popl %eax\n"
+        "    popl %ecx\n"
+        "    popl %edx\n"
+        "    popfl\n"
+        "    ret\n");
+
 uint32_t strlen(const char *s)
 {
     uint32_t n = 0;

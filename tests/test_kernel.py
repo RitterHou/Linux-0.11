@@ -1090,17 +1090,19 @@ def test_no_disk(_m, _elf):
 
 
 def test_signal_syscalls(_m, _elf):
-    """kill 和 signal：结束睡着的子进程、忽略、SIGKILL 不能忽略、进程组、setsid、打断管道和 waitpid、SIGPIPE、参数检查、僵尸"""
+    """kill 和 signal：结束睡着的子进程、忽略、SIGKILL 不能忽略、进程组、setsid、打断管道和 waitpid、SIGPIPE、参数检查、僵尸、处理函数、exec 后的处理方式"""
     d = build_selftest("USER_SIGNAL")
     with Machine(os.path.join(d, "floppy.img")) as m:
         m.wait_for(lambda mm: message_row(mm) == "task 2 exited with code 0", timeout=15, what="init 的结束消息")
         out = task_output(m).replace("A", "")
-        expected = "tikgspwevz"
+        expected = "tikgspwevzhrxb"
         meaning = {"t": "kill 打断 sleep，子进程被 SIGTERM 结束，状态 0x20F", "i": "忽略了 SIGTERM 的子进程照常退出",
                    "k": "SIGKILL 不能忽略", "g": "kill(0, …) 发给自己这一组，忽略随 fork 继承",
                    "s": "setsid 之后自成一组，kill(-组号, …) 才发得到", "p": "睡在管道上的读者、写者都能被结束",
                    "w": "睡在 waitpid 里的进程能被结束", "e": "往没人读的管道里写：被 SIGPIPE 结束，忽略了就返回 -1", "v": "kill、signal 的参数不对返回 -1，内核任务和 init 收不到信号",
-                   "z": "给僵尸发信号返回 0，退出码不变"}
+                   "z": "给僵尸发信号返回 0，退出码不变", "h": "处理函数拿到信号编号，被打断的 kill 照样返回 0，第二次还有效",
+                   "r": "设了处理函数的信号打断管道上的 read：返回 -EINTR，程序接着运行",
+                   "x": "exec 之后处理函数改回默认，忽略的保持忽略", "b": "处理函数不在用户的内存里，signal 返回 SIG_ERR"}
         for i, ch in enumerate(expected):
             check(len(out) > i and out[i] == ch, f"第 {i + 1} 项（{meaning[ch]}）没有通过：第 6 行去掉 A 后是 {out!r}，应为 {expected!r}")
         m.wait_for(lambda mm: mm.screen(4)[3].startswith("memory: 3839/3840 pages free"), timeout=2,
@@ -1269,10 +1271,9 @@ def test_signals(m, elf):
     wait_prompt(m)
     type_text(m, "ech")
     m.sendkeys(["ctrl-c"])
-    m.wait_for(lambda mm: [r for r in console(mm) if r][-1] == "$ ech^C", timeout=2, what="在提示符上按 Ctrl+C：回显 ^C，丢掉这一行")
-    type_text(m, "echo ok\n")
-    m.wait_for(lambda mm: [r for r in console(mm) if r][-3:] == ["echo ok", "ok", "$"], timeout=2,
-               what="丢掉的那一行不会交给 shell，接着敲的命令照常运行")
+    m.wait_for(lambda mm: [r for r in console(mm) if r][-2:] == ["$ ech^C", "$"], timeout=2,
+               what="在提示符上按 Ctrl+C：回显 ^C，丢掉这一行；shell 的处理函数打断 read，重新打出提示符")
+    check(run_command(m, "echo ok") == ["ok"], "丢掉的那一行不会交给 shell，接着敲的命令照常运行")
     time.sleep(1.0)
     check("E" in task_output(m), f"后台的 letter 忽略 SIGINT，按了 Ctrl+C 还在写 E：{task_output(m)!r}")
     check(run_command(m, "kill " + pid) == [], "kill 应成功")

@@ -236,15 +236,43 @@ static void user_exception(const struct interrupt_frame *frame)
 }
 
 /*
- * 回到用户态之前处理信号：现在只有一种动作，结束进程，在第 7 行写一条消息。忽略的信号发的时候就丢掉了。
- * Linux 0.11 在 system_call.s 的 ret_from_sys_call 里做同样的检查：系统调用和定时器中断返回用户态之前，
- * 取出编号最小的信号，交给 do_signal()；没有设处理函数的信号，默认就是 do_exit()。
+ * 回到用户态之前处理信号：取出编号最小的一个。忽略的信号发的时候就丢掉了。
+ * Linux 0.11 在 system_call.s 的 ret_from_sys_call 里做同样的检查，再交给 do_signal()。
+ *
+ * 设了处理函数的，就让进程“先去调用它一下”：在用户栈上压 7 个字，再把返回地址（frame 里的 EIP）改成处理函数。
+ * 从低地址往高：
+ *     restorer        处理函数的返回地址
+ *     sig             处理函数的参数
+ *     eax ecx edx     C 函数可以随便改的寄存器（eax 里是被打断的系统调用的返回值）
+ *     eflags
+ *     eip             原来要回去的地方
+ * 处理函数是普通的 C 函数，返回时 ret 到 restorer；restorer 跳过 sig，弹回 eax、ecx、edx、EFLAGS，
+ * 再 ret 到原来的 eip，程序接着往下走，像什么也没发生过（被打断的系统调用返回 -EINTR）。
+ * ebx、esi、edi、ebp 由处理函数自己按 C 的约定保存。这和 Linux 0.11 的 do_signal() 摆的一样（SA_NOMASK 时 7 个字）。
+ * 栈上放不下（用户栈坏了），就当没有处理函数，结束进程。
  */
-static void handle_signals(void)
+static void handle_signals(struct interrupt_frame *frame)
 {
-    int sig = sched_take_signal();
+    uint32_t handler, restorer;
+    int sig = sched_take_signal(&handler, &restorer);
     if (!sig)
         return;
+    if (handler != (uint32_t)SIG_DFL) {
+        uint32_t sp = frame->user_esp - 7 * 4;
+        if (sp < frame->user_esp && user_write_ok(sp, 7 * 4)) {
+            uint32_t *p = (uint32_t *)sp;
+            p[0] = restorer;
+            p[1] = (uint32_t)sig;
+            p[2] = frame->eax;
+            p[3] = frame->ecx;
+            p[4] = frame->edx;
+            p[5] = frame->eflags;
+            p[6] = frame->eip;
+            frame->user_esp = sp;
+            frame->eip = handler;
+            return;
+        }
+    }
     struct text_line line;
     line_init(&line);
     line_append(&line, "task ");
@@ -304,5 +332,5 @@ void interrupt_dispatch(struct interrupt_frame *frame)
      * frame 是它自己内核栈上的，看的是它自己被打断的地方。
      */
     if (from_user_mode(frame))
-        handle_signals();
+        handle_signals(frame);
 }

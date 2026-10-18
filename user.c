@@ -10,6 +10,38 @@
 #include "selftest.h"
 #include "syscall.h"
 
+/*
+ * 信号处理函数返回到这里：内核把它的地址放在处理函数的返回地址上（见 interrupt.c 的 handle_signals()）。
+ * 此时栈上依次是信号编号、eax、ecx、edx、EFLAGS、被打断的地方：跳过信号编号，弹回这几个寄存器，
+ * 再 ret 回去。Linux 0.11 的 libc 里的 __sig_restore 一模一样。和 user/ulib.c 里的相同：
+ * 这个文件链接进内核映像，用不到硬盘上程序的函数库。
+ */
+__asm__(".globl sig_restore\n"
+        "sig_restore:\n"
+        "    addl $4, %esp\n"
+        "    popl %eax\n"
+        "    popl %ecx\n"
+        "    popl %edx\n"
+        "    popfl\n"
+        "    ret\n");
+
+#if defined(SELFTEST) && SELFTEST == SELFTEST_USER_SIGNAL
+static volatile int32_t caught, caught_count;
+
+static void on_signal(int sig)
+{
+    caught = sig;
+    caught_count++;
+}
+
+/* exec 成功之后，任务的名字就是新程序的文件名。 */
+static int is_cat(int32_t pid)
+{
+    struct taskinfo info;
+    return taskinfo(pid, &info) == 0 && info.name[0] == 'c' && info.name[1] == 'a' && info.name[2] == 't' && info.name[3] == 0;
+}
+#endif
+
 #if defined(SELFTEST) && SELFTEST == SELFTEST_USER_WRITE_KERNEL
 extern volatile uint32_t timer_ticks;   /* 内核的变量，所在的页没有用户位 */
 #endif
@@ -394,17 +426,22 @@ void user_main(void)
     exit(0);
 #elif SELFTEST == SELFTEST_USER_SIGNAL
     /*
-     * 每一项通过就写一个字母，期望第 6 行（去掉任务 A 的 A）是 tikgspwevz。被信号结束的状态是 0x200 加信号编号。
+     * 每一项通过就写一个字母，期望第 6 行（去掉任务 A 的 A）是 tikgspwevzhrxb。被信号结束的状态是 0x200 加信号编号。
      *   t：kill 一个在 sleep 里的子进程：sleep 被打断，它被 SIGTERM 结束。
      *   i：子进程忽略 SIGTERM：kill 返回 0，它照常睡完、退出。
-     *   k：SIGKILL 不能忽略，signal(SIGKILL, …) 返回 -1；忽略了 SIGTERM 的子进程照样被 SIGKILL 结束。
+     *   k：SIGKILL 不能忽略，signal(SIGKILL, …) 返回 SIG_ERR；忽略了 SIGTERM 的子进程照样被 SIGKILL 结束。
      *   g：kill(0, …) 发给自己这一组；忽略是 fork 时继承的：改回默认的子进程被结束，没改的照常退出。
      *   s：setsid 之后子进程自成一组：kill(0, …) 找不到它，kill(-它的任务号, …) 才行；第二次 setsid 返回 -1。
      *   p：睡在管道上的读者和写者都能被信号结束。
      *   w：睡在 waitpid 里的子进程能被信号结束，它的子进程成了孤儿，照常运行。
      *   e：读的一头全关了还往管道里写：写的进程被 SIGPIPE 结束；忽略了 SIGPIPE 的，write 返回 -1。
-     *   v：不存在的任务、内核任务、init 自己、信号编号不对、pid 为 -1，kill 都返回 -1；signal 的编号不对也返回 -1。
+     *   v：不存在的任务、内核任务、init 自己、信号编号不对、pid 为 -1，kill 都返回 -1；signal 的编号不对返回 SIG_ERR。
      *   z：给已经结束、还没被收走的子进程发信号：kill 返回 0，退出码不变。
+     *   h：处理函数：子进程 kill 自己，处理函数拿到信号编号，kill 照样返回 0（eax 由 sig_restore 恢复），
+     *      局部变量不受影响；第二次还是调用处理函数；signal 返回原来的处理函数。
+     *   r：睡在管道上的子进程，信号设了处理函数：处理函数运行，read 返回 -EINTR，程序接着往下走。
+     *   x：exec 之后，设过处理函数的信号改回默认（新程序被 SIGTERM 结束），忽略的保持忽略（只有 SIGKILL 结束得了）。
+     *   b：处理函数不在用户自己的内存里，signal 返回 SIG_ERR。
      */
     int32_t st = 0, ok;
     int32_t c = fork();
@@ -428,7 +465,7 @@ void user_main(void)
 
     c = fork();
     if (c == 0) {
-        if (signal(SIGKILL, SIG_IGN) != -1 || signal(SIGTERM, SIG_IGN) != SIG_DFL || signal(SIGTERM, SIG_IGN) != SIG_IGN)
+        if (signal(SIGKILL, SIG_IGN) != SIG_ERR || signal(SIGTERM, SIG_IGN) != SIG_DFL || signal(SIGTERM, SIG_IGN) != SIG_IGN)
             exit(9);
         sleep(100000);
         exit(1);
@@ -529,7 +566,7 @@ void user_main(void)
         sleep(100000);
         exit(1);
     }
-    ok &= kill(c, 0) == -1 && kill(c, 33) == -1 && signal(0, SIG_IGN) == -1 && signal(33, SIG_IGN) == -1;
+    ok &= kill(c, 0) == -1 && kill(c, 33) == -1 && signal(0, SIG_IGN) == SIG_ERR && signal(33, SIG_IGN) == SIG_ERR;
     ok &= kill(c, SIGKILL) == 0 && waitpid(c, &st, 0) == c;
     write(1, ok ? "v" : "V", 1);
 
@@ -539,6 +576,66 @@ void user_main(void)
     sleep(3);                           /* 子进程已经结束，成了僵尸 */
     ok = kill(c, SIGTERM) == 0 && waitpid(c, &st, 0) == c && st == 6;
     write(1, ok ? "z" : "Z", 1);
+
+    c = fork();
+    if (c == 0) {
+        volatile int32_t keep = 12345;
+        int good = signal(SIGTERM, on_signal) == SIG_DFL;
+        good &= kill(getpid(), SIGTERM) == 0 && caught == SIGTERM && caught_count == 1;
+        good &= kill(getpid(), SIGTERM) == 0 && caught_count == 2;
+        good &= keep == 12345 && signal(SIGTERM, SIG_DFL) == on_signal;
+        exit(good ? 0 : 1);
+    }
+    ok = waitpid(c, &st, 0) == c && st == 0;
+    write(1, ok ? "h" : "H", 1);
+
+    int32_t q[2];
+    pipe(q);
+    c = fork();
+    if (c == 0) {
+        signal(SIGTERM, on_signal);
+        char ch;
+        int32_t r = read(q[0], &ch, 1);     /* 写的一头开着、没人写：一直等，直到信号来 */
+        exit(r == -EINTR && caught == SIGTERM ? 0 : 1);
+    }
+    sleep(3);
+    ok = kill(c, SIGTERM) == 0 && waitpid(c, &st, 0) == c && st == 0;
+    write(1, ok ? "r" : "R", 1);
+
+    c = fork();
+    if (c == 0) {
+        signal(SIGTERM, on_signal);
+        if (q[0] != 0) {                    /* cat 从这个管道读：没人写，一直等。init 只开着 1 号，q[0] 多半就是 0 */
+            close(0);
+            dup(q[0]);
+        }
+        char *argv[] = { "cat", 0 };
+        execv("/bin/cat", argv);
+        exit(1);
+    }
+    c2 = fork();
+    if (c2 == 0) {
+        signal(SIGTERM, SIG_IGN);
+        if (q[0] != 0) {
+            close(0);
+            dup(q[0]);
+        }
+        char *argv[] = { "cat", 0 };
+        execv("/bin/cat", argv);
+        exit(1);
+    }
+    for (int k = 0; k < 100 && !(is_cat(c) && is_cat(c2)); k++)
+        sleep(1);                           /* 等两个子进程都换成 cat */
+    ok = kill(c, SIGTERM) == 0 && waitpid(c, &st, 0) == c && st == (0x200 | SIGTERM);
+    ok &= kill(c2, SIGTERM) == 0 && waitpid(c2, &st, WNOHANG) == 0;
+    ok &= kill(c2, SIGKILL) == 0 && waitpid(c2, &st, 0) == c2 && st == (0x200 | SIGKILL);
+    close(q[0]);
+    close(q[1]);
+    write(1, ok ? "x" : "X", 1);
+
+    ok = signal(SIGTERM, (sighandler_t)0x00100000) == SIG_ERR;     /* 内核的地址 */
+    ok &= signal(SIGTERM, (sighandler_t)0x50000000) == SIG_ERR;    /* 没有映射的地址 */
+    write(1, ok ? "b" : "B", 1);
     sleep(5);                           /* 等孤儿处理完信号、退出，第 7 行最后留下的是 init 的消息 */
     exit(0);
 #elif SELFTEST == SELFTEST_ALL_EXIT
