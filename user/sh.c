@@ -214,8 +214,9 @@ int main(int sh_argc, char **sh_argv)
             continue;
         }
         if (strcmp(argv[0], "help") == 0) {
-            print("commands: ls cat echo ps wc grep rm mkdir rmdir df pwd hello check, cd, letter X &, exit\n");
-            print("pipes and files: ls /bin | wc, echo hi > /tmp/a, cat < /tmp/a\n");
+            print("programs: ls cat echo ps wc grep rm mkdir rmdir df pwd hello check letter\n");
+            print("built in: cd [dir], exit, help\n");
+            print("try: ls /bin | wc, echo hi > /tmp/a, cat < /tmp/a, cd /etc, letter D &\n");
             continue;
         }
         run_line(argv, argc, background);
