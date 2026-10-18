@@ -6,10 +6,15 @@
  * EFLAGS 和 EIP 存进当前任务的 TSS，再从目标任务的 TSS 装入这些寄存器以及 CR3，
  * 于是目标任务从它上次被切走的地方接着运行。CR3 只装入、不保存，每个 TSS 都要预先填好。
  *
- * 任务 0 是 kmain() 自己：sched_init() 用 ltr 把它登记为当前任务，
- * 调度开始后它就被切走，之后只在 A、B 之间轮转。
+ * 任务 0 是 kmain() 自己：sched_init() 用 ltr 把它登记为当前任务，调度开始后它当空闲任务，
+ * 只在 A、B 都不能运行时才运行。
  * 任务 A 在内核态（特权级 0）运行 task_main()；任务 B 在用户态（特权级 3）运行 user.c 的 user_main()，
  * 两者做同样的事，都只通过系统调用输出和等待。
+ *
+ * 什么时候切换：
+ *   - 任务调用 sleep：立刻把 CPU 让给别的任务，没有就让给任务 0（sched_sleep）。
+ *   - 定时器中断：先叫醒到时间的任务；任务 0 在运行就马上让给它，否则当前任务用完时间片才切换（schedule）。
+ * 第二条是抢占：一直不睡的任务也会被切走，别的任务照样有机会运行。
  */
 #include "io.h"
 #include "kernel.h"
@@ -20,12 +25,19 @@
 #define TSS_GDT_INDEX  3            /* 任务 n 的 TSS 描述符在 GDT 第 3 + n 项 */
 #define TSS_SEL(n)     ((TSS_GDT_INDEX + (n)) * 8)
 #define TSS_ACCESS     0x89         /* 存在、DPL 0、类型 9：32 位可用 TSS */
-#define TASK_SLICE     20           /* 每个任务连续运行 20 个 tick（200 ms）再切换 */
+#define TASK_SLICE     20           /* 不睡的任务最多连续运行 20 个 tick（200 ms）就被切走 */
+
+#define TASK_UNUSED    0            /* 没有任务，或者任务已经结束 */
+#define TASK_RUNNING   1            /* 能运行：正在运行，或者等着轮到它 */
+#define TASK_SLEEPING  2            /* 在 sleep 里等时间到，不参与调度 */
 #define STACK_SIZE     4096
 
 #define OUTPUT_ROW     6
 #define OUTPUT_COL     7            /* 紧跟在 "tasks: " 后面 */
 #define OUTPUT_WIDTH   (80 - OUTPUT_COL)
+
+#define IDLE_ROW       4            /* 空闲比例写在 "ticks: N" 的右边 */
+#define IDLE_COL       20
 
 /* 32 位 TSS 的格式由 CPU 规定，共 104 字节。 */
 struct tss {
@@ -46,9 +58,11 @@ static struct tss tss[TASKS];
 static uint8_t task_stacks[TASKS - 1][STACK_SIZE] __attribute__((aligned(16)));
 
 static int current_task;            /* 当前任务号，起始为 0 */
-static int task_alive[TASKS];       /* 任务 1、2 是否还在运行；任务 0 是空闲任务，不在其中 */
+/* 任务 1、2 的状态。任务 0 是空闲任务，不睡也不结束，它的状态不用；Linux 0.11 的 task[0] 也是这样。 */
+static int task_state[TASKS];
+static uint32_t wake_at[TASKS];     /* 睡眠的任务在 timer_ticks 到达这个值时被叫醒 */
 static int scheduling;              /* sched_start() 之后才开始切换 */
-static uint32_t slice_left;
+static uint32_t slice_left;         /* 当前任务还剩几个 tick 的时间片 */
 static int output_pos;              /* 两个任务共用的输出位置 */
 
 /*
@@ -79,7 +93,7 @@ static void task_main(void)
     char letter = (char)('A' + getpid() - 1);
 
 #if defined(SELFTEST) && SELFTEST == SELFTEST_ALL_EXIT
-    for (int i = 0; i < 5; i++) {   /* 自检：写 5 个字母后结束，之后任务 B 也会结束 */
+    for (int i = 0; i < 5; i++) {   /* 自检：写 5 个字母后结束；任务 B 写完 bye 就结束了 */
         write(1, &letter, 1);
         sleep(2);
     }
@@ -141,7 +155,7 @@ void sched_init(void)
     }
     init_task(1, task_main, cr3);
     init_user_task(2, user_main, (uint32_t)&user_stack[USER_STACK_SIZE], cr3);
-    task_alive[1] = task_alive[2] = 1;
+    task_state[1] = task_state[2] = TASK_RUNNING;
 
     /* 把 kmain 登记为任务 0：第一次切换时，CPU 才知道把当前寄存器存到哪个 TSS。 */
     __asm__ volatile("ltr %w0" : : "r"(TSS_SEL(0)));
@@ -149,8 +163,7 @@ void sched_init(void)
 
 void sched_start(void)
 {
-    slice_left = 1;                 /* 下一个 tick 就切到任务 A */
-    scheduling = 1;
+    scheduling = 1;                 /* 此刻运行的是任务 0，下一个 tick 就让给任务 A */
 }
 
 /* 远跳转到 TSS 选择子：偏移被忽略，CPU 执行任务切换。 */
@@ -167,7 +180,7 @@ static void switch_to(int next)
 }
 
 /*
- * 按 1 → 2 → 1 … 的顺序找下一个还在运行的任务（可能就是当前任务自己）。
+ * 按 1 → 2 → 1 … 的顺序找下一个能运行的任务（可能就是当前任务自己）。
  * 一个都没有时返回 0：任务 0 是 kmain 的 hlt 循环，正好当空闲任务。
  */
 static int pick_next(void)
@@ -176,21 +189,86 @@ static int pick_next(void)
 
     for (int k = 0; k < TASKS - 1; k++) {
         n = n % (TASKS - 1) + 1;
-        if (task_alive[n])
+        if (task_state[n] == TASK_RUNNING)
             return n;
     }
     return 0;
 }
 
-/* 由定时器中断调用。时间片用完就切到下一个还在运行的任务。 */
-void schedule(void)
+/* 切到下一个能运行的任务，并给它一个完整的时间片。 */
+static void reschedule(void)
 {
-    if (!scheduling || --slice_left > 0)
-        return;
-    slice_left = TASK_SLICE;
     int next = pick_next();
+
+    slice_left = TASK_SLICE;
     if (next != current_task)       /* 跳到自己的 TSS 会因为它“忙”而触发 #GP */
         switch_to(next);
+}
+
+/* 叫醒睡到时间的任务。用差值比较，timer_ticks 回绕到 0 后也对。 */
+static void wake_sleepers(void)
+{
+    for (int n = 1; n < TASKS; n++)
+        if (task_state[n] == TASK_SLEEPING && (int32_t)(timer_ticks - wake_at[n]) >= 0)
+            task_state[n] = TASK_RUNNING;
+}
+
+/*
+ * 每个 tick 看一眼此刻谁占着 CPU，是任务 0 就记一次空闲；每秒在第 4 行显示一次空闲比例。
+ * Linux 0.11 的 do_timer() 用同样的抽样办法，给当前进程记一个 tick 的 utime 或 stime。
+ */
+static void account_idle(void)
+{
+    static uint32_t idle, total;
+    char buf[12];
+
+    if (current_task == 0)
+        idle++;
+    if (++total < TIMER_HZ)
+        return;
+    const char *digits = format_uint(idle * 100 / total, 10, buf);
+    int len = 0;
+    while (digits[len])
+        len++;
+    vga_write_at(IDLE_ROW, IDLE_COL, "idle:    %", VGA_GRAY);
+    vga_write_at(IDLE_ROW, IDLE_COL + 9 - len, digits, VGA_GRAY);   /* 百分数右对齐在 % 前面 */
+    idle = total = 0;
+}
+
+/* 由定时器中断调用：记空闲、叫醒到时间的任务，再决定要不要切换。 */
+void schedule(void)
+{
+    if (!scheduling)
+        return;
+    account_idle();
+    wake_sleepers();
+    if (current_task == 0 || --slice_left == 0)
+        reschedule();
+}
+
+/*
+ * sleep 系统调用：当前任务睡 ticks 个 tick，立刻把 CPU 让给别的任务，没有就让给任务 0。
+ * 时间到了，定时器中断里的 wake_sleepers() 把它改回能运行；轮到它时从 reschedule() 里接着往下走。
+ * 关中断让“标记为睡眠”和“切走”之间插不进定时器中断；切回来时恢复原来的中断状态。
+ * Linux 0.11 的 sleep_on() 也是先改 current->state，再调用 schedule()。
+ */
+void sched_sleep(uint32_t ticks)
+{
+    uint32_t start = timer_ticks;
+
+    if (ticks == 0)
+        return;
+    if (!scheduling || current_task == 0) {
+        /* 任务 0 没有可以让给的任务，只能原地等。自检会在开始调度前从 kmain 调用 sleep。 */
+        while (timer_ticks - start < ticks)
+            __asm__ volatile("sti; hlt");
+        return;
+    }
+    uint32_t flags = irq_save();
+    task_state[current_task] = TASK_SLEEPING;
+    wake_at[current_task] = start + ticks;
+    reschedule();
+    irq_restore(flags);
 }
 
 /*
@@ -200,9 +278,9 @@ void schedule(void)
  */
 void sched_exit_current(void)
 {
-    task_alive[current_task] = 0;
-    slice_left = TASK_SLICE;
-    switch_to(pick_next());
+    __asm__ volatile("cli");        /* 不再返回，切到的任务从自己的 TSS 装入 EFLAGS，中断状态随之恢复 */
+    task_state[current_task] = TASK_UNUSED;
+    reschedule();
     for (;;)                        /* 不会执行到这里 */
         __asm__ volatile("hlt");
 }
