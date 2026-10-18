@@ -33,7 +33,7 @@
 #define SYS_CHDIR  18               /* chdir(path)：换当前目录 */
 #define SYS_GETCWD 19               /* getcwd(buf, size)：取当前目录的绝对路径 */
 #define SYS_KILL   20               /* kill(pid, sig)：给任务（pid > 0）或进程组（0 是自己的组，负数是 -pid 那一组）发信号 */
-#define SYS_SIGNAL 21               /* signal(sig, handler)：这个信号来了怎么办：SIG_DFL 结束进程，SIG_IGN 不理 */
+#define SYS_SIGNAL 21               /* signal(sig, handler, restorer)：这个信号来了怎么办：结束进程、不理，或者调用 handler */
 #define SYS_SETSID 22               /* setsid()：自己当一个新的进程组的头，返回组号 */
 #define SYS_CALLS  23
 
@@ -67,8 +67,10 @@ struct taskinfo {
 #define SIGKILL    9                /* 不能忽略 */
 #define SIGPIPE    13               /* 往读的一头全关了的管道里写 */
 #define SIGTERM    15               /* kill 命令默认发的信号 */
-#define SIG_DFL    0                /* 默认动作：结束进程 */
-#define SIG_IGN    1                /* 不理这个信号 */
+typedef void (*sighandler_t)(int);
+#define SIG_DFL    ((sighandler_t)0)    /* 默认动作：结束进程 */
+#define SIG_IGN    ((sighandler_t)1)    /* 不理这个信号 */
+#define SIG_ERR    ((sighandler_t)-1)   /* signal 失败 */
 
 /* open 的 flags，取值与 Linux 0.11 的 include/fcntl.h 相同 */
 #define O_RDONLY   00
@@ -190,9 +192,15 @@ static inline int32_t kill(int32_t pid, int32_t sig)
     return syscall3(SYS_KILL, (uint32_t)pid, (uint32_t)sig, 0);
 }
 
-static inline int32_t signal(int32_t sig, uint32_t handler)
+/*
+ * 处理函数返回到 sig_restore（用户程序自己的代码，见 user/ulib.c）：它恢复内核在栈上保存的寄存器，
+ * 回到被信号打断的地方。Linux 0.11 的 libc 也是把 __sig_restore 的地址当第三个参数交给 sys_signal。
+ */
+void sig_restore(void);
+
+static inline sighandler_t signal(int32_t sig, sighandler_t handler)
 {
-    return syscall3(SYS_SIGNAL, (uint32_t)sig, handler, 0);
+    return (sighandler_t)syscall3(SYS_SIGNAL, (uint32_t)sig, (uint32_t)handler, (uint32_t)sig_restore);
 }
 
 static inline int32_t setsid(void)

@@ -67,7 +67,8 @@ struct task {
     char name[TASK_NAME_LEN];       /* ps 显示的名字：内核建的任务起好的名字，exec 后是程序的文件名 */
     char cwd[PATH_MAX];             /* 当前目录：规范化过的绝对路径，内核建的任务是 /，fork 时继承 */
     uint32_t signal;                /* 收到、还没处理的信号：第 sig - 1 位 */
-    uint32_t ignored;               /* 忽略哪些信号（signal(sig, SIG_IGN)），fork 和 exec 都保留 */
+    uint32_t action[32];            /* 每个信号来了怎么办：SIG_DFL、SIG_IGN 或用户的处理函数；fork 时继承 */
+    uint32_t restorer;              /* 处理函数返回到这里（用户程序里的 sig_restore） */
     int pgrp;                       /* 进程组：Ctrl+C 发给终端的前台进程组里的每个任务；fork 时继承 */
     int leader;                     /* 调用过 setsid，是进程组的头：它打开终端时，终端的前台进程组就是它这一组 */
     int interruptible;              /* 睡在 interruptible_sleep_on 里：信号能叫醒它 */
@@ -402,7 +403,7 @@ static void send_signal(int n, int sig)
     struct task *t = &tasks[n];
     uint32_t bit = 1u << (sig - 1);
 
-    if (t->ignored & bit)
+    if (t->action[sig - 1] == (uint32_t)SIG_IGN)
         return;
     t->signal |= bit;
     if (t->state == TASK_SLEEPING || t->state == TASK_WAITING || (t->state == TASK_BLOCKED && t->interruptible))
@@ -433,26 +434,41 @@ int sched_kill(int pid, int sig)
 }
 
 /*
- * signal 系统调用：这个信号来了怎么办。只认 SIG_DFL（结束进程）和 SIG_IGN（不理）；返回原来的处理方式。
+ * signal 系统调用：这个信号来了怎么办：SIG_DFL 结束进程，SIG_IGN 不理，否则是用户的处理函数，
+ * restorer 是处理函数返回的地方（见 interrupt.c 的 handle_signals()）。返回原来的处理方式。
  * 改成忽略时，已经挂着的这个信号也丢掉。SIGKILL 改不了：总得有办法结束一个进程。
+ * Linux 0.11 的 sys_signal() 设的是一次性的处理函数（SA_ONESHOT）：处理一次就改回默认，要用的话
+ * 得在处理函数里再设一遍；这里像后来的 Unix 一样一直有效。
  */
-int sched_signal(int sig, uint32_t handler)
+int sched_signal(int sig, uint32_t handler, uint32_t restorer)
 {
-    if (sig < 1 || sig > 32 || sig == SIGKILL || handler > SIG_IGN)
+    if (sig < 1 || sig > 32 || sig == SIGKILL)
         return -1;
+    if (handler > (uint32_t)SIG_IGN && (!user_range_ok(handler, 1) || !user_range_ok(restorer, 1)))
+        return -1;                      /* 处理函数在用户态运行，必须是用户自己的内存 */
     struct task *t = &tasks[current_task];
-    uint32_t bit = 1u << (sig - 1);
     uint32_t flags = irq_save();        /* 键盘中断随时可能往 t->signal 里挂信号 */
-    int old = (t->ignored & bit) ? SIG_IGN : SIG_DFL;
+    uint32_t old = t->action[sig - 1];
 
-    if (handler == SIG_IGN) {
-        t->ignored |= bit;
-        t->signal &= ~bit;
-    } else {
-        t->ignored &= ~bit;
-    }
+    t->action[sig - 1] = handler;
+    if (handler == (uint32_t)SIG_IGN)
+        t->signal &= ~(1u << (sig - 1));
+    else if (handler != (uint32_t)SIG_DFL)
+        t->restorer = restorer;
     irq_restore(flags);
-    return old;
+    return (int)old;
+}
+
+/*
+ * exec 换了程序，原来的处理函数在新程序里什么也不是：设过处理函数的信号都改回默认，忽略的保持忽略（POSIX 的规定）。
+ * Linux 0.11 的 do_execve() 把 32 个都改回默认，连忽略的也改回来。
+ */
+void sched_exec_signals(void)
+{
+    struct task *t = &tasks[current_task];
+    for (int i = 0; i < 32; i++)
+        if (t->action[i] != (uint32_t)SIG_IGN)
+            t->action[i] = (uint32_t)SIG_DFL;
 }
 
 /*
@@ -490,8 +506,11 @@ int sched_is_leader(void)
     return tasks[current_task].leader;
 }
 
-/* 取出一个要处理的信号：编号最小的那个，没有返回 0。回到用户态之前由 interrupt_dispatch() 调用。 */
-int sched_take_signal(void)
+/*
+ * 取出一个要处理的信号：编号最小的那个，连同它的处理方式和 restorer；没有返回 0。
+ * 回到用户态之前由 interrupt_dispatch() 调用。
+ */
+int sched_take_signal(uint32_t *handler, uint32_t *restorer)
 {
     struct task *t = &tasks[current_task];
     uint32_t flags = irq_save();
@@ -501,6 +520,8 @@ int sched_take_signal(void)
         while (!(t->signal & (1u << sig)))
             sig++;
         t->signal &= ~(1u << sig);
+        *handler = t->action[sig];
+        *restorer = t->restorer;
         sig++;
     }
     irq_restore(flags);
@@ -569,7 +590,9 @@ int sched_fork(const struct interrupt_frame *frame)
         .iomap_base = sizeof(struct tss),
     };
     tasks[n] = (struct task){ .state = TASK_RUNNING, .page_dir = dir, .kstack = kstack, .parent = current_task,
-                              .ignored = tasks[current_task].ignored, .pgrp = tasks[current_task].pgrp };   /* 收到的信号不继承 */
+                              .restorer = tasks[current_task].restorer, .pgrp = tasks[current_task].pgrp };   /* 收到的信号不继承 */
+    for (int i = 0; i < 32; i++)
+        tasks[n].action[i] = tasks[current_task].action[i];
     set_name(n, tasks[current_task].name);
     for (int i = 0; i < PATH_MAX; i++)
         tasks[n].cwd[i] = tasks[current_task].cwd[i];

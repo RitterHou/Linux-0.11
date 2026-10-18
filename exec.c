@@ -138,6 +138,7 @@ int do_exec(const char *path, uint32_t user_argv, struct interrupt_frame *frame)
     frame->eflags = 0x202;          /* IF=1，其余标志清零 */
     frame->ebx = frame->ecx = frame->edx = frame->esi = frame->edi = frame->ebp = 0;
     sched_set_name(path);
+    sched_exec_signals();           /* 原来的处理函数在新程序里没有意义 */
     if (first) {
         first = 0;
         vga_write_at(0, 11, "E", VGA_GRAY);     /* 第一次从硬盘装入程序 */

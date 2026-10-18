@@ -4,8 +4,9 @@
  *   - 用 | 把几个命令接起来：每一段一个子进程，相邻两段之间一个管道，前一个的标准输出接到后一个的标准输入；
  *   - > 文件、>> 文件、< 文件：把这一段的标准输出写进文件（清空或者接在末尾），或者从文件读标准输入；
  *   - 最后一个参数是 & 的，在后台运行，不等它；每次读命令之前收走已经结束的后台程序；
- *   - Ctrl+C：终端给前台进程组发 SIGINT。shell 自己忽略它，前台的子进程在 exec 之前改回默认，就被结束；
- *     后台的子进程继续忽略，exec 之后也不变，所以 Ctrl+C 停不了后台程序，要用 kill。
+ *   - Ctrl+C：终端给前台进程组发 SIGINT。shell 自己接住它（on_intr），被打断的 read 返回 -EINTR，
+ *     重新打出提示符；被打断的 waitpid 也返回 -EINTR，接着等。前台的子进程在 exec 之前改回默认，就被结束；
+ *     后台的子进程改成忽略，exec 之后也不变，所以 Ctrl+C 停不了后台程序，要用 kill。
  *   - 内建命令：cd 换当前目录（不带参数回到根目录），exit 退出 shell（init 会再拉起一个），help 显示能用的命令。
  *     cd 必须是内建的：子进程换了目录，父进程的当前目录不会跟着变。
  * Linux 0.11 的 init 运行的是磁盘上的 /bin/sh（当年的 bash），道理相同：pipe、fork、dup、exec、wait。
@@ -178,9 +179,16 @@ static void run_line(char **argv, int argc, int background)
     }
     for (int k = 0; k < n; k++) {
         int32_t st = 0;
-        waitpid(pids[k], &st, 0);
+        while (waitpid(pids[k], &st, 0) == -EINTR)
+            ;                       /* 按了 Ctrl+C：shell 的 on_intr 处理完，接着等子进程 */
         report(names[k], st);
     }
+}
+
+/* SIGINT 的处理函数：什么也不用做。它的作用是打断 shell 正睡着的 read 或 waitpid，让它们返回 -EINTR。 */
+static void on_intr(int sig)
+{
+    (void)sig;
 }
 
 int main(int sh_argc, char **sh_argv)
@@ -190,7 +198,7 @@ int main(int sh_argc, char **sh_argv)
     char *argv[MAX_ARGS + 1];
     int32_t st;
 
-    signal(SIGINT, SIG_IGN);        /* Ctrl+C 结束的是前台程序，不是 shell 自己 */
+    signal(SIGINT, on_intr);        /* Ctrl+C 结束的是前台程序，不是 shell 自己 */
     print("shell on hda: try help, ls /bin, cat /hello.txt, ps\n");
     for (;;) {
         while (waitpid(-1, &st, WNOHANG) > 0)
@@ -200,7 +208,7 @@ int main(int sh_argc, char **sh_argv)
         if (n == 0)                 /* 空行上按了 Ctrl+D：像 exit 一样退出 */
             return 0;
         if (n < 0)
-            continue;
+            continue;               /* 在提示符上按了 Ctrl+C（-EINTR）：终端已经回显 ^C，重新打提示符 */
         line[n] = '\0';
         if (line[n - 1] == '\n')
             line[n - 1] = '\0';
