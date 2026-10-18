@@ -113,12 +113,12 @@ void selftest_run(void)
 #elif SELFTEST == SELFTEST_KEYBOARD_EDGE
     /*
      * 直接喂扫描码（第 1 套）：Caps Lock 按下两次（第二次是按住不放的重复）再松开，打 a；
-     * 再按一次 Caps Lock 关掉，打 a；然后输入到超出一行，退格跨过行首，再打 ok。
+     * 再按一次 Caps Lock 关掉，打 a；然后输入 80 个 x，超出一行，退格跨过行首回到上一行，再打 ok。
      */
     static const uint8_t codes[] = { 0x3A, 0x3A, 0xBA, 0x1E, 0x3A, 0xBA, 0x1E };
     for (unsigned i = 0; i < sizeof(codes); i++)
         keyboard_process(codes[i]);
-    for (int i = 0; i < 70; i++)
+    for (int i = 0; i < 80; i++)
         keyboard_process(0x2D);             /* x */
     for (int i = 0; i < 4; i++)
         keyboard_process(0x0E);             /* 退格 */

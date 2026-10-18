@@ -62,6 +62,7 @@ struct task {
     int parent;                     /* 父进程的任务号；内核建的任务和孤儿是 0，没有人等它们 */
     uint32_t status;                /* 结束时的状态，waitpid 取走：exit 的退出码，或 0x100 加异常号 */
     struct file *files[NR_OPEN];    /* 文件描述符表：第 fd 项指向打开的文件，0 表示没用 */
+    char name[TASK_NAME_LEN];       /* ps 显示的名字：内核建的任务起好的名字，exec 后是程序的文件名 */
 };
 
 static struct tss tss[NR_TASKS];
@@ -75,10 +76,13 @@ static int output_pos;              /* 各任务共用的输出位置 */
 /*
  * 写一个字符到第 6 行，供 write 系统调用使用。各任务共用 output_pos，
  * 关中断保证“读位置、写字符、位置加一”不被任务切换打断；结束后恢复原来的中断状态。
+ * 第 6 行只有一行，换行没有意义，直接忽略。
  */
 void task_write_char(char ch)
 {
     char s[2] = { ch, '\0' };
+    if (ch == '\n')
+        return;
     uint32_t flags = irq_save();
 
     vga_write_at(OUTPUT_ROW, OUTPUT_COL + output_pos, s, VGA_GRAY);
@@ -95,6 +99,41 @@ int current_pid(void)
 struct file **current_files(void)
 {
     return tasks[current_task].files;
+}
+
+static void set_name(int n, const char *name)
+{
+    int i = 0;
+    for (; i < TASK_NAME_LEN - 1 && name[i]; i++)
+        tasks[n].name[i] = name[i];
+    tasks[n].name[i] = '\0';
+}
+
+/* exec 成功后用程序的文件名（路径最后一段）当任务的名字。 */
+void sched_set_name(const char *path)
+{
+    const char *base = path;
+    for (const char *p = path; *p; p++)
+        if (*p == '/')
+            base = p + 1;
+    set_name(current_task, base);
+}
+
+/* taskinfo 系统调用：任务 pid 的状态、父进程和名字。空槽返回 -1。 */
+int sched_taskinfo(int pid, struct taskinfo *info)
+{
+    if (pid < 0 || pid >= NR_TASKS)
+        return -1;
+    uint32_t flags = irq_save();
+    struct task t = tasks[pid];
+    irq_restore(flags);
+    if (t.state == TASK_UNUSED)
+        return -1;
+    info->state = t.state;
+    info->parent = t.parent;
+    for (int i = 0; i < TASK_NAME_LEN; i++)
+        info->name[i] = t.name[i];
+    return 0;
 }
 
 /* 内核建的任务开始时只有 1 号描述符：第 6 行的任务输出区。 */
@@ -186,11 +225,14 @@ void sched_init(void)
     tss[0].iomap_base = sizeof(struct tss);
     tasks[0] = (struct task){ .state = TASK_RUNNING, .page_dir = kernel_page_dir() };
     give_tasks_row(0);              /* 自检会在开始调度前从 kmain 调用 write */
+    set_name(0, "idle");
     for (int n = 0; n < NR_TASKS; n++)
         gdt_set_entry(TSS_GDT_INDEX + n, (uint32_t)&tss[n], sizeof(struct tss) - 1, TSS_ACCESS, 0);
 
     init_task(1, task_main);
+    set_name(1, "task_a");
     init_user_task(2, user_main, USER_TOP);   /* 栈顶的页第一次用到时才分配 */
+    set_name(2, "init");
 
     /* 把 kmain 登记为任务 0：第一次切换时，CPU 才知道把当前寄存器存到哪个 TSS。 */
     __asm__ volatile("ltr %w0" : : "r"(TSS_SEL(0)));
@@ -373,6 +415,7 @@ int sched_fork(const struct interrupt_frame *frame)
         .iomap_base = sizeof(struct tss),
     };
     tasks[n] = (struct task){ .state = TASK_RUNNING, .page_dir = dir, .kstack = kstack, .parent = current_task };
+    set_name(n, tasks[current_task].name);
     for (int fd = 0; fd < NR_OPEN; fd++) {      /* 子进程继承所有打开的文件，与父进程共用读写位置 */
         tasks[n].files[fd] = tasks[current_task].files[fd];
         if (tasks[n].files[fd])

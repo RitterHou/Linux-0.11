@@ -14,6 +14,8 @@
 #define S_IFMT  0170000             /* i_mode 中表示文件类型的几位 */
 #define S_IFDIR 0040000
 #define S_IFREG 0100000
+#define S_IFCHR 0020000             /* 字符设备：i 节点的第一个区块号存的是设备号（主设备号 << 8 | 次设备号） */
+#define TTY_MAJOR 4                 /* 终端：次设备号 0 是控制台（/dev/tty0），1 是第 6 行（/dev/tty1） */
 
 /* buffer.c：缓冲区缓存 */
 struct buffer {
@@ -53,7 +55,8 @@ int namei(const char *path, uint32_t *ino, struct minix_inode *ip);
 /* file.c：打开的文件 */
 #define NR_OPEN 8                   /* 每个任务最多同时打开 8 个文件 */
 #define FILE_INODE 1                /* 文件系统里的文件或目录 */
-#define FILE_TASKS 2                /* 第 6 行的任务输出区 */
+#define FILE_TASKS 2                /* 第 6 行的任务输出区（/dev/tty1） */
+#define FILE_CONSOLE 3              /* 控制台：键盘输入和第 8～18 行的窗口（/dev/tty0） */
 struct file {
     int type;
     int count;                      /* 有几个文件描述符指向它；fork 之后父子共用，读写位置也共用 */

@@ -1,6 +1,7 @@
 /*
  * 键盘：每按下或松开一个键，键盘控制器把扫描码放进 0x60 端口，并发出 IRQ1。
- * 这里把常用键的扫描码（第 1 套，美式布局）翻译成字符并回显，支持 Shift 和 Caps Lock。
+ * 这里把常用键的扫描码（第 1 套，美式布局）翻译成字符，支持 Shift 和 Caps Lock，再交给终端（tty.c），
+ * 由它回显、处理退格，按回车后把这一行交给读的程序。
  */
 #include "io.h"
 #include "kernel.h"
@@ -34,7 +35,6 @@ static int shift_held;              /* 位 0：左 Shift 按住；位 1：右 Sh
 static int caps_lock;               /* Caps Lock 是否打开（键盘上的指示灯暂不控制） */
 static int caps_held;               /* Caps Lock 是否正被按住：按住不放时键盘会重复发送按下码 */
 static int skip_next;               /* 上一个字节是 0xE0，下一个字节属于扩展键 */
-static int line_length;             /* 当前行已输入的字符数，退格不能删到行首之前 */
 
 /* 由扫描码得到字符：Caps Lock 只影响字母，与 Shift 同时生效时字母反而是小写。 */
 static char translate(uint8_t key)
@@ -95,15 +95,5 @@ void keyboard_process(uint8_t scancode)
     if (key >= sizeof(normal_map) || normal_map[key] == 0)
         return;
 
-    char ch = translate(key);
-    if (ch == '\b') {
-        if (line_length > 0) {
-            vga_putc('\b');
-            line_length--;
-        }
-        return;
-    }
-
-    vga_putc(ch);
-    line_length = (ch == '\n') ? 0 : line_length + 1;
+    tty_input(translate(key));
 }

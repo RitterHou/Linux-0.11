@@ -27,7 +27,7 @@ KERNEL_CFLAGS += -DSELFTEST=SELFTEST_$(SELFTEST)
 endif
 
 KERNEL_OBJS := $(addprefix $(BUILD)/, entry.o isr.o kernel.o vga.o gdt.o \
-	interrupt.o paging.o mem.o hd.o buffer.o fs.o file.o exec.o timer.o sched.o syscall.o keyboard.o selftest.o user.o)
+	interrupt.o paging.o mem.o hd.o buffer.o fs.o file.o exec.o tty.o timer.o sched.o syscall.o keyboard.o selftest.o user.o)
 KERNEL_HEADERS := kernel.h io.h syscall.h selftest.h fs.h
 
 .PHONY: all run test clean
@@ -67,7 +67,7 @@ $(BUILD)/floppy.img: $(BUILD)/boot.bin $(BUILD)/loader.bin $(BUILD)/kernel.bin M
 	dd if=$(BUILD)/kernel.bin of=$@ bs=512 seek=2 conv=notrunc
 
 # 用户程序：每个 user/名称.c 和 user/ulib.c 链接成 build/user/名称.elf，装进硬盘的 /bin/名称。
-USER_PROGS := hello check letter
+USER_PROGS := sh ls cat echo ps hello check letter
 USER_ELFS := $(addprefix $(BUILD)/user/, $(addsuffix .elf, $(USER_PROGS)))
 
 $(BUILD)/user:
@@ -83,7 +83,8 @@ $(USER_ELFS): $(BUILD)/user/%.elf: $(BUILD)/user/%.o $(BUILD)/user/ulib.o user/u
 	$(LLD) -m elf_i386 -T user/user.ld -o $@ $< $(BUILD)/user/ulib.o
 
 # 硬盘镜像：接在主 IDE 通道上，是一个 Minix v1 文件系统，内容是 rootfs/ 目录、
-# /bin 下的用户程序，再加上测试用的 600 KB 大文件 /big。
+# /bin 下的用户程序，测试用的 600 KB 大文件 /big，以及两个终端设备文件：
+# /dev/tty0 是控制台（第 8～18 行），/dev/tty1 是第 6 行。
 ROOTFS_FILES := $(shell find rootfs -type f)
 
 $(BUILD)/hd.img: tools/mkfs.py tools/mkbig.py $(ROOTFS_FILES) $(USER_ELFS) | $(BUILD)
@@ -92,7 +93,7 @@ $(BUILD)/hd.img: tools/mkfs.py tools/mkbig.py $(ROOTFS_FILES) $(USER_ELFS) | $(B
 	mkdir -p $(BUILD)/rootfs/bin
 	for p in $(USER_PROGS); do cp $(BUILD)/user/$$p.elf $(BUILD)/rootfs/bin/$$p; done
 	$(PYTHON) tools/mkbig.py $(BUILD)/rootfs/big
-	$(PYTHON) tools/mkfs.py $@ $(BUILD)/rootfs
+	$(PYTHON) tools/mkfs.py $@ $(BUILD)/rootfs --chr /dev/tty0=4,0 --chr /dev/tty1=4,1
 
 run: $(BUILD)/floppy.img $(BUILD)/hd.img
 	$(QEMU) -name "Two-stage boot - C kernel" \

@@ -14,12 +14,12 @@ int main(int argc, char **argv)
 {
     if (argc == 2 && strcmp(argv[1], "crash") == 0) {
         *(volatile char *)main = 0;
-        print("x");
+        print("x\n");
         return 1;
     }
     int ok = initialized == 12345 && argc == 1 && strcmp(argv[0], "check") == 0;
     for (uint32_t i = 0; i < sizeof(zeros); i++)
         ok &= zeros[i] == 0;
-    print(ok ? "check ok" : "check bad");
+    print(ok ? "check ok\n" : "check bad\n");
     return ok ? 7 : 1;
 }
