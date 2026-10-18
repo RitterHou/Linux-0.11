@@ -363,7 +363,7 @@ def test_timer_rate(m, elf):
 
 
 KEY_NAMES = {" ": "spc", "/": "slash", ".": "dot", "-": "minus", "&": "shift-7", "_": "shift-minus",
-             "!": "shift-1", "@": "shift-2", "\n": "ret"}
+             "!": "shift-1", "@": "shift-2", "|": "shift-backslash", "\n": "ret"}
 
 
 def type_text(m, text):
@@ -436,17 +436,17 @@ def test_keyboard_shift(m, elf):
 def test_console_scroll(m, elf):
     """控制台窗口（第 8～18 行）写满后向上滚动，窗口外的内容不受影响"""
     before = m.screen(8)
-    names = [".", "..", "cat", "check", "echo", "hello", "letter", "ls", "ps", "sh"]
+    names = [".", "..", "cat", "check", "echo", "grep", "hello", "letter", "ls", "ps", "sh", "wc"]
     wait_prompt(m)
     type_text(m, "ls /bin\n")
-    # 输出比窗口高，命令那一行会滚出去，只能看最后两行：最后一个文件名和新的提示符
-    m.wait_for(lambda mm: console(mm)[-1] == "$" and console(mm)[-2].endswith("  sh"), timeout=5, what="ls /bin 运行完")
+    # 输出比窗口高，命令那一行和头两项会滚出去，只能看最后两行：最后一个文件名和新的提示符
+    m.wait_for(lambda mm: console(mm)[-1] == "$" and console(mm)[-2].endswith("  wc"), timeout=5, what="ls /bin 运行完")
     rows = m.screen(25)
     window = rows[8:19]
     check(window[-1] == "$", f"第 18 行应是新的提示符：{window[-1]!r}")
     got = [r.split()[-1] for r in window[:-1]]
-    check(got == names, f"第 8～17 行应是 ls /bin 的 10 行输出（命令那一行已经滚出窗口）：{window}")
-    check(all(r.startswith("-") for r in window[2:-1]) and window[0].startswith("d"), f"/bin 下应是 2 个目录项和 8 个普通文件：{window}")
+    check(got == names[2:], f"第 8～17 行应是 ls /bin 12 行输出的后 10 行（命令那一行和 . .. 已经滚出窗口）：{window}")
+    check(all(r.startswith("-") for r in window[:-1]), f"/bin 下的程序都应是普通文件：{window}")
     for r in (0, 2, 5):
         check(rows[r] == before[r], f"第 {r} 行不应被滚动影响：{before[r]!r} 变成了 {rows[r]!r}")
     check(rows[6].startswith("tasks: ") and rows[4].startswith("ticks: "), "第 4、6 行不应被滚动影响")
@@ -1048,6 +1048,17 @@ def test_exec(_m, _elf):
         check(not exception_screen(m)[0], f"不应出现异常面板：{exception_screen(m)[0]!r}")
 
 
+def test_pipe(_m, _elf):
+    """pipe 和 dup：读写；10000 个字节经过一页的管道，写满了就等；写的一头全关后读到 0；读的一头关了写返回 -1"""
+    d = build_selftest("USER_PIPE")
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        m.wait_for(lambda mm: message_row(mm) == "task 2 exited with code 0", timeout=10, what="任务 B 的结束消息")
+        out = task_output(m)
+        check(out == "pbwed", f"第 6 行应为 pbwed（p 读写、b 大量数据和读到末尾、w 子进程退出、e 没有读者时写失败、d dup），实际是 {out!r}")
+        m.wait_for(lambda mm: mm.screen(4)[3].startswith("memory: 3840/3840 pages free"), timeout=2,
+                   what="管道的缓冲区页随两头关闭一起收回")
+
+
 def test_wild_read(_m, _elf):
     """用户程序读栈区以外没映射的地址：内核不补页，只结束任务 B，错误码 4"""
     d = build_selftest("USER_WILD_READ")
@@ -1079,6 +1090,21 @@ def test_shell(m, elf):
     m.wait_for(lambda mm: mm.screen(4)[3].split("/")[0] == free_before, timeout=2,
                what=f"命令都结束后空闲页回到 {free_before}")
 
+    check(run_command(m, "ls /bin | wc") == ["12 48 230"], "ls /bin 的输出经管道交给 wc：12 行、48 个词、230 个字节")
+    check(run_command(m, "cat /hello.txt | grep Minix") == ["Hello from the Minix file system on hda!"], "grep 从管道读")
+    out = run_command(m, "ps | grep sh")
+    # ps 运行时，grep 那个子进程可能还没来得及 exec，名字仍是 sh，所以可能多出一行
+    check(" 4    2 W sh" in out and all(l.endswith(" sh") for l in out) and len(out) <= 2, f"ps 的输出经管道交给 grep：{out!r}")
+    check(run_command(m, "ls /bin | grep e | wc") == ["5 20 104"], "三段的管道：含 e 的 5 个文件名")
+    check(run_command(m, "cat /big | wc") == ["2400 7201 614400"], "600 KB 经过只有一页的管道，写满了就等，一个字节也不丢")
+    wait_prompt(m)
+    type_text(m, "wc\nhello world\n")
+    m.wait_for(lambda mm: last_line(mm) == "hello world", timeout=2, what="wc 从键盘读")
+    m.sendkeys(["ctrl-d"])
+    m.wait_for(lambda mm: console(mm)[-2:] == ["1 2 12", "$"], timeout=2, what="Ctrl+D 结束输入，wc 打印 1 2 12")
+    m.wait_for(lambda mm: mm.screen(4)[3].split("/")[0] == free_before, timeout=2,
+               what=f"管道和命令都结束后空闲页回到 {free_before}")
+
     out = run_command(m, "letter D &")
     check(len(out) == 1 and re.fullmatch(r"\[\d+\]", out[0]), f"后台运行应打印任务号：{out!r}")
     m.wait_for(lambda mm: "D" in task_output(mm), timeout=2, what="第 6 行出现后台的 letter 写的 D")
@@ -1103,7 +1129,7 @@ SEPARATE_TESTS = [test_syscalls, test_page_alloc, test_double_free, test_hd_rw, 
                   test_big_kernel, test_user_write_kernel, test_user_privileged,
                   test_user_bad_pointer, test_user_exit, test_all_tasks_exit,
                   test_nmi_in_user_mode, test_user_write_code, test_preemption,
-                  test_deep_stack, test_wild_read, test_fork_isolation, test_waitpid, test_file_system, test_exec]
+                  test_deep_stack, test_wild_read, test_fork_isolation, test_waitpid, test_file_system, test_exec, test_pipe]
 
 
 def main():

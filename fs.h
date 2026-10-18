@@ -6,6 +6,7 @@
 #define FS_H
 
 #include <stdint.h>
+#include "kernel.h"
 
 #define BLOCK_SIZE 1024             /* Minix v1 的块大小：2 个扇区 */
 #define NAME_LEN   14               /* 目录项里文件名最长 14 个字节 */
@@ -57,18 +58,34 @@ int namei(const char *path, uint32_t *ino, struct minix_inode *ip);
 #define FILE_INODE 1                /* 文件系统里的文件或目录 */
 #define FILE_TASKS 2                /* 第 6 行的任务输出区（/dev/tty1） */
 #define FILE_CONSOLE 3              /* 控制台：键盘输入和第 8～18 行的窗口（/dev/tty0） */
+#define FILE_PIPE_READ  4           /* 管道读的一头 */
+#define FILE_PIPE_WRITE 5           /* 管道写的一头 */
 struct file {
     int type;
     int count;                      /* 有几个文件描述符指向它；fork 之后父子共用，读写位置也共用 */
     uint32_t pos;
     uint32_t ino;
     struct minix_inode inode;
+    struct pipe *pipe;              /* 管道的两头指向同一个管道 */
 };
 struct file *file_open(const char *path);
+int file_pipe(struct file **read_end, struct file **write_end);
 struct file *tasks_file(void);
 void file_get(struct file *f);
 void file_put(struct file *f);
 int32_t file_read(struct file *f, void *dst, uint32_t n);
 int32_t file_write(struct file *f, const void *src, uint32_t n);
+
+/* pipe.c：管道 */
+struct pipe {
+    uint8_t *buf;                   /* 一页的缓冲区 */
+    uint32_t head, tail;            /* 只增不减：head - tail 是管道里的字节数 */
+    int readers, writers;           /* 读、写两头各被几个打开的文件拿着 */
+    struct wait_queue wait;
+};
+struct pipe *pipe_new(void);
+void pipe_close(struct pipe *p, int writer);
+int32_t pipe_read(struct pipe *p, void *dst, uint32_t n);
+int32_t pipe_write(struct pipe *p, const void *src, uint32_t n);
 
 #endif

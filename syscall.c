@@ -23,6 +23,16 @@ static struct file *fd_file(uint32_t fd)
     return fd < NR_OPEN ? current_files()[fd] : 0;
 }
 
+/* 当前任务最小的空闲描述符；用光了返回 -1。 */
+static int free_fd(void)
+{
+    struct file **files = current_files();
+    for (int fd = 0; fd < NR_OPEN; fd++)
+        if (!files[fd])
+            return fd;
+    return -1;
+}
+
 /*
  * write(fd, buf, count)：写到 fd 指向的文件。目前能写的只有第 6 行的任务输出区。
  * 用户态传来的 buf 必须完全落在用户程序的内存里：内核能读所有内存，不检查的话，
@@ -58,10 +68,8 @@ static int32_t sys_open(uint32_t path, uint32_t flags, uint32_t c, struct interr
 
     if (copy_string(name, path, PATH_MAX, from_user_mode(frame)) < 0)
         return -1;
-    int fd = 0;
-    while (fd < NR_OPEN && files[fd])
-        fd++;
-    if (fd == NR_OPEN)
+    int fd = free_fd();
+    if (fd < 0)
         return -1;
     struct file *f = file_open(name);
     if (!f)
@@ -176,6 +184,49 @@ static int32_t sys_taskinfo(uint32_t pid, uint32_t info, uint32_t c, struct inte
     return 0;
 }
 
+/*
+ * pipe(fd)：建一个管道，读的一头放进最小的空闲描述符，写的一头放进下一个，写回 fd[0]、fd[1]。
+ * 描述符不够、文件表满了或者没有内存时返回 -1，什么也不留下。内核要写 fd，检查它是否用户可写。
+ */
+static int32_t sys_pipe(uint32_t fds, uint32_t b, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)b, (void)c;
+    struct file **files = current_files();
+    struct file *r, *w;
+
+    if (from_user_mode(frame) && !user_write_ok(fds, 8))
+        return -1;
+    int rfd = free_fd();
+    if (rfd < 0 || file_pipe(&r, &w) < 0)
+        return -1;
+    files[rfd] = r;
+    int wfd = free_fd();
+    if (wfd < 0) {
+        files[rfd] = 0;
+        file_put(r);
+        file_put(w);
+        return -1;
+    }
+    files[wfd] = w;
+    ((int32_t *)fds)[0] = rfd;
+    ((int32_t *)fds)[1] = wfd;
+    return 0;
+}
+
+/* dup(fd)：最小的空闲描述符也指向 fd 指向的那个打开的文件。shell 用 close(1); dup(管道写的一头); 把输出接到管道上。 */
+static int32_t sys_dup(uint32_t fd, uint32_t b, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)b, (void)c, (void)frame;
+    struct file *f = fd_file(fd);
+    int nfd = free_fd();
+
+    if (!f || nfd < 0)
+        return -1;
+    file_get(f);
+    current_files()[nfd] = f;
+    return nfd;
+}
+
 static const syscall_fn syscall_table[SYS_CALLS] = {
     [SYS_WRITE]  = sys_write,
     [SYS_GETPID] = sys_getpid,
@@ -189,6 +240,8 @@ static const syscall_fn syscall_table[SYS_CALLS] = {
     [SYS_EXEC]   = sys_exec,
     [SYS_STAT]   = sys_stat,
     [SYS_TASKINFO] = sys_taskinfo,
+    [SYS_PIPE]   = sys_pipe,
+    [SYS_DUP]    = sys_dup,
 };
 
 void syscall_dispatch(struct interrupt_frame *frame)

@@ -5,6 +5,8 @@
  *   - 普通字符放进正在编辑的这一行，同时回显在屏幕上；
  *   - 退格删掉这一行的最后一个字符，屏幕上也擦掉；这一行删空了就不能再删，删不到程序输出的东西；
  *   - 回车把这一行连同换行符放进 ready 缓冲区，叫醒睡在 tty_wait 上等着读的任务。
+ *   - Ctrl+D 把这一行（不带换行）交出去，后面跟一个结束标记；行是空的，读的程序就得到 0，知道输入结束了。
+ *     Unix 的终端都是这样，cat、wc 读到 0 就停。
  * read(0) 一次最多读走一行；还没有敲完的行，程序读不到，它就睡下等。
  * 程序 write(1) 的输出也写在这个窗口里，和回显共用一个光标，就像一台真正的终端。
  * Linux 0.11 的终端有三个队列：read_q 存键盘送来的原始字符，copy_to_cooked() 处理退格和回显，
@@ -15,6 +17,7 @@
 
 #define LINE_MAX   128              /* 一行最多 127 个字符，再加换行；比屏幕宽，长的一行会折到下一行 */
 #define READY_SIZE 512              /* 敲完、还没被读走的行；2 的幂，下标回绕时取模也对 */
+#define EOF_CHAR   0x04             /* Ctrl+D；在 ready 里当作一行的结束标记，不交给程序 */
 
 static char line[LINE_MAX];
 static uint32_t line_len;
@@ -32,17 +35,20 @@ void tty_input(char ch)
         }
         return;
     }
-    if (ch == '\n') {
-        vga_putc('\n');
+    if (ch == '\n' || ch == EOF_CHAR) {
+        if (ch == '\n')
+            vga_putc('\n');
         if (READY_SIZE - (ready_tail - ready_head) >= line_len + 1) {   /* 放不下就丢掉这一行 */
             for (uint32_t i = 0; i < line_len; i++)
                 ready[ready_tail++ % READY_SIZE] = line[i];
-            ready[ready_tail++ % READY_SIZE] = '\n';
+            ready[ready_tail++ % READY_SIZE] = ch;
         }
         line_len = 0;
         wake_up(&tty_wait);
         return;
     }
+    if (ch < ' ')                   /* 其余控制字符不认识，丢掉 */
+        return;
     if (line_len < LINE_MAX - 1) {
         line[line_len++] = ch;
         vga_putc(ch);
@@ -62,7 +68,12 @@ int32_t tty_read(void *dst, uint32_t n)
     while (ready_tail == ready_head)
         sleep_on(&tty_wait);
     while (got < n && got < LINE_MAX && ready_tail != ready_head) {
-        char c = ready[ready_head++ % READY_SIZE];
+        char c = ready[ready_head % READY_SIZE];
+        if (c == EOF_CHAR) {        /* 结束标记：读掉它，不交给程序；它前面没有字符时 read 返回 0 */
+            ready_head++;
+            break;
+        }
+        ready_head++;
         tmp[got++] = c;
         if (c == '\n')
             break;
