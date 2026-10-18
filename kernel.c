@@ -3,11 +3,11 @@
  *
  * 这里没有标准库，也没有 BIOS。kmain 先接着第 0 行的 ABPK 写 C 和问候语，
  * 然后装好 IDT、打开分页，再设置 8259 和定时器，打开中断，此后的工作都由中断驱动：
- * 定时器每秒 100 次刷新第 4 行的计数并轮流运行两个任务，键盘输入回显在第 8～18 行。
+ * 定时器每秒 100 次刷新第 4 行的计数并驱动任务切换，键盘输入和 shell 都在第 8～18 行的控制台窗口里。
  */
 #include "kernel.h"
 
-#define CONSOLE_TOP    8            /* 键盘回显窗口：第 8～18 行，写满后向上滚动 */
+#define CONSOLE_TOP    8            /* 控制台窗口：第 8～18 行，写满后向上滚动 */
 #define CONSOLE_BOTTOM 18
 
 void kmain(void);
@@ -39,8 +39,7 @@ void kmain(void)
     vga_write_at(4, 0, "ticks: 0", VGA_GRAY);
     vga_write_at(6, 0, "tasks: ", VGA_GRAY);
     vga_set_window(CONSOLE_TOP, CONSOLE_BOTTOM);
-    vga_set_cursor(CONSOLE_TOP, 0);
-    vga_puts("keyboard: ");         /* 键盘回显接在后面；滚动时这一行也会上移 */
+    vga_set_cursor(CONSOLE_TOP, 0); /* 控制台窗口：键盘回显和程序的输出都写在这里，写满后整个窗口上移 */
 
     __asm__ volatile("sti");        /* 打开中断：定时器和键盘从此可以打断下面的循环 */
     vga_write_at(0, 6, "I", VGA_GRAY);

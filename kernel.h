@@ -126,6 +126,9 @@ void wake_up(struct wait_queue *q);
 int sched_fork(const struct interrupt_frame *frame);
 int sched_waitpid(int pid, uint32_t *status, int options);
 uint32_t sched_set_page_dir(uint32_t dir);
+void sched_set_name(const char *path);
+struct taskinfo;
+int sched_taskinfo(int pid, struct taskinfo *info);
 int do_exec(const char *path, uint32_t user_argv, struct interrupt_frame *frame);
 #define EXIT_KILLED 0x100           /* 被异常结束时留给父进程的状态：0x100 加异常号 */
 #define TASK_MESSAGE_ROW 7          /* 任务结束的消息写在第 7 行 */
@@ -139,6 +142,11 @@ void hd_init(void);
 void hd_handle(void);
 int hd_read(uint32_t lba, void *buf);
 int hd_write(uint32_t lba, const void *buf);
+
+/* tty.c：终端 */
+void tty_input(char ch);
+int32_t tty_read(void *dst, uint32_t n);
+int32_t tty_write(const void *src, uint32_t n);
 
 /* keyboard.c：键盘 */
 void keyboard_init(void);

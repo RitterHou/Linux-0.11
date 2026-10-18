@@ -8,5 +8,6 @@ int main(int argc, char **argv)
         print(" ");
         print(argv[i]);
     }
+    print("\n");
     return 0;
 }

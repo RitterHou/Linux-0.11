@@ -1,6 +1,9 @@
 """把一个目录打包成 Minix v1 文件系统镜像，格式与 Linux 0.11 使用的相同（include/linux/fs.h）。
 
-Usage: python3 tools/mkfs.py <image> <dir> [size_kb]
+Usage: python3 tools/mkfs.py <image> <dir> [--chr 路径=主设备号,次设备号 ...]
+
+--chr 在镜像里加一个字符设备文件，例如 --chr /dev/tty0=4,0：普通用户在 macOS 上建不了设备文件，
+所以不放在目录里，由这里直接写进镜像。设备号存在 i 节点的第一个区块号里，与 Linux 0.11 相同。
 
 布局（块大小 1024 字节）：
   块 0          引导块，这里写一行说明文字
@@ -18,7 +21,8 @@ BLOCK = 1024
 NAME_LEN = 14
 MAGIC = 0x137F
 NINODES = 128
-S_IFDIR, S_IFREG = 0o040000, 0o100000
+S_IFDIR, S_IFREG, S_IFCHR = 0o040000, 0o100000, 0o020000
+NZONES = 4096                           # 镜像的总块数（含元数据），4 MB
 MAX_SIZE = (7 + 512 + 512 * 512) * BLOCK
 
 
@@ -28,7 +32,16 @@ def ceil_div(a, b):
 
 def main():
     image, src = sys.argv[1], sys.argv[2]
-    nzones = int(sys.argv[3]) if len(sys.argv) > 3 else 4096     # 总块数，含元数据
+    devices = {}                        # 镜像里的路径（不以 / 开头）-> 设备号
+    args = sys.argv[3:]
+    while args:
+        if args[0] != "--chr" or len(args) < 2:
+            sys.exit(__doc__)
+        path, numbers = args[1].split("=")
+        major, minor = (int(x) for x in numbers.split(","))
+        devices[path.strip("/")] = major << 8 | minor
+        args = args[2:]
+    nzones = NZONES
     imap_blocks = ceil_div(NINODES + 1, BLOCK * 8)
     zmap_blocks = ceil_div(nzones + 1, BLOCK * 8)
     inode_blocks = ceil_div(NINODES * 32, BLOCK)
@@ -62,44 +75,64 @@ def main():
             double = alloc(struct.pack("<512H", *(tables + [0] * (512 - len(tables)))))
         return izone + [indirect, double]
 
-    # 先按目录树给每个文件和目录编好 i 节点号，目录内容要用到子项的编号
-    nodes = []                          # (路径, 是否目录)
-    def walk(path):
-        nodes.append((path, True))
-        for name in sorted(os.listdir(path)):
+    # 先把目录树读成 路径 -> 内容 的表（路径相对于镜像的根，根目录是 ""），再加上设备文件
+    tree = {"": "dir"}
+    for root, dirs, files in os.walk(src):
+        rel = os.path.relpath(root, src)
+        rel = "" if rel == "." else rel
+        for name in dirs + files:
             if len(name.encode()) > NAME_LEN:
                 sys.exit(f"文件名超过 14 个字节：{name}")
-            full = os.path.join(path, name)
-            if os.path.isdir(full):
-                walk(full)
+        for name in dirs:
+            tree[os.path.join(rel, name)] = "dir"
+        for name in files:
+            tree[os.path.join(rel, name)] = os.path.join(root, name)
+    for path, dev in devices.items():
+        parent = os.path.dirname(path)
+        while parent and parent not in tree:   # 设备文件所在的目录不存在就建上
+            tree[parent] = "dir"
+            parent = os.path.dirname(parent)
+        tree[path] = dev
+
+    def children(path):
+        return sorted(p for p in tree if p and os.path.dirname(p) == path)
+
+    # 按目录树的顺序给每一项编好 i 节点号，目录内容要用到子项的编号
+    order = []
+    def walk(path):
+        order.append(path)
+        for child in children(path):
+            if tree[child] == "dir":
+                walk(child)
             else:
-                nodes.append((full, False))
-    walk(src)
-    if len(nodes) > NINODES:
+                order.append(child)
+    walk("")
+    if len(order) > NINODES:
         sys.exit("文件太多，i 节点不够")
-    ino_of = {path: i + 1 for i, (path, _) in enumerate(nodes)}
-    parent_of = {src: src}
-    for path, _ in nodes:
-        if path != src:
-            parent_of[path] = os.path.dirname(path)
+    ino_of = {path: i + 1 for i, path in enumerate(order)}
 
     inodes = {}
-    for path, is_dir in nodes:
-        if is_dir:
-            children = sorted(os.listdir(path))
-            entries = [(".", ino_of[path]), ("..", ino_of[parent_of[path]])]
-            entries += [(name, ino_of[os.path.join(path, name)]) for name in children]
+    for path in order:
+        kind = tree[path]
+        zones = [0] * 9
+        if kind == "dir":
+            entries = [(".", ino_of[path]), ("..", ino_of[os.path.dirname(path) if path else ""])]
+            entries += [(os.path.basename(c), ino_of[c]) for c in children(path)]
             content = b"".join(struct.pack("<H14s", ino, name.encode()) for name, ino in entries)
-            subdirs = sum(os.path.isdir(os.path.join(path, n)) for n in children)
-            mode, nlinks = S_IFDIR | 0o755, 2 + subdirs
+            subdirs = sum(tree[c] == "dir" for c in children(path))
+            mode, nlinks, zones = S_IFDIR | 0o755, 2 + subdirs, store(content)
+        elif isinstance(kind, int):    # 字符设备：没有内容，第一个区块号是设备号
+            content, mode, nlinks = b"", S_IFCHR | 0o666, 1
+            zones[0] = kind
         else:
-            with open(path, "rb") as f:
+            with open(kind, "rb") as f:
                 content = f.read()
             if len(content) > MAX_SIZE:
-                sys.exit(f"文件太大：{path}")
-            mode = S_IFREG | (0o755 if os.access(path, os.X_OK) else 0o644)
-            nlinks = 1
-        inodes[ino_of[path]] = struct.pack("<HHIIBB9H", mode, 0, len(content), 0, 0, nlinks, *store(content))
+                sys.exit(f"文件太大：{kind}")
+            mode = S_IFREG | (0o755 if os.access(kind, os.X_OK) else 0o644)
+            nlinks, zones = 1, store(content)
+        inodes[ino_of[path]] = struct.pack("<HHIIBB9H", mode, 0, len(content), 0, 0, nlinks, *zones)
+    nodes = order
 
     # 位图：第 0 位保留不用，置 1；超出范围的位也置 1，免得被当成空闲
     def bitmap(nblocks, used_bits, total_bits):

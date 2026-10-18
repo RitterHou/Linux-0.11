@@ -285,17 +285,20 @@ def boot_ready(m):
 def test_boot_screen(m, elf):
     """启动后各行的输出"""
     m.wait_for(lambda mm: mm.screen(1)[0] == "ABPKCVITUFWE", timeout=2, what="第 0 行的 ABPKCVITUFWE")
-    rows = m.screen(9)
+    wait_prompt(m)
+    rows = m.screen(10)
     check(rows[1] == "disk: 8192 sectors (4096 KB), QEMU HARDDISK   minix fs: 128 inodes, 4096 blocks",
           f"第 1 行应显示硬盘的扇区数和型号，以及挂载的文件系统：{rows[1]!r}")
     check(rows[2] == "Hello from kmain() in C!", f"第 2 行不对：{rows[2]!r}")
-    check(rows[3] == "memory: 3830/3840 pages free  page faults: 1  copy-on-write: 2",
-          f"第 3 行应显示用掉了 10 页（A 的内核栈；B 的内核栈、页目录、页表、栈页；C 的内核栈、页目录、页表、"
-          f"/bin/letter 的代码页、栈页）、补过 1 次缺页、处理过 2 次写时复制：{rows[3]!r}")
+    # 写时复制的次数取决于 fork 之后谁先写栈，不卡死；用掉的页数是 A 的内核栈，init、letter、sh 各自的
+    # 内核栈、页目录、页表、栈页，letter 的代码页，sh 的代码页和数据页，约 15 页
+    match = re.fullmatch(r"memory: (\d+)/3840 pages free  page faults: 1  copy-on-write: (\d+)", rows[3])
+    check(match and 3815 <= int(match.group(1)) <= 3830 and int(match.group(2)) >= 2, f"第 3 行不对：{rows[3]!r}")
     check(re.fullmatch(r"ticks: \d+( +idle: +\d+%)?", rows[4]) is not None, f"第 4 行不对：{rows[4]!r}")
     check(rows[5] == "paging: on, 0xC0000000 -> 0xB8000", f"第 5 行不对：{rows[5]!r}")
     check(rows[6].startswith("tasks: "), f"第 6 行不对：{rows[6]!r}")
-    check(rows[8] == "keyboard:", f"第 8 行不对：{rows[8]!r}")
+    check(rows[8] == "shell on hda: try help, ls /bin, cat /hello.txt, ps", f"第 8 行应是 shell 的欢迎语：{rows[8]!r}")
+    check(rows[9] == "$", f"第 9 行应是提示符：{rows[9]!r}")
 
 
 def test_kernel_in_memory(m, elf):
@@ -359,40 +362,91 @@ def test_timer_rate(m, elf):
     check(90 <= rate <= 110, f"定时器频率应约为 100 Hz，实测 {rate:.1f} Hz")
 
 
+KEY_NAMES = {" ": "spc", "/": "slash", ".": "dot", "-": "minus", "&": "shift-7", "_": "shift-minus",
+             "!": "shift-1", "@": "shift-2", "\n": "ret"}
+
+
+def type_text(m, text):
+    """把一串字符换成 QEMU 的按键名敲进去：大写字母加 Shift。"""
+    keys = []
+    for ch in text:
+        if ch in KEY_NAMES:
+            keys.append(KEY_NAMES[ch])
+        elif ch.isupper():
+            keys.append("shift-" + ch.lower())
+        else:
+            keys.append(ch)
+    m.sendkeys(keys, delay=0.02)
+
+
+def console(m):
+    """控制台窗口：第 8～18 行。"""
+    return m.screen(19)[8:19]
+
+
+def last_line(m):
+    rows = [r for r in console(m) if r]
+    return rows[-1] if rows else ""
+
+
+def wait_prompt(m):
+    """等 shell 在窗口里打出提示符 $（行尾的空格被去掉了），而且光标所在的行只有它。"""
+    m.wait_for(lambda mm: last_line(mm) == "$", timeout=5, what="shell 的提示符 $")
+
+
+def run_command(m, command):
+    """在 shell 里敲一条命令，等它运行完、再出现提示符，返回命令那一行之后、新提示符之前的输出。"""
+    wait_prompt(m)
+    type_text(m, command + "\n")
+    def done(mm):
+        rows = [r for r in console(mm) if r]
+        return len(rows) >= 2 and rows[-1] == "$" and f"$ {command}" in rows
+    m.wait_for(done, timeout=5, what=f"命令 {command!r} 运行完")
+    rows = [r for r in console(m) if r]
+    start = len(rows) - 1 - rows[::-1].index(f"$ {command}")
+    return rows[start + 1:-1]
+
+
 def test_keyboard_echo(m, elf):
-    """键盘回显、回车和退格"""
-    m.sendkeys(["h", "i", "spc", "4", "2", "ret", "o", "k", "x", "backspace",
-                "ret", "a", "b", "backspace", "backspace", "backspace", "backspace"])
+    """在 shell 里打字：回显、回车把一行交给 shell、退格删到提示符就停"""
+    out = run_command(m, "echo hi 42")
+    check(out == ["hi 42"], f"echo 应打印 'hi 42'：{out!r}")
+    type_text(m, "okx")
+    m.sendkeys(["backspace"])
+    m.wait_for(lambda mm: last_line(mm) == "$ ok", timeout=2, what="退格删掉 x")
+    m.sendkeys(["backspace"] * 4)
     time.sleep(0.3)
-    rows = m.screen(11)
-    check(rows[8] == "keyboard: hi 42", f"第 8 行应为 'keyboard: hi 42'，实际是 {rows[8]!r}")
-    check(rows[9] == "ok", f"第 9 行应为 'ok'（x 被退格删掉），实际是 {rows[9]!r}")
-    check(rows[10] == "", f"第 10 行的 ab 应被退格删光，且不会删到上一行，实际是 {rows[10]!r}")
+    check(last_line(m) == "$", f"退格只能删自己敲的字符，删不到提示符：{last_line(m)!r}")
+    m.sendkeys(["ret"])
+    wait_prompt(m)
 
 
 def test_keyboard_shift(m, elf):
     """Shift、右 Shift 和 Caps Lock"""
-    # 接在上一项之后：光标在第 10 行行首。
-    m.sendkeys(["shift-h", "i", "shift-1", "spc", "shift-2", "shift-minus", "shift_r-q", "ret",
-                "caps_lock", "a", "b", "shift-c", "1", "caps_lock", "d"])
-    time.sleep(0.3)
-    rows = m.screen(12)
-    check(rows[10] == "Hi! @_Q", f"第 10 行应为 'Hi! @_Q'，实际是 {rows[10]!r}")
-    check(rows[11] == "ABc1d", f"第 11 行应为 'ABc1d'（Caps Lock 下 Shift 得到小写，数字不受影响），实际是 {rows[11]!r}")
+    wait_prompt(m)
+    m.sendkeys(["shift-h", "i", "shift-1", "spc", "shift-2", "shift-minus", "shift_r-q"])
+    m.wait_for(lambda mm: last_line(mm) == "$ Hi! @_Q", timeout=2, what="'$ Hi! @_Q'")
+    m.sendkeys(["backspace"] * 7 + ["caps_lock", "a", "b", "shift-c", "1", "caps_lock", "d"])
+    m.wait_for(lambda mm: last_line(mm) == "$ ABc1d", timeout=2,
+               what="'$ ABc1d'（Caps Lock 下 Shift 得到小写，数字不受影响）")
+    m.sendkeys(["backspace"] * 5)
+    m.wait_for(lambda mm: last_line(mm) == "$", timeout=2, what="删光这一行")
 
 
 def test_console_scroll(m, elf):
-    """回显窗口（第 8～18 行）写满后向上滚动，窗口外的内容不受影响"""
+    """控制台窗口（第 8～18 行）写满后向上滚动，窗口外的内容不受影响"""
     before = m.screen(8)
-    # 接在上一项之后：光标在第 11 行末尾。先换行，再输入 l1～l12 共 12 行，每行以回车结束。
-    keys = ["ret"]
-    for i in range(1, 13):
-        keys += ["l", str(i % 10), "ret"]
-    m.sendkeys(keys)
-    time.sleep(0.3)
+    names = [".", "..", "cat", "check", "echo", "hello", "letter", "ls", "ps", "sh"]
+    wait_prompt(m)
+    type_text(m, "ls /bin\n")
+    # 输出比窗口高，命令那一行会滚出去，只能看最后两行：最后一个文件名和新的提示符
+    m.wait_for(lambda mm: console(mm)[-1] == "$" and console(mm)[-2].endswith("  sh"), timeout=5, what="ls /bin 运行完")
     rows = m.screen(25)
-    expected = [f"l{i % 10}" for i in range(3, 13)] + [""]     # l3 … l2，最后是光标所在的空行
-    check(rows[8:19] == expected, f"第 8～18 行应为 {expected}，实际是 {rows[8:19]}")
+    window = rows[8:19]
+    check(window[-1] == "$", f"第 18 行应是新的提示符：{window[-1]!r}")
+    got = [r.split()[-1] for r in window[:-1]]
+    check(got == names, f"第 8～17 行应是 ls /bin 的 10 行输出（命令那一行已经滚出窗口）：{window}")
+    check(all(r.startswith("-") for r in window[2:-1]) and window[0].startswith("d"), f"/bin 下应是 2 个目录项和 8 个普通文件：{window}")
     for r in (0, 2, 5):
         check(rows[r] == before[r], f"第 {r} 行不应被滚动影响：{before[r]!r} 变成了 {rows[r]!r}")
     check(rows[6].startswith("tasks: ") and rows[4].startswith("ticks: "), "第 4、6 行不应被滚动影响")
@@ -474,23 +528,23 @@ def test_demand_paging(m, elf):
     phys = translate(m, cr3, top_page)
     check(phys is not None and 0x100000 <= phys < 0x1000000, f"栈顶那一页应映射到分配来的物理页，实际是 {phys}")
     pte = read_u32(m, (pde & ~0xFFF) + 1023 * 4) & ~0x60   # CPU 访问后会置上“已访问”“已写”两位
-    check(pte == phys | 7, f"页表最后一项应为 物理页 | 7（存在、可写、用户）：{pte:#x}")
+    # fork 出 shell 之后，init 的栈页打着写时复制的记号（第 9 位）、暂时只读，直到它再写这一页
+    check(pte in (phys | 7, phys | 0x205), f"页表最后一项应为 物理页 | 7（存在、可写、用户），或者带写时复制记号的只读页：{pte:#x}")
     check(translate(m, cr3, top_page - 4096) is None, "栈顶下面那一页还没用到，不应映射")
     check(translate(m, cr3, USER_LOW) is None, "栈区底部不应映射")
 
 
 def test_fork_address_spaces(m, elf):
-    """fork 出的任务 3 有自己的页目录和内核栈；写过之后，父子的栈顶各自映射到不同的物理页"""
+    """fork 出的任务 3 有自己的页目录和内核栈；它 exec 之后，父子的栈顶映射到不同的物理页"""
     m.wait_for(lambda mm: mm.screen(1)[0].startswith("ABPKCVITUFW"), timeout=2, what="第 0 行的 W")
     parent, child = tss_u32(m, elf, 2, 28), tss_u32(m, elf, 3, 28)
     check(child not in (0, parent, symbols(elf)["page_directory"][0]), f"任务 3 应有自己的页目录：CR3 = {child:#x}")
     check(tss_u32(m, elf, 3, 4) not in (0, tss_u32(m, elf, 2, 4)), "任务 3 应有自己的内核栈")
     top = USER_TOP - 4096
     p, c = translate(m, parent, top), translate(m, child, top)
-    check(p is not None and c is not None and p != c, f"父子都写过栈之后，栈顶应映射到不同的物理页：{p}、{c}")
-    for cr3 in (parent, child):
-        pte = read_u32(m, (read_u32(m, cr3 + (USER_LOW >> 22) * 4) & ~0xFFF) + 1023 * 4)
-        check(pte & 2, f"写时复制之后，栈顶的页表项应已改回可写：{pte:#x}")
+    check(p is not None and c is not None and p != c, f"栈顶应映射到不同的物理页：{p}、{c}")
+    pte = read_u32(m, (read_u32(m, child + (USER_LOW >> 22) * 4) & ~0xFFF) + 1023 * 4)
+    check(pte & 2, f"任务 3 exec 之后，栈顶是 exec 新分的可写页：{pte:#x}")
     code = symbols(elf)["user_main"][0]
     check(translate(m, parent, code) == translate(m, child, code) == code, "用户代码那一页父子共用，就是内核映像里那一页")
 
@@ -854,7 +908,7 @@ def test_early_key(_m, _elf):
         m.sendkeys(["h", "i"])
         time.sleep(0.3)
         row = m.screen(9)[8]
-        check(row == "keyboard: hi", f"开中断前的按键被丢弃后，键盘应照常回显：第 8 行是 {row!r}")
+        check(row == "hi", f"开中断前的按键被丢弃后，键盘应照常回显（自检内核不拉起 shell）：第 8 行是 {row!r}")
 
 
 def test_keyboard_edge_cases(_m, _elf):
@@ -863,8 +917,8 @@ def test_keyboard_edge_cases(_m, _elf):
     with Machine(os.path.join(d, "floppy.img")) as m:
         m.wait_for(boot_ready, what="启动完成")
         rows = m.screen(10)
-        expected = "keyboard: Aa" + "x" * 66 + "ok"
-        check(rows[8] == expected, f"第 8 行应为 'keyboard: Aa' + 66 个 x + 'ok'，实际是 {rows[8]!r}")
+        expected = "Aa" + "x" * 76 + "ok"
+        check(rows[8] == expected, f"第 8 行应为 'Aa' + 76 个 x + 'ok'，实际是 {rows[8]!r}")
         check(rows[9] == "", f"退格应删光换到第 9 行的字符，ok 写回第 8 行末尾：第 9 行是 {rows[9]!r}")
 
 
@@ -1005,11 +1059,45 @@ def test_wild_read(_m, _elf):
         check_only_task_a_left(m, "用户程序读野指针")
 
 
+def test_shell(m, elf):
+    """shell：cat、找不到的命令、check、被异常结束的程序、ps、后台运行、exit 后 init 再拉起 shell；命令结束后内存收回"""
+    out = run_command(m, "cat /hello.txt")
+    check(out == ["Hello from the Minix file system on hda!"], f"cat 应打印 /hello.txt：{out!r}")
+    free_before = m.screen(4)[3].split("/")[0]
+    check(run_command(m, "nosuch") == ["sh: nosuch: not found"], "找不到的命令应报告 not found")
+    check(run_command(m, "check") == ["check ok"], "check 应通过")
+    out = run_command(m, "check crash")
+    check(out == ["sh: check killed by exception 14"], f"check crash 写代码页，应被缺页异常结束：{out!r}")
+    out = run_command(m, "ps")
+    check(out[0] == "PID PPID S NAME", f"ps 的表头不对：{out!r}")
+    rows = {r.split()[0]: r.split() for r in out[1:]}
+    expected = {"0": ["0", "0", "R", "idle"], "1": ["1", "0", "S", "task_a"], "2": ["2", "0", "S", "init"],
+                "3": ["3", "2", "S", "letter"], "4": ["4", "2", "W", "sh"]}
+    for pid, want in expected.items():
+        check(rows.get(pid) == want, f"ps 中任务 {pid} 应为 {want}：{out!r}")
+    check(any(r[3] == "ps" and r[2] == "R" and r[1] == "4" for r in rows.values()), f"ps 应列出自己：{out!r}")
+    m.wait_for(lambda mm: mm.screen(4)[3].split("/")[0] == free_before, timeout=2,
+               what=f"命令都结束后空闲页回到 {free_before}")
+
+    out = run_command(m, "letter D &")
+    check(len(out) == 1 and re.fullmatch(r"\[\d+\]", out[0]), f"后台运行应打印任务号：{out!r}")
+    m.wait_for(lambda mm: "D" in task_output(mm), timeout=2, what="第 6 行出现后台的 letter 写的 D")
+
+    wait_prompt(m)
+    type_text(m, "exit\n")
+    m.wait_for(lambda mm: "shell on hda: try help, ls /bin, cat /hello.txt, ps" in console(mm)[-2:], timeout=5,
+               what="shell 退出后 init 再拉起一个新的 shell")
+    wait_prompt(m)
+    out = run_command(m, "ps")
+    names = [r.split()[-1] for r in out[1:]]
+    check(names.count("sh") == 1 and "letter" in names, f"新的 shell 应只有一个，后台的 letter 还在：{out!r}")
+
+
 # 前几项共用一台正常启动的虚拟机；其余各自启动自检内核。
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_console_scroll,
                 test_idle_in_hlt, test_demand_paging, test_fork_address_spaces, test_syscall_gate, test_user_setup, test_user_task,
-                test_tasks_alternate]
+                test_tasks_alternate, test_shell]
 SEPARATE_TESTS = [test_syscalls, test_page_alloc, test_double_free, test_hd_rw, test_early_key, test_keyboard_edge_cases, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,
                   test_big_kernel, test_user_write_kernel, test_user_privileged,

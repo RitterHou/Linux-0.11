@@ -141,6 +141,41 @@ static int32_t sys_exec(uint32_t path, uint32_t argv, uint32_t c, struct interru
     return do_exec(name, argv, frame);
 }
 
+/* stat(path, &st)：取文件的类型、链接数、大小和 i 节点号。内核要写 st，检查它是否用户可写。 */
+static int32_t sys_stat(uint32_t path, uint32_t st, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)c;
+    char name[PATH_MAX];
+    uint32_t ino;
+    struct minix_inode inode;
+    int from_user = from_user_mode(frame);
+
+    if (copy_string(name, path, PATH_MAX, from_user) < 0 || (from_user && !user_write_ok(st, sizeof(struct stat))))
+        return -1;
+    if (namei(name, &ino, &inode) < 0)
+        return -1;
+    struct stat *out = (struct stat *)st;
+    out->mode = inode.mode;
+    out->nlinks = inode.nlinks;
+    out->size = inode.size;
+    out->ino = ino;
+    return 0;
+}
+
+/* taskinfo(pid, &info)：见 sched.c 的 sched_taskinfo()。先取到内核里，再复制给用户。 */
+static int32_t sys_taskinfo(uint32_t pid, uint32_t info, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)c;
+    struct taskinfo tmp;
+
+    if (from_user_mode(frame) && !user_write_ok(info, sizeof(tmp)))
+        return -1;
+    if (sched_taskinfo((int)pid, &tmp) < 0)
+        return -1;
+    *(struct taskinfo *)info = tmp;
+    return 0;
+}
+
 static const syscall_fn syscall_table[SYS_CALLS] = {
     [SYS_WRITE]  = sys_write,
     [SYS_GETPID] = sys_getpid,
@@ -152,6 +187,8 @@ static const syscall_fn syscall_table[SYS_CALLS] = {
     [SYS_READ]   = sys_read,
     [SYS_CLOSE]  = sys_close,
     [SYS_EXEC]   = sys_exec,
+    [SYS_STAT]   = sys_stat,
+    [SYS_TASKINFO] = sys_taskinfo,
 };
 
 void syscall_dispatch(struct interrupt_frame *frame)

@@ -22,7 +22,25 @@
 #define SYS_READ   7                /* read(fd, buf, count)：读文件，返回读到的字节数，到末尾返回 0 */
 #define SYS_CLOSE  8                /* close(fd)：关闭文件描述符 */
 #define SYS_EXEC   9                /* exec(path, argv)：换成磁盘上的程序；成功时不返回 */
-#define SYS_CALLS  10
+#define SYS_STAT   10               /* stat(path, &st)：取文件的类型、大小、i 节点号 */
+#define SYS_TASKINFO 11             /* taskinfo(pid, &info)：取任务的状态、父进程和名字，给 ps 用 */
+#define SYS_CALLS  12
+
+/* stat 写回的内容：取自磁盘上的 i 节点 */
+struct stat {
+    uint16_t mode;                  /* 类型和权限：0040000 目录，0100000 普通文件，0020000 字符设备 */
+    uint16_t nlinks;
+    uint32_t size;
+    uint32_t ino;
+};
+
+/* taskinfo 写回的内容 */
+#define TASK_NAME_LEN 16
+struct taskinfo {
+    int32_t state;                  /* 1 能运行，2 在 sleep 里，3 僵尸，4 在 waitpid 里，5 在等待队列上 */
+    int32_t parent;
+    char name[TASK_NAME_LEN];
+};
 
 #define WNOHANG    1                /* waitpid 的选项：子进程还没结束就立刻返回 0 */
 
@@ -59,6 +77,16 @@ static inline int32_t close(int fd)
 static inline int32_t execv(const char *path, char *const argv[])
 {
     return syscall3(SYS_EXEC, (uint32_t)path, (uint32_t)argv, 0);
+}
+
+static inline int32_t stat(const char *path, struct stat *st)
+{
+    return syscall3(SYS_STAT, (uint32_t)path, (uint32_t)st, 0);
+}
+
+static inline int32_t taskinfo(int32_t pid, struct taskinfo *info)
+{
+    return syscall3(SYS_TASKINFO, (uint32_t)pid, (uint32_t)info, 0);
 }
 
 static inline int32_t getpid(void)

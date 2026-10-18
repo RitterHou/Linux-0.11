@@ -14,6 +14,23 @@
 extern volatile uint32_t timer_ticks;   /* 内核的变量，所在的页没有用户位 */
 #endif
 
+#if !defined(SELFTEST)
+static int32_t start_shell(void)
+{
+    int32_t pid = fork();
+    if (pid == 0) {
+        close(1);
+        open("/dev/tty0", 0);
+        open("/dev/tty0", 0);
+        open("/dev/tty0", 0);
+        char *argv[] = { "sh", 0 };
+        execv("/bin/sh", argv);
+        exit(1);
+    }
+    return pid;
+}
+#endif
+
 /* 与内核任务 A 的 task_main() 做同样的事：任务 2 写 B；它 fork 出的任务 3 换成 /bin/letter，写 C。 */
 void user_main(void)
 {
@@ -261,8 +278,26 @@ void user_main(void)
     }
     char letter = (char)('A' + getpid() - 1);
 
+#if !defined(SELFTEST)
+    /*
+     * 再拉起 shell（任务 4），做法与 Linux 0.11 的 init() 相同：子进程关掉继承来的 1 号描述符（第 6 行），
+     * 把控制台 /dev/tty0 打开三次，正好得到 0、1、2 号描述符，再 exec /bin/sh。
+     * 之后 init 一边写 B，一边收走结束了的子进程；shell 退出了就再拉起一个。
+     * 自检内核不拉起 shell：它们要用控制台窗口检查键盘回显，shell 的提示符会混进去。
+     */
+    int32_t shell = start_shell();
+    for (;;) {
+        write(1, &letter, 1);
+        sleep(2);
+        int32_t pid;
+        while ((pid = waitpid(-1, 0, WNOHANG)) > 0)
+            if (pid == shell)
+                shell = start_shell();
+    }
+#else
     for (;;) {
         write(1, &letter, 1);
         sleep(2);
     }
+#endif
 }
