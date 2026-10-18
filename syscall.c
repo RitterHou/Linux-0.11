@@ -49,25 +49,6 @@ static int32_t sys_read(uint32_t fd, uint32_t buf, uint32_t count, struct interr
     return file_read(f, (void *)buf, count);
 }
 
-#define PATH_MAX 64
-
-/*
- * 把用户给的路径一个字节一个字节地复制进内核，每个字节都要在用户的内存里；没有结尾的 0 或者太长返回 -1。
- * 复制进来以后，文件系统只和内核里的字符串打交道，不用再操心用户的指针。
- * Linux 0.11 的 namei() 用 get_fs_byte() 逐个字节读用户段里的路径。
- */
-static int copy_path(char *dst, uint32_t src, int from_user)
-{
-    for (int i = 0; i < PATH_MAX; i++) {
-        if (from_user && !user_range_ok(src + (uint32_t)i, 1))
-            return -1;
-        dst[i] = ((const char *)src)[i];
-        if (dst[i] == '\0')
-            return 0;
-    }
-    return -1;
-}
-
 /* open(path, flags)：打开文件，返回最小的空闲描述符。文件系统只读，flags 暂时不用。 */
 static int32_t sys_open(uint32_t path, uint32_t flags, uint32_t c, struct interrupt_frame *frame)
 {
@@ -75,7 +56,7 @@ static int32_t sys_open(uint32_t path, uint32_t flags, uint32_t c, struct interr
     char name[PATH_MAX];
     struct file **files = current_files();
 
-    if (copy_path(name, path, from_user_mode(frame)) < 0)
+    if (copy_string(name, path, PATH_MAX, from_user_mode(frame)) < 0)
         return -1;
     int fd = 0;
     while (fd < NR_OPEN && files[fd])
@@ -149,6 +130,17 @@ static int32_t sys_waitpid(uint32_t pid, uint32_t status, uint32_t options, stru
     return sched_waitpid((int32_t)pid, (uint32_t *)status, (int)options);
 }
 
+/* exec(path, argv)：换成磁盘上的程序，见 exec.c。成功时不返回到调用它的程序，而是从新程序的入口开始执行。 */
+static int32_t sys_exec(uint32_t path, uint32_t argv, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)c;
+    char name[PATH_MAX];
+
+    if (!from_user_mode(frame) || copy_string(name, path, PATH_MAX, 1) < 0)
+        return -1;
+    return do_exec(name, argv, frame);
+}
+
 static const syscall_fn syscall_table[SYS_CALLS] = {
     [SYS_WRITE]  = sys_write,
     [SYS_GETPID] = sys_getpid,
@@ -159,6 +151,7 @@ static const syscall_fn syscall_table[SYS_CALLS] = {
     [SYS_OPEN]   = sys_open,
     [SYS_READ]   = sys_read,
     [SYS_CLOSE]  = sys_close,
+    [SYS_EXEC]   = sys_exec,
 };
 
 void syscall_dispatch(struct interrupt_frame *frame)

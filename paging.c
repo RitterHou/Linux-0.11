@@ -16,7 +16,7 @@
  *
  * 这里建的是内核的页目录，任务 0 和内核任务用它。每个用户任务有一份自己的页目录（new_page_dir）：
  * 内核部分的页目录项照抄这一份，指向同样的页表，所以切换任务时内核的地址都不变；
- * 用户栈区那一项各管各的。硬件任务切换会从 TSS 装入 CR3，换任务就换了页目录。
+ * 用户空间那一项各管各的。硬件任务切换会从 TSS 装入 CR3，换任务就换了页目录。
  */
 #include "kernel.h"
 
@@ -30,7 +30,8 @@
 #define PF_PROTECTION 0x1           /* 1：页存在但没权限；0：页不存在 */
 #define PF_WRITE      0x2           /* 1：写操作 */
 
-#define STACK_PDE     (USER_STACK_LOW >> 22)    /* 用户栈区是第 256 个页目录项 */
+#define USER_PDE      (USER_LOW >> 22)    /* 用户空间是第 256 个页目录项 */
+#define PAGE_COW      0x200         /* 页表项第 9 位，CPU 不用：标记 fork 时去掉了可写位、等着写时复制的页 */
 
 #define ENTRIES       1024          /* 每张页目录或页表有 1024 项，每项 4 字节 */
 #define IDENTITY_MB   16
@@ -98,27 +99,44 @@ static int range_within(uint32_t addr, uint32_t size, uint32_t start, uint32_t e
 }
 
 /*
- * [addr, addr + size) 是否完全落在用户程序自己的内存里：代码和数据的那几页，或者用户栈区。
+ * [addr, addr + size) 是否完全落在用户程序自己的内存里：代码和数据的那几页，或者用户空间。
  * 系统调用用它检查用户传来的指针。栈区里还没映射的页，内核读到时会缺页，由 handle_page_fault() 补上。
  */
 int user_range_ok(uint32_t addr, uint32_t size)
 {
     return range_within(addr, size, (uint32_t)__user_start, (uint32_t)__user_end) ||
-           range_within(addr, size, USER_STACK_LOW, USER_STACK_TOP);
+           range_within(addr, size, USER_LOW, USER_TOP);
 }
 
 /*
- * 内核要往 [addr, addr + size) 写，它是否完全落在用户可写的内存里：用户栈区，或者用户程序的数据部分。
+ * 把以 0 结尾的字符串从 src 复制到 dst，最多 max 个字节（含结尾的 0），返回长度；太长返回 -1。
+ * from_user 时 src 是用户给的地址：一个字节一个字节地检查是否在用户的内存里，再读。
+ * 复制进来以后，内核只和自己的这份打交道。Linux 0.11 用 get_fs_byte() 逐个字节读用户段里的字符串。
+ */
+int copy_string(char *dst, uint32_t src, uint32_t max, int from_user)
+{
+    for (uint32_t i = 0; i < max; i++) {
+        if (from_user && !user_range_ok(src + i, 1))
+            return -1;
+        dst[i] = ((const char *)src)[i];
+        if (dst[i] == '\0')
+            return (int)i;
+    }
+    return -1;
+}
+
+/*
+ * 内核要往 [addr, addr + size) 写，它是否完全落在用户可写的内存里：用户空间，或者用户程序的数据部分。
  * 用户代码那一页是只读的，不能交给内核去写：打开了 CR0.WP，内核写它会触发缺页，而那不是能补的缺页。
  */
 int user_write_ok(uint32_t addr, uint32_t size)
 {
     return range_within(addr, size, (uint32_t)__user_data, (uint32_t)__user_end) ||
-           range_within(addr, size, USER_STACK_LOW, USER_STACK_TOP);
+           range_within(addr, size, USER_LOW, USER_TOP);
 }
 
-/* 用户栈区正好是一个页目录项管的 4 MB：缺页时只用分配这一张页表，结束时只用收回这一张。 */
-_Static_assert(USER_STACK_LOW % 0x400000u == 0 && USER_STACK_TOP - USER_STACK_LOW == 0x400000u,
+/* 用户空间正好是一个页目录项管的 4 MB：缺页时只用分配这一张页表，结束时只用收回这一张。 */
+_Static_assert(USER_LOW % 0x400000u == 0 && USER_TOP - USER_LOW == 0x400000u,
                "user stack area must be exactly one page table");
 
 uint32_t page_faults;               /* 缺页异常补上了几页（页不存在），显示在第 3 行 */
@@ -145,7 +163,7 @@ static void flush_tlb(void)
 
 /*
  * 给一个用户任务建页目录：分一页，照抄内核的页目录。内核部分的项指向同样的页表，
- * 用户栈区那一项在内核的页目录里是空的，复制过来也是空的。没有空闲页时返回 0。
+ * 用户空间那一项在内核的页目录里是空的，复制过来也是空的。没有空闲页时返回 0。
  */
 uint32_t new_page_dir(void)
 {
@@ -158,8 +176,9 @@ uint32_t new_page_dir(void)
 }
 
 /*
- * fork：给子进程建页目录。内核部分照抄；用户栈区的页父子共用：两边的页表项都去掉可写位，
+ * fork：给子进程建页目录。内核部分照抄；用户空间的页父子共用：两边的页表项都去掉可写位，
  * 物理页的引用次数加一，谁先写，谁就在写时复制里得到自己的一份。页表本身不共用，子进程有自己的一张。
+ * 本来就只读的页（程序的代码）不打写时复制的记号，写它仍是错误。
  * 父进程自己的页表项被改成了只读，TLB 里可能还缓存着可写的旧翻译，所以要刷新。
  * Linux 0.11 的 copy_page_tables() 做同样的事。没有空闲页时返回 0。
  */
@@ -169,7 +188,7 @@ uint32_t copy_page_dir(uint32_t src)
     if (dir == 0)
         return 0;
 
-    uint32_t pde = ((uint32_t *)src)[STACK_PDE];
+    uint32_t pde = ((uint32_t *)src)[USER_PDE];
     if (pde & PAGE_PRESENT) {
         uint32_t table = get_free_page();
         if (table == 0) {
@@ -179,12 +198,13 @@ uint32_t copy_page_dir(uint32_t src)
         uint32_t *from = (uint32_t *)(pde & ~0xFFFu), *to = (uint32_t *)table;
         for (int i = 0; i < ENTRIES; i++) {
             if (from[i] & PAGE_PRESENT) {
-                from[i] &= ~PAGE_WRITE;
+                if (from[i] & PAGE_WRITE)
+                    from[i] = (from[i] & ~PAGE_WRITE) | PAGE_COW;
                 to[i] = from[i];
                 page_add_ref(from[i] & ~0xFFFu);
             }
         }
-        ((uint32_t *)dir)[STACK_PDE] = table | PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
+        ((uint32_t *)dir)[USER_PDE] = table | PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
     }
     flush_tlb();
     return dir;
@@ -200,7 +220,7 @@ static int copy_on_write(uint32_t *pte)
     uint32_t old = *pte & ~0xFFFu;
 
     if (page_ref_count(old) == 1) {
-        *pte |= PAGE_WRITE;
+        *pte = (*pte | PAGE_WRITE) & ~PAGE_COW;
     } else {
         uint32_t page = get_free_page();
         if (page == 0)
@@ -218,7 +238,7 @@ static int copy_on_write(uint32_t *pte)
 }
 
 /*
- * 缺页异常（14 号）：出错的地址在用户栈区、而且是“页不存在”（错误码第 0 位为 0），
+ * 缺页异常（14 号）：出错的地址在用户空间、而且是“页不存在”（错误码第 0 位为 0），
  * 就分配一页清零的物理页映射上去，返回 1；中断返回后 CPU 重新执行出错的那条指令，这次就能访问了。
  * 写了 fork 留下的只读栈页，交给 copy_on_write()。
  * 别的情况（页存在但没有权限、地址不在栈区、内存用完了）返回 0，由调用者照原来的规则处理：
@@ -230,16 +250,16 @@ static int copy_on_write(uint32_t *pte)
  */
 int handle_page_fault(uint32_t addr, uint32_t error_code)
 {
-    if (addr < USER_STACK_LOW || addr >= USER_STACK_TOP)
+    if (addr < USER_LOW || addr >= USER_TOP)
         return 0;
 
-    uint32_t *pde = &current_page_dir()[addr >> 22];   /* 当前任务自己的用户栈区 */
+    uint32_t *pde = &current_page_dir()[addr >> 22];   /* 当前任务自己的用户空间 */
     if (error_code & PF_PROTECTION) {
-        /* 页存在却出错：只有“写一个只读的栈页”能处理，那是 fork 留下的共享页 */
+        /* 页存在却出错：只有“写一个打了写时复制记号的页”能处理，那是 fork 留下的共享页 */
         if (!(error_code & PF_WRITE) || !(*pde & PAGE_PRESENT))
             return 0;
         uint32_t *pte = &((uint32_t *)(*pde & ~0xFFFu))[(addr >> 12) & (ENTRIES - 1)];
-        if (!(*pte & PAGE_PRESENT) || (*pte & PAGE_WRITE))
+        if ((*pte & (PAGE_PRESENT | PAGE_WRITE | PAGE_COW)) != (PAGE_PRESENT | PAGE_COW))
             return 0;
         return copy_on_write(pte);
     }
@@ -264,13 +284,40 @@ int handle_page_fault(uint32_t addr, uint32_t error_code)
 }
 
 /*
- * 用户任务结束时，收回它的用户栈区的每一页、那张页表和页目录本身。
+ * 在页目录 dir 的用户空间里给 addr 所在的页准备一个物理页（清零的），返回它的物理地址；没有内存时返回 0。
+ * 这一页已经有了就直接用它，需要可写时打开可写位。exec 用它往还没装入 CR3 的新页目录里放程序：
+ * 物理页在一一对应映射的范围内，内核按物理地址直接写。页表不存在时先分一页当页表。
+ */
+uint32_t map_user_page(uint32_t dir, uint32_t addr, int writable)
+{
+    uint32_t *pde = &((uint32_t *)dir)[addr >> 22];
+    if (!(*pde & PAGE_PRESENT)) {
+        uint32_t table = get_free_page();
+        if (table == 0)
+            return 0;
+        *pde = table | PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
+    }
+    uint32_t *pte = &((uint32_t *)(*pde & ~0xFFFu))[(addr >> 12) & (ENTRIES - 1)];
+    if (*pte & PAGE_PRESENT) {
+        if (writable)
+            *pte |= PAGE_WRITE;
+        return *pte & ~0xFFFu;
+    }
+    uint32_t page = get_free_page();
+    if (page == 0)
+        return 0;
+    *pte = page | PAGE_PRESENT | PAGE_USER | (writable ? PAGE_WRITE : 0);
+    return page;
+}
+
+/*
+ * 用户任务结束时，收回它的用户空间的每一页、那张页表和页目录本身。
  * 调用者马上要切到别的任务，换 CR3 时 TLB 里这些页的旧翻译也随之作废，这里不用另外刷新。
  * Linux 0.11 的 do_exit() 调用 free_page_tables() 做同样的事。
  */
 void free_page_dir(uint32_t dir)
 {
-    uint32_t pde = ((uint32_t *)dir)[USER_STACK_LOW >> 22];
+    uint32_t pde = ((uint32_t *)dir)[USER_LOW >> 22];
 
     if (pde & PAGE_PRESENT) {
         uint32_t *table = (uint32_t *)(pde & ~0xFFFu);

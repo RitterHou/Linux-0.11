@@ -20,12 +20,14 @@ SELFTEST ?=
 KERNEL_CFLAGS := --target=i386-elf -march=i386 -std=c11 -O2 -Wall -Wextra \
 	-ffreestanding -nostdlibinc -fno-builtin -fno-pic -fno-stack-protector \
 	-fno-asynchronous-unwind-tables -mgeneral-regs-only
+# 用户程序用同样的选项编译，链接到用户空间的底部（user/user.ld）。
+USER_CFLAGS := $(KERNEL_CFLAGS)
 ifneq ($(SELFTEST),)
 KERNEL_CFLAGS += -DSELFTEST=SELFTEST_$(SELFTEST)
 endif
 
 KERNEL_OBJS := $(addprefix $(BUILD)/, entry.o isr.o kernel.o vga.o gdt.o \
-	interrupt.o paging.o mem.o hd.o buffer.o fs.o file.o timer.o sched.o syscall.o keyboard.o selftest.o user.o)
+	interrupt.o paging.o mem.o hd.o buffer.o fs.o file.o exec.o timer.o sched.o syscall.o keyboard.o selftest.o user.o)
 KERNEL_HEADERS := kernel.h io.h syscall.h selftest.h fs.h
 
 .PHONY: all run test clean
@@ -64,13 +66,31 @@ $(BUILD)/floppy.img: $(BUILD)/boot.bin $(BUILD)/loader.bin $(BUILD)/kernel.bin M
 	dd if=$(BUILD)/loader.bin of=$@ bs=512 seek=1 conv=notrunc
 	dd if=$(BUILD)/kernel.bin of=$@ bs=512 seek=2 conv=notrunc
 
-# 硬盘镜像：接在主 IDE 通道上，是一个 Minix v1 文件系统，内容是 rootfs/ 目录，
-# 再加上测试用的 600 KB 大文件 /big。
+# 用户程序：每个 user/名称.c 和 user/ulib.c 链接成 build/user/名称.elf，装进硬盘的 /bin/名称。
+USER_PROGS := hello check letter
+USER_ELFS := $(addprefix $(BUILD)/user/, $(addsuffix .elf, $(USER_PROGS)))
+
+$(BUILD)/user:
+	mkdir -p $@
+
+# 静态模式规则：macOS 自带的 make 3.81 会先匹配上面内核的 $(BUILD)/%.o 规则
+USER_OBJS := $(addprefix $(BUILD)/user/, $(addsuffix .o, $(USER_PROGS) ulib))
+
+$(USER_OBJS): $(BUILD)/user/%.o: user/%.c user/ulib.h syscall.h Makefile | $(BUILD)/user
+	$(CLANG) $(USER_CFLAGS) -c $< -o $@
+
+$(USER_ELFS): $(BUILD)/user/%.elf: $(BUILD)/user/%.o $(BUILD)/user/ulib.o user/user.ld
+	$(LLD) -m elf_i386 -T user/user.ld -o $@ $< $(BUILD)/user/ulib.o
+
+# 硬盘镜像：接在主 IDE 通道上，是一个 Minix v1 文件系统，内容是 rootfs/ 目录、
+# /bin 下的用户程序，再加上测试用的 600 KB 大文件 /big。
 ROOTFS_FILES := $(shell find rootfs -type f)
 
-$(BUILD)/hd.img: tools/mkfs.py tools/mkbig.py $(ROOTFS_FILES) | $(BUILD)
+$(BUILD)/hd.img: tools/mkfs.py tools/mkbig.py $(ROOTFS_FILES) $(USER_ELFS) | $(BUILD)
 	rm -rf $(BUILD)/rootfs
 	cp -R rootfs $(BUILD)/rootfs
+	mkdir -p $(BUILD)/rootfs/bin
+	for p in $(USER_PROGS); do cp $(BUILD)/user/$$p.elf $(BUILD)/rootfs/bin/$$p; done
 	$(PYTHON) tools/mkbig.py $(BUILD)/rootfs/big
 	$(PYTHON) tools/mkfs.py $@ $(BUILD)/rootfs
 

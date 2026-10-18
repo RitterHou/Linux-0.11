@@ -68,19 +68,22 @@ void pic_unmask(int irq);
 #define VGA_PHYS  0x000B8000u       /* 显存的物理地址 */
 #define VGA_ALIAS 0xC0000000u       /* 打开分页后，这个虚拟地址也指向显存 */
 /*
- * 用户栈所在的 4 MB（第 256 个页目录项）。开始时一页也没有映射，任务 B 用到哪一页，
- * 缺页异常就给哪一页分配物理内存；任务结束时全部收回。栈从顶端往下长。
+ * 用户空间：第 256 个页目录项管的 4 MB，每个用户任务各有一份。exec 把程序放在底部，
+ * 栈从顶端往下长；没有映射的页在第一次用到时由缺页异常分配，任务结束时全部收回。
  */
-#define USER_STACK_LOW 0x40000000u
-#define USER_STACK_TOP 0x40400000u
+#define USER_LOW 0x40000000u
+#define USER_TOP 0x40400000u
 void paging_init(void);
 int user_range_ok(uint32_t addr, uint32_t size);
 int user_write_ok(uint32_t addr, uint32_t size);
+int copy_string(char *dst, uint32_t src, uint32_t max, int from_user);
+#define PATH_MAX 64                 /* 路径最长 63 个字节 */
 int handle_page_fault(uint32_t addr, uint32_t error_code);
 uint32_t kernel_page_dir(void);
 uint32_t new_page_dir(void);
 void free_page_dir(uint32_t dir);
 uint32_t copy_page_dir(uint32_t src);
+uint32_t map_user_page(uint32_t dir, uint32_t addr, int writable);
 extern uint32_t page_faults, cow_faults;
 
 /* mem.c：物理页分配，管 LOW_MEM～HIGH_MEM 之间的页 */
@@ -122,6 +125,8 @@ void sleep_on(struct wait_queue *q);
 void wake_up(struct wait_queue *q);
 int sched_fork(const struct interrupt_frame *frame);
 int sched_waitpid(int pid, uint32_t *status, int options);
+uint32_t sched_set_page_dir(uint32_t dir);
+int do_exec(const char *path, uint32_t user_argv, struct interrupt_frame *frame);
 #define EXIT_KILLED 0x100           /* 被异常结束时留给父进程的状态：0x100 加异常号 */
 #define TASK_MESSAGE_ROW 7          /* 任务结束的消息写在第 7 行 */
 

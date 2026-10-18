@@ -21,7 +21,8 @@
 #define SYS_OPEN   6                /* open(path, flags)：打开文件，返回文件描述符 */
 #define SYS_READ   7                /* read(fd, buf, count)：读文件，返回读到的字节数，到末尾返回 0 */
 #define SYS_CLOSE  8                /* close(fd)：关闭文件描述符 */
-#define SYS_CALLS  9
+#define SYS_EXEC   9                /* exec(path, argv)：换成磁盘上的程序；成功时不返回 */
+#define SYS_CALLS  10
 
 #define WNOHANG    1                /* waitpid 的选项：子进程还没结束就立刻返回 0 */
 
@@ -55,6 +56,11 @@ static inline int32_t close(int fd)
     return syscall3(SYS_CLOSE, (uint32_t)fd, 0, 0);
 }
 
+static inline int32_t execv(const char *path, char *const argv[])
+{
+    return syscall3(SYS_EXEC, (uint32_t)path, (uint32_t)argv, 0);
+}
+
 static inline int32_t getpid(void)
 {
     return syscall3(SYS_GETPID, 0, 0, 0);
@@ -75,7 +81,7 @@ static inline int32_t waitpid(int32_t pid, int32_t *status, int32_t options)
     return syscall3(SYS_WAITPID, (uint32_t)pid, (uint32_t)status, (uint32_t)options);
 }
 
-static inline void exit(int code)
+static inline __attribute__((noreturn)) void exit(int code)
 {
     syscall3(SYS_EXIT, (uint32_t)code, 0, 0);
     for (;;)                        /* 内核不会让它返回；这个循环告诉编译器 exit 不会返回 */

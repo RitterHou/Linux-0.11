@@ -14,7 +14,7 @@
 extern volatile uint32_t timer_ticks;   /* 内核的变量，所在的页没有用户位 */
 #endif
 
-/* 与内核任务 A 的 task_main() 做同样的事：任务 2 写 B，它 fork 出的任务 3 写 C。 */
+/* 与内核任务 A 的 task_main() 做同样的事：任务 2 写 B；它 fork 出的任务 3 换成 /bin/letter，写 C。 */
 void user_main(void)
 {
 #if !defined(SELFTEST) || !SELFTEST_IN_USER(SELFTEST)
@@ -207,6 +207,42 @@ void user_main(void)
     write(1, n == 5 && buf[0] == 't' && buf[4] == 'M' ? "f" : "F", 1);
     close(fd);
     exit(0);
+#elif SELFTEST == SELFTEST_USER_EXEC
+    /*
+     * 每项检查通过就写一个字母，期望第 6 行是 o、hello from exec、h、check ok、k、c 连在一起：
+     *   o：不存在的文件、不能执行的文件（/hello.txt 没有执行权限）、目录，exec 都返回 -1，程序接着运行
+     *   hello from exec：fork 出的子进程 exec /bin/hello，它把参数打印出来；h：父进程等到它以 0 退出
+     *   check ok：/bin/check 检查自己的 .data、.bss、argc 和 argv，都对就打印它；k：父进程等到它以 7 退出
+     *   c：/bin/check crash 往自己的代码里写，代码页只读，被缺页异常结束（状态 0x10E）
+     */
+    int32_t st;
+    char *none[] = { "x", 0 };
+    write(1, execv("/nothing", none) < 0 && execv("/hello.txt", none) < 0 && execv("/etc", none) < 0 ? "o" : "O", 1);
+
+    int32_t pid = fork();
+    if (pid == 0) {
+        char *argv[] = { "hello", "from", "exec", 0 };
+        execv("/bin/hello", argv);
+        exit(99);
+    }
+    write(1, waitpid(pid, &st, 0) == pid && st == 0 ? "h" : "H", 1);
+
+    pid = fork();
+    if (pid == 0) {
+        char *argv[] = { "check", 0 };
+        execv("/bin/check", argv);
+        exit(99);
+    }
+    write(1, waitpid(pid, &st, 0) == pid && st == 7 ? "k" : "K", 1);
+
+    pid = fork();
+    if (pid == 0) {
+        char *argv[] = { "check", "crash", 0 };
+        execv("/bin/check", argv);
+        exit(99);
+    }
+    write(1, waitpid(pid, &st, 0) == pid && st == (0x100 | 14) ? "c" : "C", 1);
+    exit(0);
 #elif SELFTEST == SELFTEST_ALL_EXIT
     write(1, "bye", 3);
     exit(2);
@@ -215,10 +251,14 @@ void user_main(void)
 #endif
 
     /*
-     * 复制出一个子进程（任务 3）。父子进程都从 fork 返回，接着往下走：
-     * 父进程写 B，子进程写 C。两者的栈一开始是同一批物理页，谁先写谁复制一份。
+     * 复制出一个子进程（任务 3）。子进程换成硬盘上的 /bin/letter，由它每 2 个 tick 写一个 C；
+     * 父进程接着往下走，写 B。fork 之后两者的栈一开始是同一批物理页，谁先写谁复制一份。
+     * 万一 exec 失败（比如没有硬盘），子进程就接着用这里的代码，按任务号写 C。
      */
-    fork();
+    if (fork() == 0) {
+        char *argv[] = { "letter", "C", 0 };
+        execv("/bin/letter", argv);
+    }
     char letter = (char)('A' + getpid() - 1);
 
     for (;;) {

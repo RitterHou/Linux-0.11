@@ -190,7 +190,7 @@ void sched_init(void)
         gdt_set_entry(TSS_GDT_INDEX + n, (uint32_t)&tss[n], sizeof(struct tss) - 1, TSS_ACCESS, 0);
 
     init_task(1, task_main);
-    init_user_task(2, user_main, USER_STACK_TOP);   /* 栈顶的页第一次用到时才分配 */
+    init_user_task(2, user_main, USER_TOP);   /* 栈顶的页第一次用到时才分配 */
 
     /* 把 kmain 登记为任务 0：第一次切换时，CPU 才知道把当前寄存器存到哪个 TSS。 */
     __asm__ volatile("ltr %w0" : : "r"(TSS_SEL(0)));
@@ -380,6 +380,21 @@ int sched_fork(const struct interrupt_frame *frame)
     }
     irq_restore(flags);
     return n;
+}
+
+/*
+ * exec 换好了新的页目录：记进任务表和 TSS（下次切回来时装入），并马上装入 CR3。返回旧的页目录，由调用者收回。
+ * 中断关着做：要是记进任务表之后、装入 CR3 之前被切走，切回来时会装入新的，也没错，但这样更清楚。
+ */
+uint32_t sched_set_page_dir(uint32_t dir)
+{
+    uint32_t flags = irq_save();
+    uint32_t old = tasks[current_task].page_dir;
+    tasks[current_task].page_dir = dir;
+    tss[current_task].cr3 = dir;
+    __asm__ volatile("movl %0, %%cr3" : : "r"(dir) : "memory");
+    irq_restore(flags);
+    return old;
 }
 
 /* 收走一个已经结束的任务：还掉内核栈，任务槽空出来。 */
