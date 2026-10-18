@@ -7,7 +7,6 @@
  */
 #include "kernel.h"
 
-#define TIMER_HZ 100                /* 与 Linux 0.11 的 HZ 相同，每 10 ms 一次 */
 #define CONSOLE_TOP    8            /* 键盘回显窗口：第 8～18 行，写满后向上滚动 */
 #define CONSOLE_BOTTOM 18
 
@@ -45,13 +44,17 @@ void kmain(void)
     vga_write_at(0, 6, "I", VGA_GRAY);
 
     /* 正常构建为空；make test 的自检内核在这里制造异常。必须在开始调度之前：
-       有的自检要让 kmain 一直停在这里，开始调度后 kmain 就被切走、不再回来了。 */
+       有的自检要让 kmain 一直停在这里，开始调度后 kmain 只在任务 A、B 都睡着时才运行。 */
     selftest_run();
 
     sched_start();                  /* 下一个定时器中断起，任务 A、B 轮流运行 */
     vga_write_at(0, 7, "T", VGA_GRAY);
 
-    /* 第一次切换之前在这里等待；切走之后不会再回来。 */
+    /*
+     * kmain 从此是任务 0，也就是空闲任务：任务 A、B 都在睡眠时，调度器切回这里，CPU 停在 hlt 上，
+     * 下一个定时器中断把到时间的任务叫醒，再切过去。Linux 0.11 的 main() 最后是 for(;;) pause();，
+     * 任务 0 同样只在没有别的进程能运行时才运行。
+     */
     for (;;)
         __asm__ volatile("hlt");
 }

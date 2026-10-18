@@ -68,14 +68,16 @@ void paging_init(void);
 int user_range_ok(uint32_t addr, uint32_t size);
 
 /* timer.c：8253 定时器 */
+#define TIMER_HZ 100                /* 与 Linux 0.11 的 HZ 相同，每 10 ms 一次 */
 extern volatile uint32_t timer_ticks;
 void timer_init(uint32_t hz);
 void timer_handle(void);
 
-/* sched.c：两个任务的硬件任务切换 */
+/* sched.c：任务切换、睡眠与唤醒 */
 void sched_init(void);
 void sched_start(void);
 void schedule(void);
+void sched_sleep(uint32_t ticks);
 int current_pid(void);
 void task_write_char(char ch);
 void sched_exit_current(void);

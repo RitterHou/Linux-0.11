@@ -39,16 +39,11 @@ static int32_t sys_getpid(uint32_t a, uint32_t b, uint32_t c, int from_user)
     return current_pid();
 }
 
-/*
- * sleep(ticks)：在内核里等待。陷阱门不清 IF，等待期间定时器照常中断，
- * 也可能在这里切换到别的任务；切换回来后接着等，直到时间到。
- */
+/* sleep(ticks)：睡 ticks 个 tick，期间把 CPU 让给别的任务，见 sched.c 的 sched_sleep()。 */
 static int32_t sys_sleep(uint32_t ticks, uint32_t b, uint32_t c, int from_user)
 {
     (void)b, (void)c, (void)from_user;
-    uint32_t start = timer_ticks;
-    while (timer_ticks - start < ticks)
-        __asm__ volatile("sti; hlt");
+    sched_sleep(ticks);
     return 0;
 }
 

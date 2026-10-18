@@ -258,7 +258,7 @@ def test_boot_screen(m, elf):
     rows = m.screen(9)
     check(rows[0] == "ABPKCVITU", f"第 0 行应为 'ABPKCVITU'，实际是 {rows[0]!r}")
     check(rows[2] == "Hello from kmain() in C!", f"第 2 行不对：{rows[2]!r}")
-    check(re.fullmatch(r"ticks: \d+", rows[4]) is not None, f"第 4 行不对：{rows[4]!r}")
+    check(re.fullmatch(r"ticks: \d+( +idle: +\d+%)?", rows[4]) is not None, f"第 4 行不对：{rows[4]!r}")
     check(rows[5] == "paging: on, 0xC0000000 -> 0xB8000", f"第 5 行不对：{rows[5]!r}")
     check(rows[6].startswith("tasks: "), f"第 6 行不对：{rows[6]!r}")
     check(rows[8] == "keyboard:", f"第 8 行不对：{rows[8]!r}")
@@ -304,8 +304,15 @@ def test_paging(m, elf):
 
 
 def ticks_value(m):
-    match = re.fullmatch(r"ticks: (\d+)", m.screen(5)[4])
+    match = re.match(r"ticks: (\d+)", m.screen(5)[4])
     check(match is not None, "第 4 行没有 ticks 计数")
+    return int(match.group(1))
+
+
+def idle_percent(m):
+    """第 4 行右边每秒更新一次的空闲比例；开始调度不满 1 秒时还没有。"""
+    match = re.search(r"idle: +(\d+)%", m.screen(5)[4])
+    check(match is not None, f"第 4 行还没有空闲比例：{m.screen(5)[4]!r}")
     return int(match.group(1))
 
 
@@ -359,15 +366,17 @@ def test_console_scroll(m, elf):
 
 
 def test_idle_in_hlt(m, elf):
-    """任务等待时停在 sleep 系统调用的 hlt 上，且中断已打开"""
+    """两个任务都在睡眠时，CPU 交给任务 0，停在 kmain 的 hlt 上；第 4 行的空闲比例接近 100%"""
     table = symbols(elf)
     for _ in range(10):
         regs = m.registers()
-        if regs["HLT"] == 1 and in_function(table, "sys_sleep", regs["EIP"]):
+        if regs["HLT"] == 1 and regs["TR"] == 0x18 and in_function(table, "kmain", regs["EIP"]):
             check(regs["EFL"] & 0x200, "空闲时 IF 应为 1")
-            return
+            break
         time.sleep(0.1)
-    raise TestFailure("10 次采样都没有停在 sys_sleep 的 hlt 上")
+    else:
+        raise TestFailure("10 次采样都没有停在任务 0（TR=0x18）kmain 的 hlt 上：睡眠的任务没有让出 CPU？")
+    m.wait_for(lambda mm: idle_percent(mm) >= 90, timeout=3, what="空闲比例达到 90% 以上")
 
 
 def read_u32(m, addr):
@@ -437,25 +446,50 @@ def task_output(m):
     return row[len("tasks: "):]
 
 
-def test_tasks_alternate(m, elf):
-    """两个任务轮流运行：第 6 行 A、B 交替出现，TR 在两个 TSS 之间切换"""
-    out1 = task_output(m)
-    check(set(out1) <= {"A", "B"}, f"任务输出中只应有 A 和 B：{out1!r}")
-    check("A" in out1 and "B" in out1, f"两个任务都应有输出：{out1!r}")
-    runs = re.findall(r"A+|B+", out1)
-    check(len(runs) >= 4, f"A、B 应多次交替，实际只有 {len(runs)} 段：{out1!r}")
-    check(max(len(r) for r in runs) <= 15, f"每段应约 10 个字母（时间片 20 tick、每 2 tick 一个）：{out1!r}")
-    time.sleep(0.5)
-    check(task_output(m) != out1, "0.5 秒后任务输出应有变化")
+OUTPUT_WIDTH = 73                   # 第 6 行 "tasks: " 后面的 73 格，写满后回到开头
 
-    tss_a, tss_b = 0x20, 0x28       # GDT 第 4、5 项
-    seen = set()
-    for _ in range(20):
-        seen.add(m.registers()["TR"])
-        if {tss_a, tss_b} <= seen:
-            return
-        time.sleep(0.05)
-    raise TestFailure(f"TR 应在 {tss_a:#x} 和 {tss_b:#x} 之间切换，采样到的是 {sorted(hex(x) for x in seen)}")
+
+def letters_per_tick(m, elf, seconds):
+    """一段时间内两个任务一共写了多少个字母，除以经过的 tick 数。
+    暂停虚拟机再读输出位置和 timer_ticks，两个值才是同一时刻的。"""
+    table = symbols(elf)
+    def sample():
+        m.cmd("stop")
+        try:
+            return read_u32(m, table["output_pos"][0]), read_u32(m, table["timer_ticks"][0])
+        finally:
+            m.cmd("cont")
+    p1, k1 = sample()
+    time.sleep(seconds)
+    p2, k2 = sample()
+    check(k2 > k1, "定时器没有走")
+    return (p2 - p1) % OUTPUT_WIDTH / (k2 - k1), k2 - k1
+
+
+def test_tasks_alternate(m, elf):
+    """任务写一个字母就去睡、把 CPU 让给对方：第 6 行 A、B 逐个交替，两个任务各每 2 个 tick 写一个"""
+    out = task_output(m)
+    check(set(out) <= {"A", "B"}, f"任务输出中只应有 A 和 B：{out!r}")
+    check("A" in out and "B" in out, f"两个任务都应有输出：{out!r}")
+    runs = re.findall(r"A+|B+", out)
+    # 一行 73 格是奇数，写满一圈后新旧字母的交界处会有一次 AA 或 BB
+    check(len(runs) >= 60 and max(len(r) for r in runs) <= 2,
+          f"A、B 应逐个交替（每个任务写一个字母就去睡），实际是 {out!r}")
+    rate, ticks = letters_per_tick(m, elf, 0.3)
+    check(ticks < OUTPUT_WIDTH, f"采样间隔 {ticks} 个 tick 太长，输出位置可能已经绕了一圈")
+    check(0.8 <= rate <= 1.2, f"两个任务各每 2 个 tick 写一个字母，合计应约 1 个/tick，实测 {rate:.2f}（{ticks} 个 tick）")
+
+
+def test_preemption(_m, _elf):
+    """用户程序一直占着 CPU 不睡：时间片用完照样被切走，任务 A 每 20 个 tick 写一个字母，空闲比例接近 0"""
+    d = build_selftest("USER_SPIN")
+    elf = os.path.join(d, "kernel.elf")
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        m.wait_for(boot_ready, what="启动完成")
+        rate, ticks = letters_per_tick(m, elf, 1.2)
+        check(0.03 <= rate <= 0.08,
+              f"任务 B 不睡，任务 A 只能在 B 的时间片（20 tick）用完后写一个字母，应约 0.05 个/tick，实测 {rate:.3f}（{ticks} 个 tick）")
+        m.wait_for(lambda mm: idle_percent(mm) <= 10, timeout=3, what="空闲比例降到 10% 以下")
 
 
 PANEL_ROW = 19
@@ -617,7 +651,9 @@ def check_only_task_a_left(m, what):
     check(ticks_value(m) - k1 >= 200, "任务 B 结束后定时器应照常工作")
     out = task_output(m)
     check(set(out) == {"A"} and len(out) == 73, f"任务 B 结束后第 6 行应只剩 A：{out!r}")
-    check(m.registers()["TR"] == 0x20, "任务 B 结束后应只剩任务 A（TR=0x20）在运行")
+    for _ in range(10):
+        check(m.registers()["TR"] != 0x28, "任务 B 结束后不应再切到它（TR=0x28）")
+        time.sleep(0.03)
 
 
 def test_user_write_kernel(_m, _elf):
@@ -672,12 +708,14 @@ def test_all_tasks_exit(_m, _elf):
     d = build_selftest("ALL_EXIT")
     table = symbols(os.path.join(d, "kernel.elf"))
     with Machine(os.path.join(d, "floppy.img")) as m:
-        m.wait_for(lambda mm: message_row(mm) == "task 2 exited with code 2", what="任务 B 的结束消息")
+        # 任务 B 先结束，任务 A 写完 5 个 A 后结束，它的消息写在后面
+        m.wait_for(lambda mm: message_row(mm) == "task 1 exited with code 1", what="任务 A 的结束消息")
         k1 = ticks_value(m)
         time.sleep(1.0)
         check(ticks_value(m) - k1 >= 50, "所有任务结束后定时器应照常工作")
         check(not exception_screen(m)[0], f"不应出现异常面板：{exception_screen(m)[0]!r}")
-        check(task_output(m).startswith("AAAAAbye"), f"任务 A 写 5 个 A 后结束，任务 B 写 bye 后结束：{task_output(m)!r}")
+        check(task_output(m) == "AbyeAAAA",
+              f"任务 A 写一个 A 就去睡，任务 B 趁机写完 bye 结束，A 再写完剩下的 4 个：{task_output(m)!r}")
         for _ in range(10):
             regs = m.registers()
             if regs["HLT"] == 1:
@@ -761,7 +799,7 @@ SEPARATE_TESTS = [test_syscalls, test_early_key, test_keyboard_edge_cases, test_
                   test_clobber_loader, test_other_segments,
                   test_big_kernel, test_user_write_kernel, test_user_privileged,
                   test_user_bad_pointer, test_user_exit, test_all_tasks_exit,
-                  test_nmi_in_user_mode, test_user_write_code]
+                  test_nmi_in_user_mode, test_user_write_code, test_preemption]
 
 
 def main():
