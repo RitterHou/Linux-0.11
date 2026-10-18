@@ -3,7 +3,7 @@
  *
  * 调用方执行 int 0x80：EAX 是调用号，EBX、ECX、EDX 依次是第 1～3 个参数，返回值放回 EAX。
  * 这与 Linux 0.11 的约定相同，见 main 分支的 include/unistd.h 中的 _syscall3 等宏。
- * 失败时返回 -1（Linux 返回负的错误码，这里简化为 -1）。
+ * 失败时返回 -1（Linux 返回负的错误码，这里简化为 -1）；只有睡着等的时候被信号打断，返回 -EINTR，和 Linux 相同。
  */
 #ifndef SYSCALL_H
 #define SYSCALL_H
@@ -32,7 +32,10 @@
 #define SYS_FSINFO 17               /* fsinfo(&info)：文件系统有多少块、多少 i 节点、各用了多少，给 df 用 */
 #define SYS_CHDIR  18               /* chdir(path)：换当前目录 */
 #define SYS_GETCWD 19               /* getcwd(buf, size)：取当前目录的绝对路径 */
-#define SYS_CALLS  20
+#define SYS_KILL   20               /* kill(pid, sig)：给任务（pid > 0）或进程组（0 是自己的组，负数是 -pid 那一组）发信号 */
+#define SYS_SIGNAL 21               /* signal(sig, handler)：这个信号来了怎么办：SIG_DFL 结束进程，SIG_IGN 不理 */
+#define SYS_SETSID 22               /* setsid()：自己当一个新的进程组的头，返回组号 */
+#define SYS_CALLS  23
 
 /* fsinfo 写回的内容 */
 struct fsinfo {
@@ -57,6 +60,15 @@ struct taskinfo {
 };
 
 #define WNOHANG    1                /* waitpid 的选项：子进程还没结束就立刻返回 0 */
+#define EINTR      4                /* 系统调用在睡着等的时候被信号打断，返回 -EINTR */
+
+/* 信号的编号与 Linux 0.11 的 include/signal.h 相同 */
+#define SIGINT     2                /* 终端上按了 Ctrl+C */
+#define SIGKILL    9                /* 不能忽略 */
+#define SIGPIPE    13               /* 往读的一头全关了的管道里写 */
+#define SIGTERM    15               /* kill 命令默认发的信号 */
+#define SIG_DFL    0                /* 默认动作：结束进程 */
+#define SIG_IGN    1                /* 不理这个信号 */
 
 /* open 的 flags，取值与 Linux 0.11 的 include/fcntl.h 相同 */
 #define O_RDONLY   00
@@ -171,6 +183,21 @@ static inline int32_t fork(void)
 static inline int32_t waitpid(int32_t pid, int32_t *status, int32_t options)
 {
     return syscall3(SYS_WAITPID, (uint32_t)pid, (uint32_t)status, (uint32_t)options);
+}
+
+static inline int32_t kill(int32_t pid, int32_t sig)
+{
+    return syscall3(SYS_KILL, (uint32_t)pid, (uint32_t)sig, 0);
+}
+
+static inline int32_t signal(int32_t sig, uint32_t handler)
+{
+    return syscall3(SYS_SIGNAL, (uint32_t)sig, handler, 0);
+}
+
+static inline int32_t setsid(void)
+{
+    return syscall3(SYS_SETSID, 0, 0, 0);
 }
 
 static inline __attribute__((noreturn)) void exit(int code)

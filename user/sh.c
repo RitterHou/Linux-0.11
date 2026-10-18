@@ -4,6 +4,8 @@
  *   - 用 | 把几个命令接起来：每一段一个子进程，相邻两段之间一个管道，前一个的标准输出接到后一个的标准输入；
  *   - > 文件、>> 文件、< 文件：把这一段的标准输出写进文件（清空或者接在末尾），或者从文件读标准输入；
  *   - 最后一个参数是 & 的，在后台运行，不等它；每次读命令之前收走已经结束的后台程序；
+ *   - Ctrl+C：终端给前台进程组发 SIGINT。shell 自己忽略它，前台的子进程在 exec 之前改回默认，就被结束；
+ *     后台的子进程继续忽略，exec 之后也不变，所以 Ctrl+C 停不了后台程序，要用 kill。
  *   - 内建命令：cd 换当前目录（不带参数回到根目录），exit 退出 shell（init 会再拉起一个），help 显示能用的命令。
  *     cd 必须是内建的：子进程换了目录，父进程的当前目录不会跟着变。
  * Linux 0.11 的 init 运行的是磁盘上的 /bin/sh（当年的 bash），道理相同：pipe、fork、dup、exec、wait。
@@ -39,6 +41,13 @@ static void report(const char *name, int32_t st)
         print("sh: ");
         print(name);
         print(" killed by exception ");
+        print_num((uint32_t)st & 0xFF);
+        print("\n");
+    } else if ((st & 0x200) && (st & 0xFF) != SIGINT && (st & 0xFF) != SIGPIPE) {
+        /* 被信号结束。Ctrl+C 的 ^C 终端已经回显了；SIGPIPE 是后面的程序先走了，不算出错，和 bash 一样不报告 */
+        print("sh: ");
+        print(name);
+        print(" killed by signal ");
         print_num((uint32_t)st & 0xFF);
         print("\n");
     }
@@ -128,6 +137,7 @@ static void run_line(char **argv, int argc, int background)
         }
         int32_t pid = fork();
         if (pid == 0) {
+            signal(SIGINT, background ? SIG_IGN : SIG_DFL);
             if (prev >= 0) {
                 close(0);
                 dup(prev);
@@ -180,6 +190,7 @@ int main(int sh_argc, char **sh_argv)
     char *argv[MAX_ARGS + 1];
     int32_t st;
 
+    signal(SIGINT, SIG_IGN);        /* Ctrl+C 结束的是前台程序，不是 shell 自己 */
     print("shell on hda: try help, ls /bin, cat /hello.txt, ps\n");
     for (;;) {
         while (waitpid(-1, &st, WNOHANG) > 0)
@@ -214,7 +225,7 @@ int main(int sh_argc, char **sh_argv)
             continue;
         }
         if (strcmp(argv[0], "help") == 0) {
-            print("programs: ls cat echo ps wc grep rm mkdir rmdir df pwd hello check letter\n");
+            print("programs: ls cat echo ps wc grep rm mkdir rmdir df pwd kill hello check letter\n");
             print("built in: cd [dir], exit, help\n");
             print("try: ls /bin | wc, echo hi > /tmp/a, cat < /tmp/a, cd /etc, letter D &\n");
             continue;

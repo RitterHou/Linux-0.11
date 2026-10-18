@@ -11,6 +11,7 @@
 #include "io.h"
 #include "kernel.h"
 #include "fs.h"
+#include "syscall.h"
 
 #define NR_PIPES 8
 #define CHUNK    512                /* 每次在关中断时搬多少字节；和用户内存之间的复制在开中断时做 */
@@ -58,8 +59,12 @@ int32_t pipe_read(struct pipe *p, void *dst, uint32_t n)
     uint32_t got = 0;
     uint32_t flags = irq_save();
 
-    while (p->head == p->tail && p->writers > 0)
-        sleep_on(&p->wait);
+    while (p->head == p->tail && p->writers > 0) {
+        if (interruptible_sleep_on(&p->wait) < 0) {
+            irq_restore(flags);
+            return -EINTR;
+        }
+    }
     while (got < n && got < CHUNK && p->tail != p->head)
         tmp[got++] = p->buf[p->tail++ % PAGE_SIZE];
     wake_up(&p->wait);              /* 腾出了地方：叫醒等着写的 */
@@ -80,9 +85,15 @@ int32_t pipe_write(struct pipe *p, const void *src, uint32_t n)
             tmp[i] = ((const uint8_t *)src)[done + i];
         uint32_t flags = irq_save();
         for (uint32_t i = 0; i < chunk;) {
-            while (p->head - p->tail == PAGE_SIZE && p->readers > 0)
-                sleep_on(&p->wait);
+            while (p->head - p->tail == PAGE_SIZE && p->readers > 0) {
+                if (interruptible_sleep_on(&p->wait) < 0) {
+                    irq_restore(flags);
+                    return done + i ? (int32_t)(done + i) : -EINTR;     /* 写进去的不能收回，就报告写了多少 */
+                }
+            }
             if (p->readers == 0) {
+                /* 没人读了：写的进程收到 SIGPIPE，默认就被结束。Linux 0.11 的 write_pipe() 也是这样 */
+                signal_current(SIGPIPE);
                 irq_restore(flags);
                 return done + i ? (int32_t)(done + i) : -1;
             }

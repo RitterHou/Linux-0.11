@@ -54,12 +54,15 @@ struct file *file_open(const char *path, int flags)
         if ((flags & O_CREAT) && (flags & O_EXCL))
             goto fail;
         if ((d.mode & S_IFMT) == S_IFCHR) {
-            if (d.zone[0] == (TTY_MAJOR << 8 | 0))
+            if (d.zone[0] == (TTY_MAJOR << 8 | 0)) {
                 type = FILE_CONSOLE;
-            else if (d.zone[0] == (TTY_MAJOR << 8 | 1))
+                if (sched_is_leader())
+                    tty_set_pgrp(sched_pgrp());     /* 进程组的头打开控制台：它这一组成了前台进程组 */
+            } else if (d.zone[0] == (TTY_MAJOR << 8 | 1)) {
                 type = FILE_TASKS;
-            else
+            } else {
                 goto fail;          /* 没有这个设备 */
+            }
         } else {
             if ((d.mode & S_IFMT) == S_IFDIR && access != O_RDONLY)
                 goto fail;          /* 目录只有内核能改 */
