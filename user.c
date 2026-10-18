@@ -683,6 +683,72 @@ void user_main(void)
     write(1, ok ? "q" : "Q", 1);          /* 不用 a：测试会把第 6 行里任务 A 写的 A 都去掉 */
     sleep(5);                           /* 等孤儿处理完信号、退出，第 7 行最后留下的是 init 的消息 */
     exit(0);
+#elif SELFTEST == SELFTEST_USER_BRK
+    /*
+     * 每一项通过就写一个字母，期望第 6 行（去掉任务 A 的 A）是 qhgfleo：
+     *   q：init 的代码在内核映像里，用户空间里还什么都没有：堆从 0x40000000 开始，brk(0) 返回它。
+     *   h：brk 往上挪 8 KB，返回新的末尾；写满这 8 KB 再读回来：两页都是用到时缺页补上的。
+     *   g：堆末尾往上、栈区以下没要过的地方，子进程一写就被缺页异常结束；brk 不对齐到页时，它所在的那一页能用。
+     *   f：fork 之后子进程的堆和父进程一样大、内容一样；子进程改了不影响父进程（写时复制）。
+     *   l：低于程序末尾、伸进栈区的 brk 不动，返回原来的末尾；栈区的最低处还能 brk 到。
+     *   e：系统调用的缓冲区在堆以外没要过的地方：read 返回 -1，不补页。
+     *   o：exec 之后新程序的堆从它自己的 .bss 末尾开始，malloc 来的 100 KB 能用（check brk 的退出码）。
+     */
+    uint32_t base = brk(0);
+    write(1, base == 0x40000000 ? "q" : "Q", 1);
+
+    uint32_t top = brk(base + 8192);
+    int ok = top == base + 8192;
+    for (uint32_t a = base; ok && a < top; a += 4)
+        *(volatile uint32_t *)a = a;
+    for (uint32_t a = base; ok && a < top; a += 4)
+        ok &= *(volatile uint32_t *)a == a;
+    write(1, ok ? "h" : "H", 1);
+
+    int32_t st = 0;
+    int32_t c = fork();
+    if (c == 0) {
+        *(volatile uint32_t *)(top + 100) = 1;      /* 堆末尾往上那一页还没要过 */
+        exit(1);
+    }
+    ok = waitpid(c, &st, 0) == c && st == (0x100 | 14);
+    brk(top + 100);                     /* 不对齐到页：top + 100 所在的整页都算堆 */
+    c = fork();
+    if (c == 0) {
+        *(volatile uint32_t *)(top + 2000) = 5;
+        exit(*(volatile uint32_t *)(top + 2000) == 5 ? 0 : 1);
+    }
+    ok &= waitpid(c, &st, 0) == c && st == 0;
+    ok &= brk(top) == top;
+    write(1, ok ? "g" : "G", 1);
+
+    *(volatile uint32_t *)base = 42;
+    c = fork();
+    if (c == 0) {
+        int good = brk(0) == top && *(volatile uint32_t *)base == 42;
+        *(volatile uint32_t *)base = 7;
+        exit(good ? 0 : 1);
+    }
+    ok = waitpid(c, &st, 0) == c && st == 0 && *(volatile uint32_t *)base == 42;
+    write(1, ok ? "f" : "F", 1);
+
+    ok = brk(base - 4) == top && brk(0x403F0004) == top && brk(0x403F0000) == 0x403F0000 && brk(top) == top;
+    write(1, ok ? "l" : "L", 1);
+
+    int32_t fd = open("/hello.txt", 0);
+    ok = read(fd, (void *)(top + 0x100000), 4) == -1 && read(fd, (void *)base, 4) == 4;
+    close(fd);
+    write(1, ok ? "e" : "E", 1);
+
+    c = fork();
+    if (c == 0) {
+        char *argv[] = { "check", "brk", 0 };
+        execv("/bin/check", argv);
+        exit(9);
+    }
+    ok = waitpid(c, &st, 0) == c && st == 0;
+    write(1, ok ? "o" : "O", 1);
+    exit(0);
 #elif SELFTEST == SELFTEST_ALL_EXIT
     write(1, "bye", 3);
     exit(2);

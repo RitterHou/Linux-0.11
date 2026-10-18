@@ -37,6 +37,7 @@
 #define SELFTEST_USER_PIPE         33   /* pipe 和 dup：读写、写满后等待、写的一头全关后读到 0、读的一头关了写返回 -1 */
 #define SELFTEST_USER_FSWRITE      34   /* 写文件：O_EXCL、读写权限、O_TRUNC、O_APPEND、删掉开着的文件、目录的错误、共用 i 节点 */
 #define SELFTEST_USER_SIGNAL       35   /* kill 和 signal：结束、忽略、SIGKILL、进程组、setsid、打断管道和 waitpid、SIGPIPE、参数检查 */
+#define SELFTEST_USER_BRK          36   /* brk：堆的起点和末尾、按需补页、堆和栈之间不补页、fork 继承、越界、exec 后从程序末尾开始 */
 
 #define SELFTEST_IN_USER(n) ((n) >= 20)
 

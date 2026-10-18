@@ -73,6 +73,8 @@ struct task {
     int leader;                     /* 调用过 setsid，是进程组的头：它打开终端时，终端的前台进程组就是它这一组 */
     int has_tty;                    /* 进程组的头已经有了控制终端（打开过 /dev/tty0）；结束时把终端的前台进程组清掉 */
     int interruptible;              /* 睡在 interruptible_sleep_on 里：信号能叫醒它 */
+    uint32_t start_brk;             /* 程序的末尾（.bss 的末尾），堆从这里开始；exec 时设好 */
+    uint32_t brk;                   /* 堆的末尾：start_brk 到 brk 之间缺页时补页，再往上到栈区之间不补 */
 };
 
 static struct tss tss[NR_TASKS];
@@ -222,6 +224,7 @@ static void init_user_task(int n, void (*entry)(void), uint32_t user_esp)
 
     if (dir == 0 || !setup_task(n, entry, dir))
         panic("no memory for a user task");
+    tasks[n].start_brk = tasks[n].brk = USER_LOW;   /* init 的代码在内核映像里，用户空间里还什么都没有 */
     struct tss *t = &tss[n];
     t->esp = user_esp;
     t->cs = USER_CODE_SEL;
@@ -512,6 +515,33 @@ int sched_claim_tty(void)
     return 1;
 }
 
+/* exec 装好新程序：堆从它的末尾开始，是空的。 */
+void sched_set_brk(uint32_t end)
+{
+    tasks[current_task].start_brk = tasks[current_task].brk = end;
+}
+
+/*
+ * brk 系统调用：把堆的末尾挪到 addr。不能低于程序的末尾，也不能伸进栈区；做不到就不动。返回现在的堆末尾，
+ * 所以 brk(0) 就是问“堆现在到哪儿”。挪高了并不马上分内存：用到哪一页，缺页时才补哪一页。
+ * 挪低了也不收回已经分了的页，进程结束时一起收回。Linux 0.11 的 sys_brk() 也只是记下这个数，
+ * 它允许的范围是代码的末尾到栈底往下 16 KB；这里的栈区固定是顶端的 64 KB。
+ */
+uint32_t sched_brk(uint32_t addr)
+{
+    struct task *t = &tasks[current_task];
+
+    if (addr >= t->start_brk && addr <= STACK_LOW)
+        t->brk = addr;
+    return t->brk;
+}
+
+/* 缺页时用：当前任务的堆到哪儿。 */
+uint32_t current_brk(void)
+{
+    return tasks[current_task].brk;
+}
+
 int sched_pgrp(void)
 {
     return tasks[current_task].pgrp;
@@ -606,7 +636,8 @@ int sched_fork(const struct interrupt_frame *frame)
         .iomap_base = sizeof(struct tss),
     };
     tasks[n] = (struct task){ .state = TASK_RUNNING, .page_dir = dir, .kstack = kstack, .parent = current_task,
-                              .restorer = tasks[current_task].restorer, .pgrp = tasks[current_task].pgrp };   /* 收到的信号不继承 */
+                              .restorer = tasks[current_task].restorer, .pgrp = tasks[current_task].pgrp,   /* 收到的信号不继承 */
+                              .start_brk = tasks[current_task].start_brk, .brk = tasks[current_task].brk };
     for (int i = 0; i < 32; i++)
         tasks[n].action[i] = tasks[current_task].action[i];
     set_name(n, tasks[current_task].name);

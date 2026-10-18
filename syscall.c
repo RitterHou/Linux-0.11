@@ -408,6 +408,13 @@ static int32_t sys_setsid(uint32_t a, uint32_t b, uint32_t c, struct interrupt_f
     return sched_setsid();
 }
 
+/* brk(addr)：挪堆的末尾，见 sched_brk()。 */
+static int32_t sys_brk(uint32_t addr, uint32_t b, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)b, (void)c, (void)frame;
+    return (int32_t)sched_brk(addr);
+}
+
 static const syscall_fn syscall_table[SYS_CALLS] = {
     [SYS_WRITE]  = sys_write,
     [SYS_GETPID] = sys_getpid,
@@ -432,6 +439,7 @@ static const syscall_fn syscall_table[SYS_CALLS] = {
     [SYS_KILL]   = sys_kill,
     [SYS_SIGNAL] = sys_signal,
     [SYS_SETSID] = sys_setsid,
+    [SYS_BRK]    = sys_brk,
 };
 
 void syscall_dispatch(struct interrupt_frame *frame)

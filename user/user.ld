@@ -12,5 +12,6 @@ SECTIONS
     . = ALIGN(4096);
     .data : { *(.data .data.*) }
     .bss : { *(.bss .bss.*) *(COMMON) }
+    __end = .;                      /* 程序的末尾：exec 把堆的起点（brk）设在这里 */
     /DISCARD/ : { *(.comment) *(.note .note.*) *(.eh_frame*) }
 }

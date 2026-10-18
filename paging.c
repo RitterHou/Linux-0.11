@@ -247,6 +247,12 @@ int handle_page_fault(uint32_t addr, uint32_t error_code)
         return copy_on_write(pte);
     }
 
+    /*
+     * 页不存在：程序和堆（brk 以下）、栈区（顶端 64 KB）缺的页都补上；两者之间是还没要来的地方，不补，
+     * 用到那里就是程序的错。brk 不一定对齐到页：brk 所在的那一页也算堆。
+     */
+    if ((addr & ~(PAGE_SIZE - 1)) >= current_brk() && addr < STACK_LOW)
+        return 0;
     if (!(*pde & PAGE_PRESENT)) {
         uint32_t table = get_free_page();       /* 已清零：1024 项都不存在 */
         if (table == 0)

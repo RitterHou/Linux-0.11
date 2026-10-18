@@ -19,7 +19,6 @@
 #define MAX_ARGS      16
 #define ARG_BYTES     1024          /* 参数字符串加起来最多这么长，放得进栈顶的一页 */
 #define MAX_PHDRS     8
-#define STACK_RESERVE (64 * 1024)   /* 程序最高只能到用户空间顶端往下 64 KB，上面留给栈 */
 
 struct elf_header {
     uint8_t ident[16];              /* 0x7F 'E' 'L' 'F'，1 表示 32 位，1 表示小端 */
@@ -47,7 +46,7 @@ static int load_segment(uint32_t dir, const struct minix_inode *ip, const struct
 {
     uint32_t end = ph->vaddr + ph->memsz;
 
-    if (ph->filesz > ph->memsz || ph->vaddr < USER_LOW || end < ph->vaddr || end > USER_TOP - STACK_RESERVE)
+    if (ph->filesz > ph->memsz || ph->vaddr < USER_LOW || end < ph->vaddr || end > STACK_LOW)
         return -1;
     for (uint32_t va = ph->vaddr & ~(PAGE_SIZE - 1); va < end; va += PAGE_SIZE) {
         /* 和前一个段共用一页、可写属性又不一样：那一页没法同时又只读又可写，不装 */
@@ -97,7 +96,7 @@ int do_exec(const char *path, uint32_t user_argv, struct interrupt_frame *frame)
     if (namei(path, &ino, &ip) < 0 || (ip.mode & S_IFMT) != S_IFREG || !(ip.mode & 0111))
         return -1;
     if (inode_read(&ip, 0, &eh, sizeof(eh)) != sizeof(eh) || !elf_ok(&eh) ||
-        eh.entry < USER_LOW || eh.entry >= USER_TOP - STACK_RESERVE)
+        eh.entry < USER_LOW || eh.entry >= STACK_LOW)
         return -1;
     uint32_t ph_bytes = eh.phnum * sizeof(ph[0]);
     if (inode_read(&ip, eh.phoff, ph, ph_bytes) != (int32_t)ph_bytes)
@@ -107,9 +106,15 @@ int do_exec(const char *path, uint32_t user_argv, struct interrupt_frame *frame)
     uint32_t dir = new_page_dir();
     if (dir == 0)
         return -1;
-    for (uint32_t i = 0; i < eh.phnum; i++)
-        if (ph[i].type == PT_LOAD && ph[i].memsz != 0 && load_segment(dir, &ip, &ph[i]) < 0)
+    uint32_t end = USER_LOW;                /* 最高的段的末尾（.bss 的末尾）：堆从这里开始 */
+    for (uint32_t i = 0; i < eh.phnum; i++) {
+        if (ph[i].type != PT_LOAD || ph[i].memsz == 0)
+            continue;
+        if (load_segment(dir, &ip, &ph[i]) < 0)
             goto fail;
+        if (ph[i].vaddr + ph[i].memsz > end)
+            end = ph[i].vaddr + ph[i].memsz;
+    }
 
     /* 4. 栈顶这一页：从上往下依次是参数字符串、argv[argc] = 0、argv[0..argc-1]、argv、argc、假的返回地址 */
     uint32_t top = USER_TOP - PAGE_SIZE;
@@ -139,6 +144,7 @@ int do_exec(const char *path, uint32_t user_argv, struct interrupt_frame *frame)
     frame->ebx = frame->ecx = frame->edx = frame->esi = frame->edi = frame->ebp = 0;
     sched_set_name(path);
     sched_exec_signals();           /* 原来的处理函数在新程序里没有意义 */
+    sched_set_brk(end);             /* 新程序的堆是空的，从它的 .bss 末尾开始 */
     if (first) {
         first = 0;
         vga_write_at(0, 11, "E", VGA_GRAY);     /* 第一次从硬盘装入程序 */
