@@ -26,7 +26,17 @@
 #define SYS_TASKINFO 11             /* taskinfo(pid, &info)：取任务的状态、父进程和名字，给 ps 用 */
 #define SYS_PIPE   12               /* pipe(fd)：建一个管道，fd[0] 是读的一头，fd[1] 是写的一头 */
 #define SYS_DUP    13               /* dup(fd)：复制描述符，返回最小的空闲描述符，指向同一个打开的文件 */
-#define SYS_CALLS  14
+#define SYS_UNLINK 14               /* unlink(path)：删掉文件 */
+#define SYS_MKDIR  15               /* mkdir(path)：新建目录 */
+#define SYS_RMDIR  16               /* rmdir(path)：删掉空目录 */
+#define SYS_FSINFO 17               /* fsinfo(&info)：文件系统有多少块、多少 i 节点、各用了多少，给 df 用 */
+#define SYS_CALLS  18
+
+/* fsinfo 写回的内容 */
+struct fsinfo {
+    uint32_t blocks, free_blocks;   /* 数据块 */
+    uint32_t inodes, free_inodes;
+};
 
 /* stat 写回的内容：取自磁盘上的 i 节点 */
 struct stat {
@@ -45,6 +55,16 @@ struct taskinfo {
 };
 
 #define WNOHANG    1                /* waitpid 的选项：子进程还没结束就立刻返回 0 */
+
+/* open 的 flags，取值与 Linux 0.11 的 include/fcntl.h 相同 */
+#define O_RDONLY   00
+#define O_WRONLY   01
+#define O_RDWR     02
+#define O_ACCMODE  03
+#define O_CREAT    0100             /* 不存在就新建 */
+#define O_EXCL     0200             /* 和 O_CREAT 一起用：已经存在就失败 */
+#define O_TRUNC    01000            /* 打开时清空 */
+#define O_APPEND   02000            /* 每次写都接在末尾 */
 
 static inline int32_t syscall3(uint32_t nr, uint32_t a, uint32_t b, uint32_t c)
 {
@@ -99,6 +119,26 @@ static inline int32_t pipe(int32_t fd[2])
 static inline int32_t dup(int32_t fd)
 {
     return syscall3(SYS_DUP, (uint32_t)fd, 0, 0);
+}
+
+static inline int32_t unlink(const char *path)
+{
+    return syscall3(SYS_UNLINK, (uint32_t)path, 0, 0);
+}
+
+static inline int32_t mkdir(const char *path)
+{
+    return syscall3(SYS_MKDIR, (uint32_t)path, 0, 0);
+}
+
+static inline int32_t rmdir(const char *path)
+{
+    return syscall3(SYS_RMDIR, (uint32_t)path, 0, 0);
+}
+
+static inline int32_t fsinfo(struct fsinfo *info)
+{
+    return syscall3(SYS_FSINFO, (uint32_t)info, 0, 0);
 }
 
 static inline int32_t getpid(void)

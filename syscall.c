@@ -59,10 +59,10 @@ static int32_t sys_read(uint32_t fd, uint32_t buf, uint32_t count, struct interr
     return file_read(f, (void *)buf, count);
 }
 
-/* open(path, flags)：打开文件，返回最小的空闲描述符。文件系统只读，flags 暂时不用。 */
+/* open(path, flags)：打开文件，返回最小的空闲描述符。flags 见 syscall.h 的 O_ 开头的几个。 */
 static int32_t sys_open(uint32_t path, uint32_t flags, uint32_t c, struct interrupt_frame *frame)
 {
-    (void)flags, (void)c;
+    (void)c;
     char name[PATH_MAX];
     struct file **files = current_files();
 
@@ -71,7 +71,7 @@ static int32_t sys_open(uint32_t path, uint32_t flags, uint32_t c, struct interr
     int fd = free_fd();
     if (fd < 0)
         return -1;
-    struct file *f = file_open(name);
+    struct file *f = file_open(name, (int)flags);
     if (!f)
         return -1;
     files[fd] = f;
@@ -146,7 +146,10 @@ static int32_t sys_exec(uint32_t path, uint32_t argv, uint32_t c, struct interru
 
     if (!from_user_mode(frame) || copy_string(name, path, PATH_MAX, 1) < 0)
         return -1;
-    return do_exec(name, argv, frame);
+    fs_lock();                      /* 装入程序时一直读文件，不能让别人在中途改它 */
+    int ret = do_exec(name, argv, frame);
+    fs_unlock();
+    return ret;
 }
 
 /* stat(path, &st)：取文件的类型、链接数、大小和 i 节点号。内核要写 st，检查它是否用户可写。 */
@@ -160,7 +163,10 @@ static int32_t sys_stat(uint32_t path, uint32_t st, uint32_t c, struct interrupt
 
     if (copy_string(name, path, PATH_MAX, from_user) < 0 || (from_user && !user_write_ok(st, sizeof(struct stat))))
         return -1;
-    if (namei(name, &ino, &inode) < 0)
+    fs_lock();
+    int found = namei(name, &ino, &inode);
+    fs_unlock();
+    if (found < 0)
         return -1;
     struct stat *out = (struct stat *)st;
     out->mode = inode.mode;
@@ -227,6 +233,54 @@ static int32_t sys_dup(uint32_t fd, uint32_t b, uint32_t c, struct interrupt_fra
     return nfd;
 }
 
+/* unlink、mkdir、rmdir 都是：先把路径复制进内核，在文件系统锁里交给 fs.c。 */
+static int32_t path_op(uint32_t path, struct interrupt_frame *frame, int (*op)(const char *))
+{
+    char name[PATH_MAX];
+
+    if (copy_string(name, path, PATH_MAX, from_user_mode(frame)) < 0)
+        return -1;
+    fs_lock();
+    int ret = op(name);
+    fs_unlock();
+    return ret;
+}
+
+static int32_t sys_unlink(uint32_t path, uint32_t b, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)b, (void)c;
+    return path_op(path, frame, fs_unlink);
+}
+
+static int32_t sys_mkdir(uint32_t path, uint32_t b, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)b, (void)c;
+    return path_op(path, frame, fs_mkdir);
+}
+
+static int32_t sys_rmdir(uint32_t path, uint32_t b, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)b, (void)c;
+    return path_op(path, frame, fs_rmdir);
+}
+
+/* fsinfo(&info)：数一数两张位图里还有几个 0。先取到内核里，再复制给用户。 */
+static int32_t sys_fsinfo(uint32_t info, uint32_t b, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)b, (void)c;
+    struct fsinfo tmp;
+
+    if (from_user_mode(frame) && !user_write_ok(info, sizeof(tmp)))
+        return -1;
+    fs_lock();
+    int ok = fs_info(&tmp);
+    fs_unlock();
+    if (ok < 0)
+        return -1;
+    *(struct fsinfo *)info = tmp;
+    return 0;
+}
+
 static const syscall_fn syscall_table[SYS_CALLS] = {
     [SYS_WRITE]  = sys_write,
     [SYS_GETPID] = sys_getpid,
@@ -242,6 +296,10 @@ static const syscall_fn syscall_table[SYS_CALLS] = {
     [SYS_TASKINFO] = sys_taskinfo,
     [SYS_PIPE]   = sys_pipe,
     [SYS_DUP]    = sys_dup,
+    [SYS_UNLINK] = sys_unlink,
+    [SYS_MKDIR]  = sys_mkdir,
+    [SYS_RMDIR]  = sys_rmdir,
+    [SYS_FSINFO] = sys_fsinfo,
 };
 
 void syscall_dispatch(struct interrupt_frame *frame)

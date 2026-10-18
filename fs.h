@@ -29,8 +29,10 @@ struct buffer {
 };
 #define NO_BLOCK 0xFFFFFFFFu
 struct buffer *bread(uint32_t block);
+struct buffer *bget(uint32_t block);
+int bwrite(struct buffer *b);
 void brelse(struct buffer *b);
-extern uint32_t buffer_hits, buffer_misses;
+extern uint32_t buffer_hits, buffer_misses, buffer_writes;
 
 /* fs.c：Minix v1 文件系统，只读 */
 struct minix_inode {                /* 磁盘上的 i 节点，32 字节 */
@@ -48,10 +50,29 @@ struct dir_entry {                  /* 目录项，16 字节 */
     char name[NAME_LEN];
 } __attribute__((packed));
 
+/* 内存里的 i 节点：同一个文件打开几次，共用表里的一项 */
+struct m_inode {
+    uint32_t ino;
+    int count;                      /* 有几处在用：打开的文件、正在执行的操作 */
+    struct minix_inode d;           /* 磁盘上那 32 字节的拷贝，改了就写回去 */
+};
+
 int fs_mount(void);
 int read_inode(uint32_t ino, struct minix_inode *out);
 int32_t inode_read(const struct minix_inode *ip, uint32_t pos, void *dst, uint32_t n);
 int namei(const char *path, uint32_t *ino, struct minix_inode *ip);
+void fs_lock(void);
+void fs_unlock(void);
+struct m_inode *iget(uint32_t ino);
+void iput(struct m_inode *ip);
+int32_t inode_write(struct m_inode *ip, uint32_t pos, const void *src, uint32_t n);
+void fs_truncate(struct m_inode *ip);
+struct m_inode *fs_create(const char *path);
+int fs_mkdir(const char *path);
+int fs_unlink(const char *path);
+int fs_rmdir(const char *path);
+struct fsinfo;
+int fs_info(struct fsinfo *info);
 
 /* file.c：打开的文件 */
 #define NR_OPEN 8                   /* 每个任务最多同时打开 8 个文件 */
@@ -63,12 +84,12 @@ int namei(const char *path, uint32_t *ino, struct minix_inode *ip);
 struct file {
     int type;
     int count;                      /* 有几个文件描述符指向它；fork 之后父子共用，读写位置也共用 */
+    int mode;                       /* 打开方式：O_RDONLY、O_WRONLY 或 O_RDWR，再加上 O_APPEND */
     uint32_t pos;
-    uint32_t ino;
-    struct minix_inode inode;
+    struct m_inode *ip;             /* 文件系统里的文件：内存里的 i 节点 */
     struct pipe *pipe;              /* 管道的两头指向同一个管道 */
 };
-struct file *file_open(const char *path);
+struct file *file_open(const char *path, int flags);
 int file_pipe(struct file **read_end, struct file **write_end);
 struct file *tasks_file(void);
 void file_get(struct file *f);

@@ -2,6 +2,7 @@
  * sh：一个很小的 shell。读一行，按空格切成参数，fork 子进程去 exec 程序，等它们结束，再读下一行。
  *   - 命令名里没有 / 的，到 /bin 下找：ls 就是 /bin/ls；
  *   - 用 | 把几个命令接起来：每一段一个子进程，相邻两段之间一个管道，前一个的标准输出接到后一个的标准输入；
+ *   - > 文件、>> 文件、< 文件：把这一段的标准输出写进文件（清空或者接在末尾），或者从文件读标准输入；
  *   - 最后一个参数是 & 的，在后台运行，不等它；每次读命令之前收走已经结束的后台程序；
  *   - 内建命令：exit 退出 shell（init 会再拉起一个），help 显示能用的命令。
  * Linux 0.11 的 init 运行的是磁盘上的 /bin/sh（当年的 bash），道理相同：pipe、fork、dup、exec、wait。
@@ -42,9 +43,42 @@ static void report(const char *name, int32_t st)
     }
 }
 
+/*
+ * 在子进程里处理这一段里的 >、>>、<：打开文件，接到 1 号或 0 号描述符上（先 close，再 dup 打开得到的描述符），
+ * 再把这两个参数从 argv 里拿掉。打不开就报告、以 1 退出。
+ */
+static void redirect(char **argv)
+{
+    int out = 0;
+    for (int i = 0; argv[i];) {
+        int fd = strcmp(argv[i], ">") == 0 ? 1 : strcmp(argv[i], ">>") == 0 ? 1 : strcmp(argv[i], "<") == 0 ? 0 : -1;
+        if (fd < 0) {
+            argv[out++] = argv[i++];
+            continue;
+        }
+        const char *file = argv[i + 1];
+        int32_t flags = fd == 0 ? O_RDONLY : argv[i][1] == '>' ? (O_WRONLY | O_CREAT | O_APPEND) : (O_WRONLY | O_CREAT | O_TRUNC);
+        int32_t opened = file ? open(file, flags) : -1;
+        if (opened < 0) {
+            print("sh: ");
+            print(file ? file : argv[i]);
+            print(": cannot redirect\n");
+            exit(1);
+        }
+        close(fd);
+        dup(opened);
+        close(opened);
+        i += 2;
+    }
+    argv[out] = 0;
+}
+
 /* 在子进程里：命令名里没有 / 就到 /bin 下找，exec 它；exec 失败就报告、以 127 退出。 */
 static void exec_command(char **argv)
 {
+    redirect(argv);
+    if (!argv[0])
+        exit(0);
     char path[64];
     uint32_t len = 0;
     int has_slash = 0;
@@ -170,8 +204,8 @@ int main(int sh_argc, char **sh_argv)
         if (strcmp(argv[0], "exit") == 0)
             return 0;
         if (strcmp(argv[0], "help") == 0) {
-            print("commands: ls [dir], cat [file...], echo text, ps, wc, grep text, hello, check, letter X &, exit\n");
-            print("pipes: ls /bin | wc, cat /hello.txt | grep Minix\n");
+            print("commands: ls cat echo ps wc grep rm mkdir rmdir df hello check, letter X &, exit\n");
+            print("pipes and files: ls /bin | wc, echo hi > /tmp/a, cat < /tmp/a\n");
             continue;
         }
         run_line(argv, argc, background);

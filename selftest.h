@@ -35,6 +35,7 @@
 #define SELFTEST_USER_FS           31   /* open/read/close：读文件、大文件、目录、子目录，描述符用光，fork 后共用读写位置 */
 #define SELFTEST_USER_EXEC         32   /* exec：失败时原程序不受影响，hello 打印参数，check 检查自己的段，写代码页被结束 */
 #define SELFTEST_USER_PIPE         33   /* pipe 和 dup：读写、写满后等待、写的一头全关后读到 0、读的一头关了写返回 -1 */
+#define SELFTEST_USER_FSWRITE      34   /* 写文件：O_EXCL、读写权限、O_TRUNC、O_APPEND、删掉开着的文件、目录的错误、共用 i 节点 */
 
 #define SELFTEST_IN_USER(n) ((n) >= 20)
 

@@ -313,6 +313,80 @@ void user_main(void)
     close(copy);
     write(1, ok ? "d" : "D", 1);
     exit(0);
+#elif SELFTEST == SELFTEST_USER_FSWRITE
+    /*
+     * 每项检查通过就写一个字母，期望是 emtuds：
+     *   e：O_CREAT | O_EXCL 遇到已经存在的文件失败，新文件成功
+     *   m：只读打开的不能写，只写打开的不能读，目录不能打开来写
+     *   t：从头写会覆盖原来的内容；O_TRUNC 清空；O_APPEND 接在末尾
+     *   u：删掉一个还开着的文件：目录里看不见了，开着的描述符照样能读；关掉以后块和 i 节点才收回
+     *   d：已经存在的目录不能再建；非空目录、根目录、. 删不掉；父目录不存在、名字超过 14 个字节，建不了
+     *   s：同一个文件打开两次，共用内存里的 i 节点：从一个描述符写进去，另一个马上读得到
+     */
+    char buf[64];
+    struct fsinfo before, after;
+    fsinfo(&before);
+
+    int ok = open("/hello.txt", O_RDWR | O_CREAT | O_EXCL) < 0;
+    int32_t fd = open("/tmp/new", O_RDWR | O_CREAT | O_EXCL);
+    ok &= fd >= 0 && write(fd, "hello", 5) == 5;
+    close(fd);
+    write(1, ok ? "e" : "E", 1);
+
+    fd = open("/tmp/new", O_RDONLY);
+    ok = write(fd, "x", 1) == -1;
+    close(fd);
+    fd = open("/tmp/new", O_WRONLY);
+    ok &= read(fd, buf, 1) == -1;
+    close(fd);
+    ok &= open("/tmp", O_WRONLY) < 0 && open("/tmp", O_RDONLY) >= 0;
+    write(1, ok ? "m" : "M", 1);
+
+    fd = open("/tmp/new", O_WRONLY);
+    write(fd, "HE", 2);
+    close(fd);
+    fd = open("/tmp/new", O_RDONLY);
+    ok = read(fd, buf, sizeof(buf)) == 5 && buf[0] == 'H' && buf[1] == 'E' && buf[2] == 'l';
+    close(fd);
+    fd = open("/tmp/new", O_WRONLY | O_TRUNC);
+    write(fd, "ab", 2);
+    close(fd);
+    fd = open("/tmp/new", O_WRONLY | O_APPEND);
+    write(fd, "cd", 2);
+    close(fd);
+    fd = open("/tmp/new", O_RDONLY);
+    ok &= read(fd, buf, sizeof(buf)) == 4 && buf[0] == 'a' && buf[3] == 'd';
+    close(fd);
+    write(1, ok ? "t" : "T", 1);
+
+    fd = open("/tmp/new", O_RDONLY);
+    ok = unlink("/tmp/new") == 0 && open("/tmp/new", O_RDONLY) < 0;
+    ok &= read(fd, buf, sizeof(buf)) == 4 && buf[0] == 'a';
+    fsinfo(&after);
+    ok &= after.free_inodes == before.free_inodes - 1;     /* 还开着，没收回 */
+    close(fd);
+    fsinfo(&after);
+    ok &= after.free_inodes == before.free_inodes && after.free_blocks == before.free_blocks;
+    write(1, ok ? "u" : "U", 1);
+
+    ok = mkdir("/tmp/d") == 0 && mkdir("/tmp/d") < 0;
+    fd = open("/tmp/d/f", O_WRONLY | O_CREAT);
+    close(fd);
+    ok &= rmdir("/tmp/d") < 0 && rmdir("/") < 0 && rmdir("/tmp/.") < 0 && unlink("/tmp/d") < 0;
+    ok &= mkdir("/nothing/d") < 0 && mkdir("/tmp/abcdefghijklmno") < 0;
+    ok &= unlink("/tmp/d/f") == 0 && rmdir("/tmp/d") == 0;
+    write(1, ok ? "d" : "D", 1);
+
+    int32_t a = open("/tmp/shared", O_RDWR | O_CREAT), b = open("/tmp/shared", O_RDONLY);
+    write(a, "same", 4);
+    ok = read(b, buf, sizeof(buf)) == 4 && buf[0] == 's' && buf[3] == 'e';
+    close(a);
+    close(b);
+    ok &= unlink("/tmp/shared") == 0;
+    fsinfo(&after);
+    ok &= after.free_inodes == before.free_inodes && after.free_blocks == before.free_blocks;
+    write(1, ok ? "s" : "S", 1);
+    exit(0);
 #elif SELFTEST == SELFTEST_ALL_EXIT
     write(1, "bye", 3);
     exit(2);

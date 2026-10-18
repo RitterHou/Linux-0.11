@@ -363,7 +363,7 @@ def test_timer_rate(m, elf):
 
 
 KEY_NAMES = {" ": "spc", "/": "slash", ".": "dot", "-": "minus", "&": "shift-7", "_": "shift-minus",
-             "!": "shift-1", "@": "shift-2", "|": "shift-backslash", "\n": "ret"}
+             "!": "shift-1", "@": "shift-2", "|": "shift-backslash", ">": "shift-dot", "<": "shift-comma", "\n": "ret"}
 
 
 def type_text(m, text):
@@ -377,6 +377,16 @@ def type_text(m, text):
         else:
             keys.append(ch)
     m.sendkeys(keys, delay=0.02)
+
+
+def bin_programs():
+    """硬盘 /bin 里的程序名，按名字排好：与 make 放进 build/rootfs/bin 的相同。"""
+    return sorted(os.listdir(os.path.join(BUILD, "rootfs", "bin")))
+
+
+def ls_wc(names):
+    """ls 每行是 类型 1 个字符、大小 8 格、i 节点号 4 格、两个空格、名字，再加换行；wc 数出的行数、词数、字节数。"""
+    return f"{len(names)} {4 * len(names)} {sum(16 + len(n) for n in names)}"
 
 
 def console(m):
@@ -436,16 +446,16 @@ def test_keyboard_shift(m, elf):
 def test_console_scroll(m, elf):
     """控制台窗口（第 8～18 行）写满后向上滚动，窗口外的内容不受影响"""
     before = m.screen(8)
-    names = [".", "..", "cat", "check", "echo", "grep", "hello", "letter", "ls", "ps", "sh", "wc"]
+    names = [".", ".."] + bin_programs()
     wait_prompt(m)
     type_text(m, "ls /bin\n")
-    # 输出比窗口高，命令那一行和头两项会滚出去，只能看最后两行：最后一个文件名和新的提示符
-    m.wait_for(lambda mm: console(mm)[-1] == "$" and console(mm)[-2].endswith("  wc"), timeout=5, what="ls /bin 运行完")
+    # 输出比窗口高，命令那一行和前面几项会滚出去，只能看最后两行：最后一个文件名和新的提示符
+    m.wait_for(lambda mm: console(mm)[-1] == "$" and console(mm)[-2].endswith("  " + names[-1]), timeout=5, what="ls /bin 运行完")
     rows = m.screen(25)
     window = rows[8:19]
     check(window[-1] == "$", f"第 18 行应是新的提示符：{window[-1]!r}")
     got = [r.split()[-1] for r in window[:-1]]
-    check(got == names[2:], f"第 8～17 行应是 ls /bin 12 行输出的后 10 行（命令那一行和 . .. 已经滚出窗口）：{window}")
+    check(got == names[-10:], f"第 8～17 行应是 ls /bin 输出的最后 10 行（命令那一行和前面几项已经滚出窗口）：{window}")
     check(all(r.startswith("-") for r in window[:-1]), f"/bin 下的程序都应是普通文件：{window}")
     for r in (0, 2, 5):
         check(rows[r] == before[r], f"第 {r} 行不应被滚动影响：{before[r]!r} 变成了 {rows[r]!r}")
@@ -1079,6 +1089,20 @@ def test_no_disk(_m, _elf):
         check(not exception_screen(m)[0], f"不应出现异常面板：{exception_screen(m)[0]!r}")
 
 
+def test_fs_write(_m, _elf):
+    """写文件：O_EXCL、读写权限、O_TRUNC、O_APPEND、删掉开着的文件、目录的错误、同一个文件开两次共用 i 节点"""
+    d = build_selftest("USER_FSWRITE")
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        m.wait_for(lambda mm: message_row(mm) == "task 2 exited with code 0", timeout=10, what="任务 B 的结束消息")
+        out = task_output(m)
+        expected = "emtuds"
+        meaning = {"e": "O_EXCL", "m": "读写权限", "t": "覆盖、O_TRUNC、O_APPEND", "u": "删掉开着的文件，关掉后才收回",
+                   "d": "目录的各种错误", "s": "两个描述符共用 i 节点"}
+        for i, ch in enumerate(expected):
+            check(len(out) > i and out[i] == ch, f"第 {i + 1} 项（{meaning[ch]}）没有通过：检查结果是 {out!r}，应为 {expected!r}")
+        check(not exception_screen(m)[0], f"不应出现异常面板：{exception_screen(m)[0]!r}")
+
+
 def test_wild_read(_m, _elf):
     """用户程序读栈区以外没映射的地址：内核不补页，只结束任务 B，错误码 4"""
     d = build_selftest("USER_WILD_READ")
@@ -1115,12 +1139,14 @@ def test_shell(m, elf):
     m.wait_for(lambda mm: mm.screen(4)[3].split("/")[0] == free_before, timeout=2,
                what=f"命令都结束后空闲页回到 {free_before}")
 
-    check(run_command(m, "ls /bin | wc") == ["12 48 230"], "ls /bin 的输出经管道交给 wc：12 行、48 个词、230 个字节")
+    names = [".", ".."] + bin_programs()
+    check(run_command(m, "ls /bin | wc") == [ls_wc(names)], f"ls /bin 的输出经管道交给 wc，应为 {ls_wc(names)}")
     check(run_command(m, "cat /hello.txt | grep Minix") == ["Hello from the Minix file system on hda!"], "grep 从管道读")
     out = run_command(m, "ps | grep sh")
     # ps 运行时，grep 那个子进程可能还没来得及 exec，名字仍是 sh，所以可能多出一行
     check(" 4    2 W sh" in out and all(l.endswith(" sh") for l in out) and len(out) <= 2, f"ps 的输出经管道交给 grep：{out!r}")
-    check(run_command(m, "ls /bin | grep e | wc") == ["5 20 104"], "三段的管道：含 e 的 5 个文件名")
+    with_e = [n for n in names if "e" in n]
+    check(run_command(m, "ls /bin | grep e | wc") == [ls_wc(with_e)], f"三段的管道：含 e 的 {len(with_e)} 个文件名")
     check(run_command(m, "cat /big | wc") == ["2400 7201 614400"], "600 KB 经过只有一页的管道，写满了就等，一个字节也不丢")
     wait_prompt(m)
     type_text(m, "wc\nhello world\n")
@@ -1129,6 +1155,23 @@ def test_shell(m, elf):
     m.wait_for(lambda mm: console(mm)[-2:] == ["1 2 12", "$"], timeout=2, what="Ctrl+D 结束输入，wc 打印 1 2 12")
     m.wait_for(lambda mm: mm.screen(4)[3].split("/")[0] == free_before, timeout=2,
                what=f"管道和命令都结束后空闲页回到 {free_before}")
+
+    df = run_command(m, "df")
+    check(len(df) == 1 and df[0].startswith("blocks: "), f"df 的输出不对：{df!r}")
+    for command, expected in [("echo hello > /tmp/a", []), ("echo world >> /tmp/a", []), ("cat /tmp/a", ["hello", "world"]),
+                              ("wc < /tmp/a", ["2 2 12"]), ("mkdir /tmp/d", []), ("echo x > /tmp/d/f", []),
+                              ("rmdir /tmp/d", ["rmdir: /tmp/d: cannot remove (not an empty directory?)"]),
+                              ("rm /tmp/d/f", []), ("rmdir /tmp/d", []), ("rm /tmp/a", []), ("cat /tmp/a", ["cat: /tmp/a: cannot open"])]:
+        out = run_command(m, command)
+        check(out == expected, f"{command} 应输出 {expected!r}，实际是 {out!r}")
+    wait_prompt(m)
+    type_text(m, "cat /big > /tmp/big2\n")
+    m.wait_for(lambda mm: last_line(mm) == "$" and "$ cat /big > /tmp/big2" in console(mm), timeout=20,
+               what="把 600 KB 的 /big 复制成 /tmp/big2")
+    check(run_command(m, "cat /tmp/big2 | wc") == ["2400 7201 614400"], "复制出的文件要用到二级间接块，内容应完全一样")
+    used = run_command(m, "df")[0]
+    check(run_command(m, "rm /tmp/big2") == [], "rm 应成功")
+    check(run_command(m, "df") == df, f"删掉之后，块和 i 节点都应收回：复制后是 {used!r}，删掉后应回到 {df!r}")
 
     out = run_command(m, "letter D &")
     check(len(out) == 1 and re.fullmatch(r"\[\d+\]", out[0]), f"后台运行应打印任务号：{out!r}")
@@ -1154,7 +1197,7 @@ SEPARATE_TESTS = [test_syscalls, test_page_alloc, test_double_free, test_hd_rw, 
                   test_big_kernel, test_user_write_kernel, test_user_privileged,
                   test_user_bad_pointer, test_user_exit, test_all_tasks_exit,
                   test_nmi_in_user_mode, test_user_write_code, test_preemption,
-                  test_deep_stack, test_wild_read, test_fork_isolation, test_waitpid, test_file_system, test_exec, test_pipe, test_no_disk]
+                  test_deep_stack, test_wild_read, test_fork_isolation, test_waitpid, test_file_system, test_exec, test_pipe, test_fs_write, test_no_disk]
 
 
 def main():

@@ -9,6 +9,7 @@
 #include "io.h"
 #include "kernel.h"
 #include "fs.h"
+#include "syscall.h"
 
 #define NR_FILE 32
 
@@ -36,29 +37,52 @@ static struct file *file_alloc(int type)
     return 0;
 }
 
-/* 打开 path，返回文件表里的一项；找不到文件或文件表满了返回 0。 */
-struct file *file_open(const char *path)
+/*
+ * 打开 path，返回文件表里的一项。flags 是 O_RDONLY / O_WRONLY / O_RDWR，可以再加上：
+ * O_CREAT（不存在就新建）、O_EXCL（和 O_CREAT 一起：已经存在就失败）、O_TRUNC（清空）、O_APPEND（接在末尾写）。
+ * 文件不存在、目录要打开来写、设备不认识、文件表满了，返回 0。Linux 0.11 的 open_namei() 做的是同样的判断。
+ */
+struct file *file_open(const char *path, int flags)
 {
     uint32_t ino;
-    struct minix_inode inode;
+    struct minix_inode d;
+    struct m_inode *ip = 0;
+    int access = flags & O_ACCMODE, type = FILE_INODE;
 
-    if (namei(path, &ino, &inode) < 0)
-        return 0;
-    int type = FILE_INODE;
-    if ((inode.mode & S_IFMT) == S_IFCHR) {
-        if (inode.zone[0] == (TTY_MAJOR << 8 | 0))
-            type = FILE_CONSOLE;
-        else if (inode.zone[0] == (TTY_MAJOR << 8 | 1))
-            type = FILE_TASKS;
-        else
-            return 0;               /* 没有这个设备 */
+    fs_lock();
+    if (namei(path, &ino, &d) == 0) {
+        if ((flags & O_CREAT) && (flags & O_EXCL))
+            goto fail;
+        if ((d.mode & S_IFMT) == S_IFCHR) {
+            if (d.zone[0] == (TTY_MAJOR << 8 | 0))
+                type = FILE_CONSOLE;
+            else if (d.zone[0] == (TTY_MAJOR << 8 | 1))
+                type = FILE_TASKS;
+            else
+                goto fail;          /* 没有这个设备 */
+        } else {
+            if ((d.mode & S_IFMT) == S_IFDIR && access != O_RDONLY)
+                goto fail;          /* 目录只有内核能改 */
+            if (!(ip = iget(ino)))
+                goto fail;
+            if ((flags & O_TRUNC) && access != O_RDONLY)
+                fs_truncate(ip);
+        }
+    } else if (!(flags & O_CREAT) || !(ip = fs_create(path))) {
+        goto fail;
     }
     struct file *f = file_alloc(type);
-    if (f) {
-        f->ino = ino;
-        f->inode = inode;
+    if (!f) {
+        iput(ip);
+        goto fail;
     }
+    f->ip = ip;
+    f->mode = flags & (O_ACCMODE | O_APPEND);
+    fs_unlock();
     return f;
+fail:
+    fs_unlock();
+    return 0;
 }
 
 /* 建一个管道，得到读写两头两个打开的文件。文件表满了或者没有内存时返回 -1，什么也不留下。 */
@@ -89,14 +113,26 @@ void file_get(struct file *f)
     irq_restore(flags);
 }
 
+/*
+ * 关掉一个打开的文件：引用次数减到 0，管道就关掉这一头，文件系统里的文件就放下它的 i 节点
+ * （iput 可能要收回已经删掉的文件的块，要读写硬盘，所以在文件系统锁里、开着中断做）。
+ * i 节点先在关中断时取出来：引用次数一到 0，这一项随时可能被别的 open 拿去用。
+ */
 void file_put(struct file *f)
 {
     uint32_t flags = irq_save();
     if (f->count <= 0)
         panic("trying to close a closed file");
-    if (--f->count == 0 && (f->type == FILE_PIPE_READ || f->type == FILE_PIPE_WRITE))
+    int last = --f->count == 0;
+    struct m_inode *ip = last && f->type == FILE_INODE ? f->ip : 0;
+    if (last && (f->type == FILE_PIPE_READ || f->type == FILE_PIPE_WRITE))
         pipe_close(f->pipe, f->type == FILE_PIPE_WRITE);   /* 最后一个拿着这一头的关掉了 */
     irq_restore(flags);
+    if (ip) {
+        fs_lock();
+        iput(ip);
+        fs_unlock();
+    }
 }
 
 int32_t file_read(struct file *f, void *dst, uint32_t n)
@@ -107,20 +143,21 @@ int32_t file_read(struct file *f, void *dst, uint32_t n)
         return tty_read(dst, n);
     if (f->type == FILE_PIPE_READ)
         return pipe_read(f->pipe, dst, n);
-    if (f->type != FILE_INODE)
+    if (f->type != FILE_INODE || (f->mode & O_ACCMODE) == O_WRONLY)
         return -1;
     /*
-     * 先在关中断时占下要读的这一段，再去读：读硬盘会睡，fork 之后共用这个文件的另一个进程可能同时在读，
-     * 要是读完才把位置往后移，两边会读到同一段、再一起跳过后面一段。文件系统只读，文件大小不会变。
+     * 在文件系统锁里读：读硬盘会睡，fork 之后共用这个文件的另一个进程可能同时在读写，
+     * 先占下要读的这一段、把位置往后移，再去读，两边就不会读到同一段。
      */
-    uint32_t flags = irq_save();
-    uint32_t start = f->pos;
-    uint32_t left = f->inode.size > start ? f->inode.size - start : 0;
+    fs_lock();
+    uint32_t start = f->pos, size = f->ip->d.size;
+    uint32_t left = size > start ? size - start : 0;
     if (n > left)
         n = left;
     f->pos += n;
-    irq_restore(flags);
-    return inode_read(&f->inode, start, dst, n);
+    int32_t got = inode_read(&f->ip->d, start, dst, n);
+    fs_unlock();
+    return got;
 }
 
 int32_t file_write(struct file *f, const void *src, uint32_t n)
@@ -131,7 +168,19 @@ int32_t file_write(struct file *f, const void *src, uint32_t n)
         return tty_write(src, n);
     if (f->type == FILE_PIPE_WRITE)
         return pipe_write(f->pipe, src, n);
-    if (f->type != FILE_TASKS)      /* 文件系统是只读的 */
+    if (f->type == FILE_INODE) {
+        if ((f->mode & O_ACCMODE) == O_RDONLY || (f->ip->d.mode & S_IFMT) != S_IFREG)
+            return -1;
+        fs_lock();
+        if (f->mode & O_APPEND)
+            f->pos = f->ip->d.size;
+        int32_t done = inode_write(f->ip, f->pos, src, n);
+        if (done > 0)
+            f->pos += (uint32_t)done;
+        fs_unlock();
+        return done;
+    }
+    if (f->type != FILE_TASKS)
         return -1;
     for (uint32_t i = 0; i < n; i++)
         task_write_char(p[i]);
