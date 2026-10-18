@@ -22,6 +22,7 @@
 #include "syscall.h"
 
 #define TASKS          3            /* 0 = kmain，1 = A，2 = B */
+#define USER_TASK      2            /* 任务 B 在用户态运行，用户栈区归它 */
 #define TSS_GDT_INDEX  3            /* 任务 n 的 TSS 描述符在 GDT 第 3 + n 项 */
 #define TSS_SEL(n)     ((TSS_GDT_INDEX + (n)) * 8)
 #define TSS_ACCESS     0x89         /* 存在、DPL 0、类型 9：32 位可用 TSS */
@@ -154,7 +155,7 @@ void sched_init(void)
         gdt_set_entry(TSS_GDT_INDEX + n, (uint32_t)&tss[n], sizeof(struct tss) - 1, TSS_ACCESS, 0);
     }
     init_task(1, task_main, cr3);
-    init_user_task(2, user_main, (uint32_t)&user_stack[USER_STACK_SIZE], cr3);
+    init_user_task(USER_TASK, user_main, USER_STACK_TOP, cr3);  /* 栈顶的页第一次用到时才分配 */
     task_state[1] = task_state[2] = TASK_RUNNING;
 
     /* 把 kmain 登记为任务 0：第一次切换时，CPU 才知道把当前寄存器存到哪个 TSS。 */
@@ -280,6 +281,8 @@ void sched_exit_current(void)
 {
     __asm__ volatile("cli");        /* 不再返回，切到的任务从自己的 TSS 装入 EFLAGS，中断状态随之恢复 */
     task_state[current_task] = TASK_UNUSED;
+    if (current_task == USER_TASK)
+        free_user_pages();          /* 收回它的栈：内核栈在 .bss 里，不受影响 */
     reschedule();
     for (;;)                        /* 不会执行到这里 */
         __asm__ volatile("hlt");

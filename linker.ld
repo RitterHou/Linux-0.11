@@ -23,9 +23,10 @@ SECTIONS
 
     /*
      * 用户程序：首尾按 4 KB 对齐，paging.c 只给 __user_start～__user_end 之间的页打开用户位。
-     * 代码和只读数据在前，__user_data 起是数据和用户栈，两部分之间也按 4 KB 对齐：
+     * 代码和只读数据在前，__user_data 起是数据，两部分之间也按 4 KB 对齐：
      * 前一部分的页对用户态只读，用户程序写自己的代码会触发缺页异常。
-     * 其中的 .bss（用户栈）也写进 kernel.bin，以零的形式占用文件空间。
+     * 其中的 .bss 也写进 kernel.bin，以零的形式占用文件空间。用户程序现在没有全局变量，数据部分为空；
+     * 用户栈不在这里，它在 0x40000000 起的 4 MB 里按需分配。
      */
     . = ALIGN(4096);
     .user : {
@@ -51,5 +52,5 @@ SECTIONS
 
 ASSERT(_start == 0x10000, "_start must be at 0x10000, the address loader jumps to")
 ASSERT(__user_data > __user_start, "user program must have code")
-ASSERT(__user_end > __user_data, "user program must have a stack")
+ASSERT(__user_end >= __user_data, "user data must follow user code")
 ASSERT(__user_end <= 0x400000, "paging.c only sets user bits in the first 4 MB page table")

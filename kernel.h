@@ -66,8 +66,17 @@ void panic(const char *msg) __attribute__((noreturn));
 #define PAGE_SIZE 4096
 #define VGA_PHYS  0x000B8000u       /* 显存的物理地址 */
 #define VGA_ALIAS 0xC0000000u       /* 打开分页后，这个虚拟地址也指向显存 */
+/*
+ * 用户栈所在的 4 MB（第 256 个页目录项）。开始时一页也没有映射，任务 B 用到哪一页，
+ * 缺页异常就给哪一页分配物理内存；任务结束时全部收回。栈从顶端往下长。
+ */
+#define USER_STACK_LOW 0x40000000u
+#define USER_STACK_TOP 0x40400000u
 void paging_init(void);
 int user_range_ok(uint32_t addr, uint32_t size);
+int handle_page_fault(uint32_t addr, uint32_t error_code);
+void free_user_pages(void);
+extern uint32_t page_faults;
 
 /* mem.c：物理页分配，管 LOW_MEM～HIGH_MEM 之间的页 */
 #define LOW_MEM   0x00100000u       /* 1 MB 以下归内核自己 */
@@ -76,6 +85,7 @@ void mem_init(void);
 uint32_t get_free_page(void);
 void free_page(uint32_t addr);
 uint32_t free_page_count(void);
+void mem_show(void);
 
 /* timer.c：8253 定时器 */
 #define TIMER_HZ 100                /* 与 Linux 0.11 的 HZ 相同，每 10 ms 一次 */
@@ -103,8 +113,6 @@ void keyboard_process(uint8_t scancode);
 
 /* user.c：任务 B 在用户态运行的程序 */
 void user_main(void);
-extern uint8_t user_stack[];
-#define USER_STACK_SIZE 4096
 
 /* selftest.c：make test 构建的自检内核在这里故意制造异常 */
 void selftest_run(void);

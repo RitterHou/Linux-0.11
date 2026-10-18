@@ -1,18 +1,14 @@
 /*
  * 用户程序：任务 B 在特权级 3（用户态）运行这里的代码。
  *
- * 链接脚本把本文件的代码、只读数据、数据和用户栈单独放进按 4 KB 对齐的 .user 段，
- * paging.c 只给这几页打开“用户”位，其中代码所在的页只读。内核的代码、数据和显存对这里的代码都不可访问，
+ * 链接脚本把本文件的代码、只读数据和数据单独放进按 4 KB 对齐的 .user 段，
+ * paging.c 只给这几页打开“用户”位，其中代码所在的页只读。用户栈在 0x40000000 起的 4 MB 里，
+ * 用到哪一页，内核才在缺页异常里分配哪一页（见 paging.c 的 handle_page_fault()）。内核的代码、数据和显存对这里的代码都不可访问，
  * cli、hlt、in、out 等特权指令也不能执行，要做任何事都只能用 int 0x80 请内核帮忙。
  * 所以这里只包含 syscall.h，不包含内核的 kernel.h。
  */
 #include "selftest.h"
 #include "syscall.h"
-
-#define USER_STACK_SIZE 4096
-
-/* 用户态的栈。内核在任务 B 的 TSS 中把 ESP 设为它的末尾。 */
-uint8_t user_stack[USER_STACK_SIZE] __attribute__((aligned(16)));
 
 #if defined(SELFTEST) && SELFTEST == SELFTEST_USER_WRITE_KERNEL
 extern volatile uint32_t timer_ticks;   /* 内核的变量，所在的页没有用户位 */
@@ -41,6 +37,20 @@ void user_main(void)
     write(1, "s", 1);
     for (;;)
         __asm__ volatile("");
+#elif SELFTEST == SELFTEST_USER_DEEP_STACK
+    /*
+     * 在栈上用掉 5 页：碰到的每一页第一次都缺页，内核补上一页。最低的那一页自己不碰，
+     * 直接交给 write，由内核去读：内核态碰到栈区里没映射的页也要补上，write 返回 1，再写一个 k。
+     * 最后 exit(3)，内核收回所有栈页和页表。
+     */
+    volatile char deep[5 * 4096];
+    for (int i = 1; i < 5; i++)
+        deep[i * 4096] = 'd';
+    int32_t ret = write(1, (const void *)deep, 1);
+    write(1, ret == 1 ? "k" : "x", 1);
+    exit(3);
+#elif SELFTEST == SELFTEST_USER_WILD_READ
+    (void)*(volatile uint32_t *)0x50000000;     /* 不在栈区：内核不能补页，只能结束任务 B */
 #elif SELFTEST == SELFTEST_ALL_EXIT
     write(1, "bye", 3);
     exit(2);
