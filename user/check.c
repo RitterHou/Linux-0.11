@@ -3,6 +3,8 @@
  *   - 有初值的全局变量（.data）是文件里的值；没有初值的（.bss）全是 0；
  *   - argc 和 argv 是 exec 传来的；字符串常量（.rodata）能读。
  * check crash：往自己的代码里写，代码页是只读的，期望被缺页异常结束。
+ * check badptr：把自己代码页的地址交给要写用户内存的系统调用，内核应当逐个返回 -1，自己照常运行，
+ * 最后打印 badptr ok。内核要是等到写的时候才发现那一页是只读的，就只能停机了。
  */
 #include "ulib.h"
 
@@ -12,6 +14,21 @@ volatile char zeros[5000];          /* 跨过一页多：.bss 不在文件里，
 
 int main(int argc, char **argv)
 {
+    if (argc == 2 && strcmp(argv[1], "badptr") == 0) {
+        void *code = (void *)main;
+        int32_t fd = open("/hello.txt", 0);
+        int ok = read(fd, code, 1) == -1;
+        int32_t child = fork();
+        if (child == 0)
+            exit(3);
+        ok &= waitpid(child, (int32_t *)code, 0) == -1;
+        ok &= waitpid(child, 0, 0) == child;
+        ok &= stat("/", (struct stat *)code) == -1;
+        ok &= taskinfo(0, (struct taskinfo *)code) == -1;
+        ok &= pipe((int32_t *)code) == -1;
+        print(ok ? "badptr ok\n" : "badptr bad\n");
+        return ok ? 0 : 1;
+    }
     if (argc == 2 && strcmp(argv[1], "crash") == 0) {
         *(volatile char *)main = 0;
         print("x\n");

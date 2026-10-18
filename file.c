@@ -101,16 +101,26 @@ void file_put(struct file *f)
 
 int32_t file_read(struct file *f, void *dst, uint32_t n)
 {
+    if (n == 0)
+        return 0;
     if (f->type == FILE_CONSOLE)
         return tty_read(dst, n);
     if (f->type == FILE_PIPE_READ)
         return pipe_read(f->pipe, dst, n);
     if (f->type != FILE_INODE)
         return -1;
-    int32_t got = inode_read(&f->inode, f->pos, dst, n);
-    if (got > 0)
-        f->pos += (uint32_t)got;
-    return got;
+    /*
+     * 先在关中断时占下要读的这一段，再去读：读硬盘会睡，fork 之后共用这个文件的另一个进程可能同时在读，
+     * 要是读完才把位置往后移，两边会读到同一段、再一起跳过后面一段。文件系统只读，文件大小不会变。
+     */
+    uint32_t flags = irq_save();
+    uint32_t start = f->pos;
+    uint32_t left = f->inode.size > start ? f->inode.size - start : 0;
+    if (n > left)
+        n = left;
+    f->pos += n;
+    irq_restore(flags);
+    return inode_read(&f->inode, start, dst, n);
 }
 
 int32_t file_write(struct file *f, const void *src, uint32_t n)

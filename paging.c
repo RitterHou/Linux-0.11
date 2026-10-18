@@ -18,6 +18,7 @@
  * 内核部分的页目录项照抄这一份，指向同样的页表，所以切换任务时内核的地址都不变；
  * 用户空间那一项各管各的。硬件任务切换会从 TSS 装入 CR3，换任务就换了页目录。
  */
+#include "io.h"
 #include "kernel.h"
 
 #define PAGE_PRESENT  0x001         /* 存在位：为 0 时访问会触发 14 号缺页异常 */
@@ -99,16 +100,6 @@ static int range_within(uint32_t addr, uint32_t size, uint32_t start, uint32_t e
 }
 
 /*
- * [addr, addr + size) 是否完全落在用户程序自己的内存里：代码和数据的那几页，或者用户空间。
- * 系统调用用它检查用户传来的指针。栈区里还没映射的页，内核读到时会缺页，由 handle_page_fault() 补上。
- */
-int user_range_ok(uint32_t addr, uint32_t size)
-{
-    return range_within(addr, size, (uint32_t)__user_start, (uint32_t)__user_end) ||
-           range_within(addr, size, USER_LOW, USER_TOP);
-}
-
-/*
  * 把以 0 结尾的字符串从 src 复制到 dst，最多 max 个字节（含结尾的 0），返回长度；太长返回 -1。
  * from_user 时 src 是用户给的地址：一个字节一个字节地检查是否在用户的内存里，再读。
  * 复制进来以后，内核只和自己的这份打交道。Linux 0.11 用 get_fs_byte() 逐个字节读用户段里的字符串。
@@ -123,16 +114,6 @@ int copy_string(char *dst, uint32_t src, uint32_t max, int from_user)
             return (int)i;
     }
     return -1;
-}
-
-/*
- * 内核要往 [addr, addr + size) 写，它是否完全落在用户可写的内存里：用户空间，或者用户程序的数据部分。
- * 用户代码那一页是只读的，不能交给内核去写：打开了 CR0.WP，内核写它会触发缺页，而那不是能补的缺页。
- */
-int user_write_ok(uint32_t addr, uint32_t size)
-{
-    return range_within(addr, size, (uint32_t)__user_data, (uint32_t)__user_end) ||
-           range_within(addr, size, USER_LOW, USER_TOP);
 }
 
 /* 用户空间正好是一个页目录项管的 4 MB：缺页时只用分配这一张页表，结束时只用收回这一张。 */
@@ -252,6 +233,8 @@ int handle_page_fault(uint32_t addr, uint32_t error_code)
 {
     if (addr < USER_LOW || addr >= USER_TOP)
         return 0;
+    if (current_page_dir() == page_directory)   /* 内核的页目录里没有用户空间，也不能给它建 */
+        return 0;
 
     uint32_t *pde = &current_page_dir()[addr >> 22];   /* 当前任务自己的用户空间 */
     if (error_code & PF_PROTECTION) {
@@ -284,6 +267,49 @@ int handle_page_fault(uint32_t addr, uint32_t error_code)
 }
 
 /*
+ * 系统调用碰用户内存之前，检查 [addr, addr + size) 是否都在用户自己的内存里，并且现在就把每一页准备好：
+ * 还没映射的页当场补上；要写的话，写时复制的页当场复制好。准备不了（不在用户的内存里、要写只读的代码页、
+ * 内存不够）就返回 0，系统调用返回 -1。准备好以后，内核读写这段内存就不会再缺页：
+ * 要是等到复制数据时才缺页、才发现页是只读的或者内存不够，内核已经在特权级 0 里，只能停机。
+ * Linux 0.11 的 verify_area() 也是在内核写用户内存之前，先把写时复制的页处理好。
+ * 一个任务的页表只有它自己会改，准备好之后到用完之前不会有别人把页拿走。
+ */
+static int prepare_user(uint32_t addr, uint32_t size, int write)
+{
+    if (range_within(addr, size, (uint32_t)__user_start, (uint32_t)__user_end))
+        return !write || addr >= (uint32_t)__user_data;     /* 内核映像里的用户程序：代码只读，一直映射着 */
+    if (!range_within(addr, size, USER_LOW, USER_TOP))
+        return 0;
+    for (uint32_t page = addr & ~(PAGE_SIZE - 1); page < addr + size; page += PAGE_SIZE) {
+        uint32_t flags = irq_save();
+        uint32_t *dir = current_page_dir();
+        uint32_t pde = dir[page >> 22];
+        uint32_t pte = (pde & PAGE_PRESENT) ? ((uint32_t *)(pde & ~0xFFFu))[(page >> 12) & (ENTRIES - 1)] : 0;
+        int ok = 1;
+        if (!(pte & PAGE_PRESENT))
+            ok = handle_page_fault(page, write ? PF_WRITE : 0);
+        else if (write && !(pte & PAGE_WRITE))
+            ok = handle_page_fault(page, PF_PROTECTION | PF_WRITE);     /* 写时复制的页复制好；代码页失败 */
+        irq_restore(flags);
+        if (!ok)
+            return 0;
+    }
+    return 1;
+}
+
+/* 内核要读用户给的 [addr, addr + size)。 */
+int user_range_ok(uint32_t addr, uint32_t size)
+{
+    return prepare_user(addr, size, 0);
+}
+
+/* 内核要往用户给的 [addr, addr + size) 写。 */
+int user_write_ok(uint32_t addr, uint32_t size)
+{
+    return prepare_user(addr, size, 1);
+}
+
+/*
  * 在页目录 dir 的用户空间里给 addr 所在的页准备一个物理页（清零的），返回它的物理地址；没有内存时返回 0。
  * 这一页已经有了就直接用它，需要可写时打开可写位。exec 用它往还没装入 CR3 的新页目录里放程序：
  * 物理页在一一对应映射的范围内，内核按物理地址直接写。页表不存在时先分一页当页表。
@@ -308,6 +334,18 @@ uint32_t map_user_page(uint32_t dir, uint32_t addr, int writable)
         return 0;
     *pte = page | PAGE_PRESENT | PAGE_USER | (writable ? PAGE_WRITE : 0);
     return page;
+}
+
+/* 页目录 dir 里 addr 所在的页：没有映射返回 -1，可写返回 1，只读返回 0。 */
+int user_page_writable(uint32_t dir, uint32_t addr)
+{
+    uint32_t pde = ((uint32_t *)dir)[addr >> 22];
+    if (!(pde & PAGE_PRESENT))
+        return -1;
+    uint32_t pte = ((uint32_t *)(pde & ~0xFFFu))[(addr >> 12) & (ENTRIES - 1)];
+    if (!(pte & PAGE_PRESENT))
+        return -1;
+    return (pte & PAGE_WRITE) ? 1 : 0;
 }
 
 /*

@@ -26,6 +26,7 @@ static int split(char *line, char **argv)
         while (*p && *p != ' ')
             p++;
     }
+    *p = '\0';                      /* 参数满了：最后一个参数到这里为止，后面的都不要了 */
     argv[argc] = 0;
     return argc;
 }

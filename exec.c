@@ -50,6 +50,9 @@ static int load_segment(uint32_t dir, const struct minix_inode *ip, const struct
     if (ph->filesz > ph->memsz || ph->vaddr < USER_LOW || end < ph->vaddr || end > USER_TOP - STACK_RESERVE)
         return -1;
     for (uint32_t va = ph->vaddr & ~(PAGE_SIZE - 1); va < end; va += PAGE_SIZE) {
+        /* 和前一个段共用一页、可写属性又不一样：那一页没法同时又只读又可写，不装 */
+        if (user_page_writable(dir, va) >= 0 && user_page_writable(dir, va) != !!(ph->flags & PF_W))
+            return -1;
         uint32_t page = map_user_page(dir, va, ph->flags & PF_W);
         if (page == 0)
             return -1;
