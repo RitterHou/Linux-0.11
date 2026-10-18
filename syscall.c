@@ -8,6 +8,7 @@
  * Linux 0.11 的 kernel/system_call.s 用同样的方式查 sys_call_table。
  */
 #include "kernel.h"
+#include "fs.h"
 #include "syscall.h"
 
 /*
@@ -16,24 +17,89 @@
  */
 typedef int32_t (*syscall_fn)(uint32_t a, uint32_t b, uint32_t c, struct interrupt_frame *frame);
 
+/* 当前任务的第 fd 号描述符指向的文件；fd 不对或者没打开返回 0。 */
+static struct file *fd_file(uint32_t fd)
+{
+    return fd < NR_OPEN ? current_files()[fd] : 0;
+}
+
 /*
- * write(fd, buf, count)：目前只支持 fd 1，写到第 6 行的任务输出区。
- * 用户态传来的 buf 必须完全落在用户程序的页内：内核能读所有内存，不检查的话，
+ * write(fd, buf, count)：写到 fd 指向的文件。目前能写的只有第 6 行的任务输出区。
+ * 用户态传来的 buf 必须完全落在用户程序的内存里：内核能读所有内存，不检查的话，
  * 用户程序把内核地址交给 write，就能让内核替它把内核内存印出来。
  * Linux 0.11 不需要这一步：内核经 FS（用户数据段）用 get_fs_byte() 读用户内存，
  * 用户给的指针按用户段解释，越界由段界限挡住。这里的段都是平坦的，只能显式检查。
  */
 static int32_t sys_write(uint32_t fd, uint32_t buf, uint32_t count, struct interrupt_frame *frame)
 {
-    const char *p = (const char *)buf;
+    struct file *f = fd_file(fd);
 
-    if (fd != 1)
+    if (!f || (from_user_mode(frame) && !user_range_ok(buf, count)))
         return -1;
-    if (from_user_mode(frame) && !user_range_ok(buf, count))
+    return file_write(f, (const void *)buf, count);
+}
+
+/* read(fd, buf, count)：从 fd 指向的文件读，返回读到的字节数，到了文件末尾返回 0。内核要写 buf，所以检查它是否用户可写。 */
+static int32_t sys_read(uint32_t fd, uint32_t buf, uint32_t count, struct interrupt_frame *frame)
+{
+    struct file *f = fd_file(fd);
+
+    if (!f || (from_user_mode(frame) && !user_write_ok(buf, count)))
         return -1;
-    for (uint32_t i = 0; i < count; i++)
-        task_write_char(p[i]);
-    return (int32_t)count;
+    return file_read(f, (void *)buf, count);
+}
+
+#define PATH_MAX 64
+
+/*
+ * 把用户给的路径一个字节一个字节地复制进内核，每个字节都要在用户的内存里；没有结尾的 0 或者太长返回 -1。
+ * 复制进来以后，文件系统只和内核里的字符串打交道，不用再操心用户的指针。
+ * Linux 0.11 的 namei() 用 get_fs_byte() 逐个字节读用户段里的路径。
+ */
+static int copy_path(char *dst, uint32_t src, int from_user)
+{
+    for (int i = 0; i < PATH_MAX; i++) {
+        if (from_user && !user_range_ok(src + (uint32_t)i, 1))
+            return -1;
+        dst[i] = ((const char *)src)[i];
+        if (dst[i] == '\0')
+            return 0;
+    }
+    return -1;
+}
+
+/* open(path, flags)：打开文件，返回最小的空闲描述符。文件系统只读，flags 暂时不用。 */
+static int32_t sys_open(uint32_t path, uint32_t flags, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)flags, (void)c;
+    char name[PATH_MAX];
+    struct file **files = current_files();
+
+    if (copy_path(name, path, from_user_mode(frame)) < 0)
+        return -1;
+    int fd = 0;
+    while (fd < NR_OPEN && files[fd])
+        fd++;
+    if (fd == NR_OPEN)
+        return -1;
+    struct file *f = file_open(name);
+    if (!f)
+        return -1;
+    files[fd] = f;
+    return fd;
+}
+
+/* close(fd)：关掉描述符。fork 出的另一方可能还在用这个文件，引用次数减到 0 才真正关掉。 */
+static int32_t sys_close(uint32_t fd, uint32_t b, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)b, (void)c, (void)frame;
+    struct file *f = fd_file(fd);
+
+    if (!f)
+        return -1;
+    current_files()[fd] = 0;
+    file_put(f);
+    return 0;
 }
 
 static int32_t sys_getpid(uint32_t a, uint32_t b, uint32_t c, struct interrupt_frame *frame)
@@ -90,6 +156,9 @@ static const syscall_fn syscall_table[SYS_CALLS] = {
     [SYS_EXIT]   = sys_exit,
     [SYS_FORK]   = sys_fork,
     [SYS_WAITPID] = sys_waitpid,
+    [SYS_OPEN]   = sys_open,
+    [SYS_READ]   = sys_read,
+    [SYS_CLOSE]  = sys_close,
 };
 
 void syscall_dispatch(struct interrupt_frame *frame)

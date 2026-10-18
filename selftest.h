@@ -32,6 +32,7 @@
 #define SELFTEST_USER_WILD_READ    28   /* 用户程序读栈区以外未映射的地址：期望不补页，因 #PF 被结束 */
 #define SELFTEST_USER_FORK         29   /* fork 后父子各改栈上的变量：期望互不影响，两边的返回值正确 */
 #define SELFTEST_USER_WAIT         30   /* waitpid：取退出码、内核写共享页要复制、任务槽用光、WNOHANG、被结束的子进程 */
+#define SELFTEST_USER_FS           31   /* open/read/close：读文件、大文件、目录、子目录，描述符用光，fork 后共用读写位置 */
 
 #define SELFTEST_IN_USER(n) ((n) >= 20)
 

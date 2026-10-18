@@ -186,14 +186,10 @@ void selftest_early(void)
 }
 
 #if defined(SELFTEST) && SELFTEST == SELFTEST_HD_RW
-/* 扇区 k 的开头应是 tools/mkdisk.py 写的 "SECTOR %08d"。 */
-static int sector_ok(const uint8_t *buf, uint32_t k)
+static int starts_with(const uint8_t *buf, const char *s)
 {
-    char expect[16] = "SECTOR 00000000";
-    for (int i = 14; i >= 7; i--, k /= 10)
-        expect[i] = (char)('0' + k % 10);
-    for (int i = 0; i < 15; i++)
-        if (buf[i] != (uint8_t)expect[i])
+    for (int i = 0; s[i]; i++)
+        if (buf[i] != (uint8_t)s[i])
             return 0;
     return 1;
 }
@@ -201,26 +197,30 @@ static int sector_ok(const uint8_t *buf, uint32_t k)
 
 /*
  * 任务 A 开始运行时调用（特权级 0，已经开始调度，可以睡）。
- * HD_RW：读第 0 和最后一个扇区；读越界的扇区应失败；把第 100 扇区改写后读回来；
+ * HD_RW：第 0 扇区是 tools/mkfs.py 写在引导块里的说明，第 2 扇区是超级块，开头 16 个字节后是魔数 0x137F；
+ * 最后一个扇区能读，越界的扇区应失败；把第 8000 扇区改写后读回来；
  * 再连续读 64 个扇区，看要多少个 tick。结果写到第 7 行。
  */
 void selftest_task_a(void)
 {
-#if defined(SELFTEST) && SELFTEST == SELFTEST_HD_RW
+#if defined(SELFTEST) && SELFTEST == SELFTEST_USER_FS
+    exit(0);                        /* 任务 A 不写字母，第 6 行只留任务 B 的输出，免得被 A 盖掉 */
+#elif defined(SELFTEST) && SELFTEST == SELFTEST_HD_RW
     static uint8_t buf[512], data[512];
-    uint32_t first = hd_read(0, buf) == 0 && sector_ok(buf, 0);
-    uint32_t last = hd_read(hd_sectors - 1, buf) == 0 && sector_ok(buf, hd_sectors - 1);
+    uint32_t first = hd_read(0, buf) == 0 && starts_with(buf, "minix v1 file system");
+    first &= hd_read(2, buf) == 0 && buf[16] == 0x7F && buf[17] == 0x13;
+    uint32_t last = hd_read(hd_sectors - 1, buf) == 0;
     uint32_t beyond = (uint32_t)hd_read(hd_sectors, buf);
 
     for (int i = 0; i < 512; i++)
         data[i] = (uint8_t)(i * 7);
-    uint32_t written = hd_write(100, data) == 0 && hd_read(100, buf) == 0;
+    uint32_t written = hd_write(8000, data) == 0 && hd_read(8000, buf) == 0;
     for (int i = 0; i < 512; i++)
         written &= buf[i] == data[i];
 
     uint32_t start = timer_ticks, many = 1;
     for (uint32_t k = 200; k < 264; k++)
-        many &= hd_read(k, buf) == 0 && sector_ok(buf, k);
+        many &= hd_read(k, buf) == 0;
     uint32_t ticks = timer_ticks - start;
 
     report("first", first, 10);

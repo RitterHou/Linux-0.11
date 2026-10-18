@@ -128,6 +128,85 @@ void user_main(void)
     got = waitpid(victim, &st, 0);
     write(1, got == victim && st == (0x100 | 14) ? "k" : "K", 1);
     exit(0);
+#elif SELFTEST == SELFTEST_USER_FS
+    /*
+     * 先把 /hello.txt 的内容（去掉换行）写到第 6 行，然后每项检查通过就写一个字母，期望是 oubdscf：
+     *   o：不存在的文件、分量超过 14 个字节的路径，open 都返回 -1
+     *   u：read 的缓冲区是内核地址，返回 -1
+     *   b：读完 600 KB 的 /big（要用到二级间接块），内容逐字节对，读到末尾返回 0
+     *   d：读根目录得到一条条目录项，有 hello.txt、big、etc
+     *   s：读子目录里的 /etc/issue
+     *   c：close 之后 read 返回 -1；8 个描述符用光后 open 返回 -1，close 一个又能 open
+     *   f：fork 之后子进程用继承来的描述符接着读，父进程的读位置跟着往后走
+     */
+    char buf[1024];
+    int32_t fd = open("/hello.txt", 0);
+    int32_t n = read(fd, buf, sizeof(buf));
+    write(1, buf, n > 0 ? (uint32_t)n - 1 : 0);
+    close(fd);
+
+    write(1, open("/nothing", 0) < 0 && open("/etc/abcdefghijklmnopq", 0) < 0 ? "o" : "O", 1);
+    fd = open("/hello.txt", 0);
+    write(1, read(fd, (void *)0x10000, 4) == -1 ? "u" : "U", 1);
+    close(fd);
+
+    fd = open("/big", 0);
+    uint32_t total = 0, good = 1;
+    while ((n = read(fd, buf, sizeof(buf))) > 0) {
+        for (int32_t i = 0; i < n; i++)
+            good &= (uint8_t)buf[i] == (uint8_t)((total + (uint32_t)i) * 7 + 3);
+        total += (uint32_t)n;
+    }
+    write(1, good && n == 0 && total == 600 * 1024 ? "b" : "B", 1);
+    close(fd);
+
+    fd = open("/", 0);
+    int found = 0;
+    while (read(fd, buf, 16) == 16) {
+        const char *name = buf + 2;
+        if (buf[0] == 0 && buf[1] == 0)
+            continue;
+        if (name[0] == 'h' && name[5] == '.')
+            found |= 1;
+        else if (name[0] == 'b' && name[1] == 'i' && name[2] == 'g' && name[3] == 0)
+            found |= 2;
+        else if (name[0] == 'e' && name[1] == 't' && name[2] == 'c' && name[3] == 0)
+            found |= 4;
+    }
+    write(1, found == 7 ? "d" : "D", 1);
+    close(fd);
+
+    fd = open("/etc/issue", 0);
+    n = read(fd, buf, sizeof(buf));
+    write(1, n == 27 && buf[0] == 'L' && buf[26] == '\n' ? "s" : "S", 1);
+    close(fd);
+
+    fd = open("/hello.txt", 0);
+    close(fd);
+    int ok = read(fd, buf, 1) == -1;
+    int32_t fds[8];
+    int opened = 0;
+    while (opened < 8 && (fds[opened] = open("/hello.txt", 0)) >= 0)
+        opened++;
+    ok &= opened == 7 && open("/hello.txt", 0) == -1;     /* 1 号描述符本来就占着 */
+    close(fds[3]);
+    ok &= open("/hello.txt", 0) == fds[3];
+    for (int i = 0; i < opened; i++)
+        close(fds[i]);
+    write(1, ok ? "c" : "C", 1);
+
+    fd = open("/hello.txt", 0);
+    read(fd, buf, 6);                               /* "Hello " */
+    int32_t child = fork();
+    if (child == 0) {
+        read(fd, buf, 5);                           /* "from " */
+        exit(0);
+    }
+    waitpid(child, 0, 0);
+    n = read(fd, buf, 5);                           /* 位置共用：应读到 "the M" */
+    write(1, n == 5 && buf[0] == 't' && buf[4] == 'M' ? "f" : "F", 1);
+    close(fd);
+    exit(0);
 #elif SELFTEST == SELFTEST_ALL_EXIT
     write(1, "bye", 3);
     exit(2);
