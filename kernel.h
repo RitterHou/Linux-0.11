@@ -77,7 +77,7 @@ void paging_init(void);
 int user_range_ok(uint32_t addr, uint32_t size);
 int user_write_ok(uint32_t addr, uint32_t size);
 int copy_string(char *dst, uint32_t src, uint32_t max, int from_user);
-#define PATH_MAX 64                 /* 路径最长 63 个字节 */
+#define PATH_MAX 128                /* 路径最长 127 个字节（相对路径接上当前目录之后） */
 int handle_page_fault(uint32_t addr, uint32_t error_code);
 uint32_t kernel_page_dir(void);
 uint32_t new_page_dir(void);
@@ -117,6 +117,7 @@ void task_write_char(char ch);
 void sched_exit(uint32_t status) __attribute__((noreturn));
 void sched_idle_wakeup(void);
 struct file **current_files(void);
+char *current_cwd(void);
 
 /* 等待队列：第 n 位为 1 表示任务 n 睡在上面。调用 sleep_on 之前要关中断，检查条件和睡下之间不能被打断。 */
 struct wait_queue {

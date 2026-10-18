@@ -1187,11 +1187,38 @@ def test_shell(m, elf):
     check(names.count("sh") == 1 and "letter" in names, f"新的 shell 应只有一个，后台的 letter 还在：{out!r}")
 
 
+
+def test_cwd(m, elf):
+    """当前目录：cd、pwd、相对路径、. 和 ..，子进程继承当前目录，新的 shell 从根目录开始"""
+    names = lambda out: [line.split()[-1] for line in out]
+    for command, expected in [("pwd", ["/"]), ("cd /etc", []), ("pwd", ["/etc"]),
+                              ("cat issue", ["Linux 0.11 learning kernel"]),
+                              ("cd ..", []), ("pwd", ["/"]), ("cd /bin/../etc/./", []), ("pwd", ["/etc"]),
+                              ("cd nothing", ["sh: cd: nothing: not a directory"]),
+                              ("cd /etc/issue", ["sh: cd: /etc/issue: not a directory"]), ("pwd", ["/etc"]),
+                              ("cd ../tmp", []), ("mkdir sub", []), ("cd sub", []), ("pwd", ["/tmp/sub"]),
+                              ("echo rel > note", []), ("cat /tmp/sub/note", ["rel"]), ("cat ../sub/./note", ["rel"]),
+                              ("cd ../../..", []), ("pwd", ["/"]), ("cd /bin", []), ("./echo dot", ["dot"]),
+                              ("../bin/echo up", ["up"]), ("cd", []), ("pwd", ["/"]),
+                              ("rm tmp/sub/note", []), ("rmdir tmp/sub", [])]:
+        out = run_command(m, command)
+        check(out == expected, f"{command} 应输出 {expected!r}，实际是 {out!r}")
+    run_command(m, "cd /etc")
+    out = run_command(m, "ls")
+    check(names(out) == [".", "..", "issue"], f"ls 不带参数应列出当前目录 /etc：{out!r}")
+    check(names(run_command(m, "ls ..")) == names(run_command(m, "ls /")), "ls .. 应与 ls / 相同")
+    wait_prompt(m)
+    type_text(m, "exit\n")
+    m.wait_for(lambda mm: "shell on hda: try help, ls /bin, cat /hello.txt, ps" in console(mm)[-2:], timeout=5,
+               what="shell 退出后 init 再拉起一个新的 shell")
+    check(run_command(m, "pwd") == ["/"], "新的 shell 是 init 的子进程，当前目录应是 init 的 /，不是上一个 shell 的 /etc")
+
+
 # 前几项共用一台正常启动的虚拟机；其余各自启动自检内核。
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_console_scroll,
                 test_idle_in_hlt, test_demand_paging, test_fork_address_spaces, test_syscall_gate, test_user_setup, test_user_task,
-                test_tasks_alternate, test_shell]
+                test_tasks_alternate, test_shell, test_cwd]
 SEPARATE_TESTS = [test_syscalls, test_page_alloc, test_double_free, test_hd_rw, test_early_key, test_keyboard_edge_cases, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,
                   test_big_kernel, test_user_write_kernel, test_user_privileged,

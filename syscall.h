@@ -30,7 +30,9 @@
 #define SYS_MKDIR  15               /* mkdir(path)：新建目录 */
 #define SYS_RMDIR  16               /* rmdir(path)：删掉空目录 */
 #define SYS_FSINFO 17               /* fsinfo(&info)：文件系统有多少块、多少 i 节点、各用了多少，给 df 用 */
-#define SYS_CALLS  18
+#define SYS_CHDIR  18               /* chdir(path)：换当前目录 */
+#define SYS_GETCWD 19               /* getcwd(buf, size)：取当前目录的绝对路径 */
+#define SYS_CALLS  20
 
 /* fsinfo 写回的内容 */
 struct fsinfo {
@@ -139,6 +141,16 @@ static inline int32_t rmdir(const char *path)
 static inline int32_t fsinfo(struct fsinfo *info)
 {
     return syscall3(SYS_FSINFO, (uint32_t)info, 0, 0);
+}
+
+static inline int32_t chdir(const char *path)
+{
+    return syscall3(SYS_CHDIR, (uint32_t)path, 0, 0);
+}
+
+static inline int32_t getcwd(char *buf, uint32_t size)
+{
+    return syscall3(SYS_GETCWD, (uint32_t)buf, size, 0);
 }
 
 static inline int32_t getpid(void)

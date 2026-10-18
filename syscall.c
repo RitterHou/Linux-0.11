@@ -59,6 +59,32 @@ static int32_t sys_read(uint32_t fd, uint32_t buf, uint32_t count, struct interr
     return file_read(f, (void *)buf, count);
 }
 
+/*
+ * 把用户给的路径复制进内核，变成绝对路径：/ 开头的原样用，否则接在当前目录后面。路径里的 . 和 .. 不用管，
+ * 它们本来就是每个目录里的两项，查路径时照常查下去。太长、不在用户的内存里，返回 -1。
+ * Linux 0.11 的 namei() 遇到不以 / 开头的路径，从 current->pwd 这个 i 节点开始查，道理相同。
+ */
+static int get_path(char *dst, uint32_t src, int from_user)
+{
+    char name[PATH_MAX];
+    int len = copy_string(name, src, PATH_MAX, from_user);
+
+    if (len < 0)
+        return -1;
+    int n = 0;
+    if (name[0] != '/') {
+        for (const char *p = current_cwd(); *p; p++)
+            dst[n++] = *p;
+        if (dst[n - 1] != '/')
+            dst[n++] = '/';
+    }
+    if (n + len >= PATH_MAX)
+        return -1;
+    for (int i = 0; i <= len; i++)
+        dst[n + i] = name[i];
+    return 0;
+}
+
 /* open(path, flags)：打开文件，返回最小的空闲描述符。flags 见 syscall.h 的 O_ 开头的几个。 */
 static int32_t sys_open(uint32_t path, uint32_t flags, uint32_t c, struct interrupt_frame *frame)
 {
@@ -66,7 +92,7 @@ static int32_t sys_open(uint32_t path, uint32_t flags, uint32_t c, struct interr
     char name[PATH_MAX];
     struct file **files = current_files();
 
-    if (copy_string(name, path, PATH_MAX, from_user_mode(frame)) < 0)
+    if (get_path(name, path, from_user_mode(frame)) < 0)
         return -1;
     int fd = free_fd();
     if (fd < 0)
@@ -144,7 +170,7 @@ static int32_t sys_exec(uint32_t path, uint32_t argv, uint32_t c, struct interru
     (void)c;
     char name[PATH_MAX];
 
-    if (!from_user_mode(frame) || copy_string(name, path, PATH_MAX, 1) < 0)
+    if (!from_user_mode(frame) || get_path(name, path, 1) < 0)
         return -1;
     fs_lock();                      /* 装入程序时一直读文件，不能让别人在中途改它 */
     int ret = do_exec(name, argv, frame);
@@ -161,7 +187,7 @@ static int32_t sys_stat(uint32_t path, uint32_t st, uint32_t c, struct interrupt
     struct minix_inode inode;
     int from_user = from_user_mode(frame);
 
-    if (copy_string(name, path, PATH_MAX, from_user) < 0 || (from_user && !user_write_ok(st, sizeof(struct stat))))
+    if (get_path(name, path, from_user) < 0 || (from_user && !user_write_ok(st, sizeof(struct stat))))
         return -1;
     fs_lock();
     int found = namei(name, &ino, &inode);
@@ -238,7 +264,7 @@ static int32_t path_op(uint32_t path, struct interrupt_frame *frame, int (*op)(c
 {
     char name[PATH_MAX];
 
-    if (copy_string(name, path, PATH_MAX, from_user_mode(frame)) < 0)
+    if (get_path(name, path, from_user_mode(frame)) < 0)
         return -1;
     fs_lock();
     int ret = op(name);
@@ -281,6 +307,86 @@ static int32_t sys_fsinfo(uint32_t info, uint32_t b, uint32_t c, struct interrup
     return 0;
 }
 
+/*
+ * 把绝对路径就地规范化：去掉多余的 /、. 和 ..，例如 /bin/../etc/./ 变成 /etc。没有符号链接，
+ * 按字面去掉 .. 和真的往上走一级是一回事。
+ */
+static void normalize(char *path)
+{
+    char out[PATH_MAX];
+    int n = 0;
+    const char *p = path;
+
+    while (*p) {
+        while (*p == '/')
+            p++;
+        const char *start = p;
+        while (*p && *p != '/')
+            p++;
+        int len = (int)(p - start);
+        if (len == 0 || (len == 1 && start[0] == '.'))
+            continue;
+        if (len == 2 && start[0] == '.' && start[1] == '.') {
+            while (n > 0 && out[n - 1] != '/')
+                n--;
+            if (n > 0)
+                n--;                /* 连同前面的 / 一起去掉 */
+            continue;
+        }
+        out[n++] = '/';
+        for (int i = 0; i < len; i++)
+            out[n++] = start[i];
+    }
+    if (n == 0)
+        out[n++] = '/';
+    out[n] = '\0';
+    for (int i = 0; i <= n; i++)
+        path[i] = out[i];
+}
+
+/*
+ * chdir(path)：换当前目录。必须是存在的目录。
+ * Linux 0.11 的 current->pwd 是目录的 i 节点，这里记的是规范化后的路径：getcwd 直接复制出来就行
+ * （Linux 0.11 没有 getcwd，pwd 要沿着 .. 一级级往上找名字）。代价是当前目录可以被 rmdir 掉，
+ * 之后用相对路径什么也找不到；Linux 0.11 的 rmdir 见 i 节点还被别人引用（i_count > 1）就不删。
+ */
+static int32_t sys_chdir(uint32_t path, uint32_t b, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)b, (void)c;
+    char name[PATH_MAX];
+    uint32_t ino;
+    struct minix_inode d;
+
+    if (get_path(name, path, from_user_mode(frame)) < 0)
+        return -1;
+    fs_lock();
+    int found = namei(name, &ino, &d);
+    fs_unlock();
+    if (found < 0 || (d.mode & S_IFMT) != S_IFDIR)
+        return -1;
+    normalize(name);
+    char *cwd = current_cwd();
+    for (int i = 0; i < PATH_MAX; i++)
+        cwd[i] = name[i];
+    return 0;
+}
+
+/* getcwd(buf, size)：把当前目录写进 buf，返回长度；放不下返回 -1。 */
+static int32_t sys_getcwd(uint32_t buf, uint32_t size, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)c;
+    const char *cwd = current_cwd();
+    uint32_t len = 0;
+
+    while (cwd[len])
+        len++;
+    if (len + 1 > size || (from_user_mode(frame) && !user_write_ok(buf, len + 1)))
+        return -1;
+    for (uint32_t i = 0; i <= len; i++)
+        ((char *)buf)[i] = cwd[i];
+    return (int32_t)len;
+}
+
 static const syscall_fn syscall_table[SYS_CALLS] = {
     [SYS_WRITE]  = sys_write,
     [SYS_GETPID] = sys_getpid,
@@ -300,6 +406,8 @@ static const syscall_fn syscall_table[SYS_CALLS] = {
     [SYS_MKDIR]  = sys_mkdir,
     [SYS_RMDIR]  = sys_rmdir,
     [SYS_FSINFO] = sys_fsinfo,
+    [SYS_CHDIR]  = sys_chdir,
+    [SYS_GETCWD] = sys_getcwd,
 };
 
 void syscall_dispatch(struct interrupt_frame *frame)

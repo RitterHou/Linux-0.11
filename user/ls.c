@@ -1,5 +1,5 @@
 /*
- * ls [目录]：列出目录里的每一项：类型、大小、i 节点号、名字。目录就是一个文件，内容是一条条
+ * ls [目录]：列出目录（不给就是当前目录）里的每一项：类型、大小、i 节点号、名字。目录就是一个文件，内容是一条条
  * 16 字节的目录项（2 字节 i 节点号加 14 字节名字），直接 read 出来；大小和类型再用 stat 去问。
  * 早年的 Unix 的 ls 也是这样直接读目录文件。
  */
@@ -21,9 +21,9 @@ static void print_padded(uint32_t n, uint32_t width)
 
 int main(int argc, char **argv)
 {
-    const char *dir = argc > 1 ? argv[1] : "/";
+    const char *dir = argc > 1 ? argv[1] : ".";
     struct { uint16_t inode; char name[14]; } de;
-    char path[64], name[15];
+    char path[128], name[15];       /* 内核的路径最长 127 个字节 */
     struct stat st;
 
     int32_t fd = open(dir, 0);
@@ -40,7 +40,7 @@ int main(int argc, char **argv)
             name[i] = de.name[i];
         name[14] = '\0';
         uint32_t len = 0;
-        for (const char *p = dir; *p && len < 48; p++)
+        for (const char *p = dir; *p && len < sizeof(path) - 16; p++)   /* 留出 /、14 字节的名字和结尾的 0 */
             path[len++] = *p;
         if (len == 0 || path[len - 1] != '/')
             path[len++] = '/';

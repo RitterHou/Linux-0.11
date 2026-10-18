@@ -27,7 +27,7 @@ KERNEL_CFLAGS += -DSELFTEST=SELFTEST_$(SELFTEST)
 endif
 
 KERNEL_OBJS := $(addprefix $(BUILD)/, entry.o isr.o kernel.o vga.o gdt.o \
-	interrupt.o paging.o mem.o hd.o buffer.o fs.o file.o pipe.o exec.o tty.o timer.o sched.o syscall.o keyboard.o selftest.o user.o)
+	interrupt.o paging.o mem.o hd.o buffer.o fs.o file.o pipe.o exec.o tty.o timer.o sched.o syscall.o keyboard.o selftest.o user.o string.o)
 KERNEL_HEADERS := kernel.h io.h syscall.h selftest.h fs.h
 
 .PHONY: all run test clean
@@ -67,7 +67,7 @@ $(BUILD)/floppy.img: $(BUILD)/boot.bin $(BUILD)/loader.bin $(BUILD)/kernel.bin M
 	dd if=$(BUILD)/kernel.bin of=$@ bs=512 seek=2 conv=notrunc
 
 # 用户程序：每个 user/名称.c 和 user/ulib.c 链接成 build/user/名称.elf，装进硬盘的 /bin/名称。
-USER_PROGS := sh ls cat echo ps wc grep rm mkdir rmdir df hello check letter
+USER_PROGS := sh ls cat echo ps wc grep rm mkdir rmdir df pwd hello check letter
 USER_ELFS := $(addprefix $(BUILD)/user/, $(addsuffix .elf, $(USER_PROGS)))
 
 $(BUILD)/user:
