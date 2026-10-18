@@ -7,6 +7,8 @@
 #include "selftest.h"
 #include "syscall.h"
 
+/* 自检的标记写在第 0 行第 12 列，避开内核自己的 ABPKCVITUF。 */
+#define MARK_COL 12
 
 #if defined(SELFTEST) && (SELFTEST == SELFTEST_SYSCALLS || SELFTEST == SELFTEST_PAGE_ALLOC)
 static int report_col;
@@ -55,7 +57,7 @@ void selftest_run(void)
     /* 0x8000～0x81FF 是 loader.bin，其中有它的 GDT。之后每次中断都要按选择子查 GDT。 */
     for (volatile uint8_t *p = (volatile uint8_t *)0x8000; p < (volatile uint8_t *)0x8200; p++)
         *p = 0;
-    vga_write_at(0, 9, "Z", VGA_GRAY);   /* 清零完成的标记 */
+    vga_write_at(0, MARK_COL, "Z", VGA_GRAY);   /* 清零完成的标记 */
 #elif SELFTEST == SELFTEST_OTHER_SEGMENTS
     /*
      * 在 GDT 第 9 项（选择子 0x48）建一个基址为 1 MB 的数据段，把 DS、ES、FS、GS 换成它，
@@ -63,7 +65,7 @@ void selftest_run(void)
      * 显存写到了别处，屏幕上的 ticks 不再变化。换了但不恢复，空闲时看到的 DS 就会变成 0x10。
      * （不用空选择子测试：QEMU 的 TCG 模拟不检查通过空选择子访问内存。）
      */
-    vga_write_at(0, 9, "N", VGA_GRAY);
+    vga_write_at(0, MARK_COL, "N", VGA_GRAY);
     gdt_set_entry(9, 0x100000, 0xFFFFF, 0x92, 0xC);
     __asm__ volatile(
         "movw $0x48, %%ax\n\t"
@@ -75,7 +77,7 @@ void selftest_run(void)
         "jmp 1b" ::: "eax", "memory");
 #elif SELFTEST == SELFTEST_BIG_KERNEL
     const volatile uint8_t *data = big_data;
-    vga_write_at(0, 9, data[BIG_SIZE - 1] == 'Y' ? "Y" : "X", VGA_GRAY);
+    vga_write_at(0, MARK_COL, data[BIG_SIZE - 1] == 'Y' ? "Y" : "X", VGA_GRAY);
 #elif SELFTEST == SELFTEST_REGISTER_DUMP
     /*
      * 不声明被改写的寄存器：ud2 之后不会再回到这里，编译器之后的假设无关紧要。
@@ -143,7 +145,7 @@ void selftest_run(void)
     uint32_t page = get_free_page();
     free_page(page);
     free_page(page);                        /* 期望在这里 panic */
-    vga_write_at(0, 9, "X", VGA_GRAY);      /* 不应该走到这里 */
+    vga_write_at(0, MARK_COL, "X", VGA_GRAY);      /* 不应该走到这里 */
 #elif SELFTEST == SELFTEST_KEYBOARD_EDGE
     /*
      * 直接喂扫描码（第 1 套）：Caps Lock 按下两次（第二次是按住不放的重复）再松开，打 a；
@@ -174,7 +176,7 @@ void selftest_run(void)
 void selftest_early(void)
 {
 #if defined(SELFTEST) && SELFTEST == SELFTEST_EARLY_KEY
-    vga_write_at(0, 9, "W", VGA_GRAY);
+    vga_write_at(0, MARK_COL, "W", VGA_GRAY);
     while (!(inb(0x64) & 0x01))
         ;
 #endif

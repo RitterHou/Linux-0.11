@@ -27,6 +27,8 @@
 #define SELFTEST_ALL_EXIT          24   /* 任务 A、B 都调用 exit：期望切回任务 0 空转 */
 #define SELFTEST_USER_SPIN         25   /* 用户程序在用户态空转：测试在用户态收到 NMI */
 #define SELFTEST_USER_WRITE_CODE   26   /* 用户程序改写自己的代码：期望因 #PF 被结束，错误码 7 */
+#define SELFTEST_USER_DEEP_STACK   27   /* 用户程序用掉 5 页多的栈后 exit(3)：期望逐页补上，结束后全部收回 */
+#define SELFTEST_USER_WILD_READ    28   /* 用户程序读栈区以外未映射的地址：期望不补页，因 #PF 被结束 */
 
 #define SELFTEST_IN_USER(n) ((n) >= 20)
 

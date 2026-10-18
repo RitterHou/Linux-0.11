@@ -19,7 +19,8 @@
 static uint8_t mem_map[PAGING_PAGES];   /* 在 .bss，由 entry.asm 清零：开始时全部空闲 */
 static uint32_t free_pages;
 
-static void show_memory(void)
+/* 第 3 行：还剩几页，以及缺页异常补上了几次（paging.c 的 page_faults）。 */
+void mem_show(void)
 {
     struct text_line line;
 
@@ -28,14 +29,15 @@ static void show_memory(void)
     line_append_dec(&line, free_pages);
     line_append(&line, "/");
     line_append_dec(&line, PAGING_PAGES);
-    line_append(&line, " pages free");
+    line_append(&line, " pages free  page faults: ");
+    line_append_dec(&line, page_faults);
     line_show(&line, VGA_GRAY, MEMORY_ROW);
 }
 
 void mem_init(void)
 {
     free_pages = PAGING_PAGES;
-    show_memory();
+    mem_show();
 }
 
 uint32_t free_page_count(void)
@@ -68,7 +70,7 @@ uint32_t get_free_page(void)
     volatile uint32_t *p = (volatile uint32_t *)page;
     for (int i = 0; i < PAGE_SIZE / 4; i++)
         p[i] = 0;
-    show_memory();
+    mem_show();
     return page;
 }
 
@@ -89,5 +91,5 @@ void free_page(uint32_t addr)
     if (--*count == 0)
         free_pages++;
     irq_restore(flags);
-    show_memory();
+    mem_show();
 }

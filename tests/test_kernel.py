@@ -249,16 +249,20 @@ def in_function(table, name, addr):
 
 # ---------------------------------------------------------------- 测试用例
 
+USER_STACK_LOW, USER_STACK_TOP = 0x40000000, 0x40400000   # 用户栈区，与 kernel.h 一致
+
+
 def boot_ready(m):
     return m.screen(1)[0].startswith("ABPKCVITU")
 
 
 def test_boot_screen(m, elf):
     """启动后各行的输出"""
+    m.wait_for(lambda mm: mm.screen(1)[0] == "ABPKCVITUF", timeout=2, what="第 0 行的 ABPKCVITUF")
     rows = m.screen(9)
-    check(rows[0] == "ABPKCVITU", f"第 0 行应为 'ABPKCVITU'，实际是 {rows[0]!r}")
     check(rows[2] == "Hello from kmain() in C!", f"第 2 行不对：{rows[2]!r}")
-    check(rows[3] == "memory: 3840/3840 pages free", f"第 3 行应显示 1 MB～16 MB 的 3840 页都空闲：{rows[3]!r}")
+    check(rows[3] == "memory: 3838/3840 pages free  page faults: 1",
+          f"第 3 行应显示 3840 页中用掉了 2 页（用户栈的一页和它的页表）、补过 1 次缺页：{rows[3]!r}")
     check(re.fullmatch(r"ticks: \d+( +idle: +\d+%)?", rows[4]) is not None, f"第 4 行不对：{rows[4]!r}")
     check(rows[5] == "paging: on, 0xC0000000 -> 0xB8000", f"第 5 行不对：{rows[5]!r}")
     check(rows[6].startswith("tasks: "), f"第 6 行不对：{rows[6]!r}")
@@ -396,8 +400,7 @@ def test_user_setup(m, elf):
     check(pde0 & 0x4, f"第 0 个页目录项应打开用户位：{pde0:#x}")
     tables = table["identity_tables"][0]
     user_start, user_data, user_end = (table[n][0] for n in ("__user_start", "__user_data", "__user_end"))
-    check(user_start <= table["user_main"][0] < user_data <= table["user_stack"][0] < user_end,
-          "用户代码应在 __user_start～__user_data，用户栈应在 __user_data～__user_end")
+    check(user_start <= table["user_main"][0] < user_data <= user_end, "用户代码应在 __user_start～__user_data")
     for addr in range(user_start, user_end, 4096):
         pte = read_u32(m, tables + (addr >> 12) * 4)
         check(pte & 0x4, f"用户程序的页 {addr:#x} 应打开用户位：{pte:#x}")
@@ -420,12 +423,26 @@ def test_user_task(m, elf):
     check(cs == 0x33, f"任务 B 进入内核前的 CS 应为用户代码段 0x33，实际是 {cs:#x}")
     check(ss == 0x3B, f"任务 B 进入内核前的 SS 应为用户数据段 0x3B，实际是 {ss:#x}")
     check(in_function(table, "user_main", eip), f"返回地址 {eip:#x} 应在 user_main 内")
-    user_stack, stack_size = table["user_stack"]
-    check(user_stack < esp <= user_stack + stack_size, f"用户态 ESP {esp:#x} 应在用户栈内")
+    check(USER_STACK_TOP - 4096 < esp <= USER_STACK_TOP, f"用户态 ESP {esp:#x} 应在用户栈区顶端的那一页内")
     check(eflags & 0x200 and not eflags & 0x3000, f"用户态 EFLAGS 应 IF=1、IOPL=0：{eflags:#x}")
     tss_b = table["tss"][0] + 2 * 104
     esp0, ss0 = read_u32(m, tss_b + 4), read_u32(m, tss_b + 8)
     check(esp0 == top and ss0 == 0x10, f"任务 B 的 TSS 中 ss0:esp0 应为 0x10:{top:#x}，实际是 {ss0:#x}:{esp0:#x}")
+
+
+def test_demand_paging(m, elf):
+    """用户栈按需分配：只有任务 B 用到的栈顶那一页映射了物理页，页表也是缺页时才分配的"""
+    m.wait_for(lambda mm: mm.screen(1)[0] == "ABPKCVITUF", timeout=2, what="第 0 行的 F")
+    top_page = USER_STACK_TOP - 4096
+    phys = m.gva2gpa(top_page)
+    # 第一次缺页时先分页表（最高的 0xFFF000），再分栈页（0xFFE000）
+    check(phys == 0xFFE000, f"栈顶那一页应映射到第二个分出去的物理页 0xFFE000，实际是 {phys if phys is None else hex(phys)}")
+    check(m.gva2gpa(top_page - 4096) is None, "栈顶下面那一页还没用到，不应映射")
+    check(m.gva2gpa(USER_STACK_LOW) is None, "栈区底部不应映射")
+    pde = read_u32(m, symbols(elf)["page_directory"][0] + (USER_STACK_LOW >> 22) * 4)
+    check(pde & 7 == 7 and pde & ~0xFFF == 0xFFF000, f"第 256 个页目录项应指向 0xFFF000 的页表，存在、可写、用户：{pde:#x}")
+    pte = read_u32(m, 0xFFF000 + 1023 * 4) & ~0x60   # CPU 访问后会置上“已访问”“已写”两位
+    check(pte == 0xFFE000 | 7, f"页表最后一项应为 0xFFE000 | 7（存在、可写、用户）：{pte:#x}")
 
 
 def test_syscall_gate(m, elf):
@@ -596,10 +613,10 @@ def test_big_kernel(_m, _elf):
     check(sectors > 2 * 36, f"自检内核应超过 2 个柱面（72 个扇区），实际只有 {sectors} 个")
     with Machine(os.path.join(d, "floppy.img")) as m:
         # 等内核写出标记：只看长度不行，SeaBIOS 的版本信息也在第 0 行
-        m.wait_for(lambda mm: mm.screen(1)[0].startswith("ABPKCVIT") and len(mm.screen(1)[0]) > 9,
-                   what="第 0 行第 9 列的标记")
+        m.wait_for(lambda mm: mm.screen(1)[0].startswith("ABPKCVIT") and len(mm.screen(1)[0]) > 12,
+                   what="第 0 行第 12 列的标记")
         row0 = m.screen(1)[0]
-        check(row0[9] == "Y", f"内核末尾的标记应为 Y，第 0 行是 {row0!r}")
+        check(row0[12] == "Y", f"内核末尾的标记应为 Y，第 0 行是 {row0!r}")
         check_kernel_loaded(m, os.path.join(d, "kernel.elf"), os.path.join(d, "kernel.bin"))
 
 
@@ -654,7 +671,7 @@ def test_page_alloc(_m, _elf):
         check(f.get("zero") == "1", f"重新分出来的页应已清零，不能留着上一个使用者的数据：{rows[7]!r}")
         check(f.get("all") == "3840" and f.get("left") == "0", f"应正好能分出 3840 页，分光后剩 0：{rows[7]!r}")
         check(f.get("back") == "3840", f"全部还回去后应又是 3840 页空闲：{rows[7]!r}")
-        check(rows[3] == "memory: 3840/3840 pages free", f"第 3 行应跟着更新：{rows[3]!r}")
+        check(re.match(r"memory: \d+/3840 pages free", rows[3]), f"第 3 行应显示剩余页数：{rows[3]!r}")
 
 
 def test_double_free(_m, _elf):
@@ -664,7 +681,7 @@ def test_double_free(_m, _elf):
         m.wait_for(lambda mm: exception_screen(mm)[0].startswith("Kernel panic"), what="Kernel panic")
         check(exception_screen(m)[0] == "Kernel panic: trying to free free page", f"第 19 行不对：{exception_screen(m)[0]!r}")
         check(m.attribute(PANEL_ROW, 0) == 0x4F, "panic 信息应为红底白字")
-        check(m.screen(1)[0][9:10] != "X", "panic 之后不应继续执行")
+        check(m.screen(1)[0][12:13] != "X", "panic 之后不应继续执行")
 
 
 def message_row(m):
@@ -679,6 +696,9 @@ def check_only_task_a_left(m, what):
     check(ticks_value(m) - k1 >= 200, "任务 B 结束后定时器应照常工作")
     out = task_output(m)
     check(set(out) == {"A"} and len(out) == 73, f"任务 B 结束后第 6 行应只剩 A：{out!r}")
+    row3 = m.screen(4)[3]
+    check(row3.startswith("memory: 3840/3840 pages free"), f"任务 B 结束后它的栈页和页表都应收回：{row3!r}")
+    check(m.gva2gpa(USER_STACK_TOP - 4096) is None, "任务 B 结束后它的栈不应再有映射")
     for _ in range(10):
         check(m.registers()["TR"] != 0x28, "任务 B 结束后不应再切到它（TR=0x28）")
         time.sleep(0.03)
@@ -758,7 +778,7 @@ def test_early_key(_m, _elf):
     """初始化 8259 之前就有按键：键盘之后仍能正常回显"""
     d = build_selftest("EARLY_KEY")
     with Machine(os.path.join(d, "floppy.img")) as m:
-        m.wait_for(lambda mm: mm.screen(1)[0][9:10] == "W", what="等待按键的标记 W")
+        m.wait_for(lambda mm: mm.screen(1)[0][12:13] == "W", what="等待按键的标记 W")
         m.sendkeys(["x"])
         m.wait_for(boot_ready, what="启动完成")
         m.sendkeys(["h", "i"])
@@ -799,8 +819,7 @@ def test_nmi_in_user_mode(_m, _elf):
         check(panel[0].startswith("Exception 2 ") and "NMI" in panel[0], f"第 19 行不对：{panel[0]!r}")
         fields = panel_fields(panel)
         check(fields.get("CS") == 0x33 and fields.get("SS") == 0x3B, f"NMI 发生在用户态：{panel[1]!r}")
-        user_stack, size = table["user_stack"]
-        check(user_stack < fields.get("ESP", 0) <= user_stack + size, f"ESP 应是用户栈中的值：{panel[3]!r}")
+        check(USER_STACK_LOW < fields.get("ESP", 0) <= USER_STACK_TOP, f"ESP 应是用户栈区中的值：{panel[3]!r}")
         check("killed" not in message_row(m), f"NMI 不应结束任务 B：{message_row(m)!r}")
 
 
@@ -818,16 +837,46 @@ def test_user_write_code(_m, _elf):
         check_only_task_a_left(m, "用户程序改写代码")
 
 
+def test_deep_stack(_m, _elf):
+    """用户程序用掉 5 页栈：每页第一次用到时补上，内核读到没映射的栈页也补上；exit 后全部收回"""
+    d = build_selftest("USER_DEEP_STACK")
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        m.wait_for(lambda mm: message_row(mm) == "task 2 exited with code 3", what="任务 B 的结束消息")
+        check("k" in task_output(m) and "x" not in task_output(m),
+              f"write 读到栈区里没映射的页时内核应补上，返回 1（用户程序写 k）：{task_output(m)!r}")
+        row3 = m.screen(4)[3]
+        match = re.fullmatch(r"memory: (\d+)/3840 pages free  page faults: (\d+)", row3)
+        check(match is not None, f"第 3 行不对：{row3!r}")
+        check(int(match.group(2)) >= 5, f"5 页栈应各缺页一次：{row3!r}")
+        check(match.group(1) == "3840", f"任务 B 结束后栈页和页表应全部收回：{row3!r}")
+        for page in range(USER_STACK_TOP - 6 * 4096, USER_STACK_TOP, 4096):
+            check(m.gva2gpa(page) is None, f"任务 B 结束后栈区 {page:#x} 不应再有映射")
+        check(not exception_screen(m)[0], f"不应出现异常面板：{exception_screen(m)[0]!r}")
+
+
+def test_wild_read(_m, _elf):
+    """用户程序读栈区以外没映射的地址：内核不补页，只结束任务 B，错误码 4"""
+    d = build_selftest("USER_WILD_READ")
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        m.wait_for(lambda mm: "killed" in message_row(mm), what="第 7 行的任务结束消息")
+        msg = message_row(m)
+        check(msg.startswith("task 2 killed by #PF page fault"), f"第 7 行不对：{msg!r}")
+        check(panel_fields([msg]).get("error") == 4, f"错误码应为 4（页不存在、读、用户态）：{msg!r}")
+        check(m.gva2gpa(0x50000000) is None, "内核不应给栈区以外的地址补页")
+        check_only_task_a_left(m, "用户程序读野指针")
+
+
 # 前几项共用一台正常启动的虚拟机；其余各自启动自检内核。
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_console_scroll,
-                test_idle_in_hlt, test_syscall_gate, test_user_setup, test_user_task,
+                test_idle_in_hlt, test_demand_paging, test_syscall_gate, test_user_setup, test_user_task,
                 test_tasks_alternate]
 SEPARATE_TESTS = [test_syscalls, test_page_alloc, test_double_free, test_early_key, test_keyboard_edge_cases, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,
                   test_big_kernel, test_user_write_kernel, test_user_privileged,
                   test_user_bad_pointer, test_user_exit, test_all_tasks_exit,
-                  test_nmi_in_user_mode, test_user_write_code, test_preemption]
+                  test_nmi_in_user_mode, test_user_write_code, test_preemption,
+                  test_deep_stack, test_wild_read]
 
 
 def main():

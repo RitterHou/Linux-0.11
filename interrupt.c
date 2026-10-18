@@ -23,6 +23,7 @@
 #define IRQ_BASE_PIC2 0x28          /* 从片 IRQ8～15 映射到 0x28～0x2F */
 #define IRQ_TIMER     (IRQ_BASE + 0)
 #define IRQ_KEYBOARD  (IRQ_BASE + 1)
+#define PAGE_FAULT_VECTOR 14
 
 struct idt_entry {
     uint16_t offset_low;            /* 入口地址低 16 位 */
@@ -227,6 +228,12 @@ void interrupt_dispatch(struct interrupt_frame *frame)
     uint32_t vector = frame->vector;
 
     if (vector < IRQ_BASE) {
+        if (vector == PAGE_FAULT_VECTOR) {
+            uint32_t cr2;
+            __asm__ volatile("movl %%cr2, %0" : "=r"(cr2));     /* 出错的虚拟地址 */
+            if (handle_page_fault(cr2, frame->error_code))
+                return;             /* 补上了一页：返回后 CPU 重新执行出错的指令 */
+        }
         if (from_user_mode(frame) && caused_by_program(vector))
             user_exception(frame);  /* 不会返回 */
         exception_panic(frame);     /* 内核自己出错，或者硬件出了问题，无法恢复 */
