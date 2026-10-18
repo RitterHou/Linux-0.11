@@ -259,6 +259,8 @@ svg.fig text.halo { paint-order: stroke; stroke: var(--surface); stroke-width: 5
 .verdict b { font-size: 19px; }
 .verdict.ok { background: var(--ok-bg); border: 1px solid var(--ok); }
 .verdict.bad { background: var(--bad-bg); border: 1px solid var(--bad); }
+.verdict.fix { background: var(--disk-bg); border: 1px solid var(--disk); }
+.hop.fix { border-color: var(--disk); background: var(--disk-bg); }
 .verdict span { min-width: 0; flex: 1 1 320px; }
 .presets { display: flex; flex-wrap: wrap; gap: 6px; }
 .presets button { font-size: 13px; padding: 4px 12px; min-height: 32px; }
@@ -315,6 +317,7 @@ svg.fig text.halo { paint-order: stroke; stroke: var(--surface); stroke-width: 5
 .rule { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; display: flex; flex-direction: column; gap: 4px; font-size: 14px; color: var(--ink-2); }
 .rule b { color: var(--ink); font-size: 15px; }
 .rule .r { font-family: var(--font-mono); font-size: 12.5px; color: var(--bad); }
+.rule .r.ok { color: var(--ok); }
 
 /* ---------- 验证 ---------- */
 .big3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
@@ -364,10 +367,10 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
     <ol class="milestones" id="milestones" aria-label="第一行每个字母代表的里程碑"></ol>
   </div>
   <div class="stats">
-    <span><b data-fact="loc">1,982</b>行汇编与 C</span>
+    <span><b data-fact="loc">2,254</b>行汇编与 C</span>
     <span><b data-fact="kernelKB">16 KB</b>内核</span>
-    <span><b data-fact="commits">29</b>个提交</span>
-    <span><b data-fact="tests">32</b>项自动化测试</span>
+    <span><b data-fact="commits">32</b>个提交</span>
+    <span><b data-fact="tests">37</b>项自动化测试</span>
   </div>
 </header>
 
@@ -544,7 +547,7 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
   <div class="chapter-head">
     <span class="chapter-no">05</span>
     <h2 id="c5">分页：每个地址都要翻译一次</h2>
-    <p>打开分页后，程序用的地址只是一个门牌号。CPU 把它拆成三段，查两张表，才知道真正的内存位置；查不到或没有权限，就触发缺页异常。挑一个地址试试。</p>
+    <p>打开分页后，程序用的地址只是一个门牌号。CPU 把它拆成三段，查两张表，才知道真正的内存位置；查不到或没有权限，就触发缺页异常。缺页不一定是错：用户栈所在的 4 MB 开机时一页都没映射，任务 B 用到哪页，内核就在缺页异常里补哪页。挑一个地址试试。</p>
   </div>
   <div class="stage" id="pg">
     <div class="presets" id="pg-presets"></div>
@@ -561,7 +564,8 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
     <details class="more"><summary>展开细节</summary><ul>
       <li>页目录和页表各有 1024 项，每项 4 字节，一张表正好一页（4 KB）。一张页表管 4 MB，4 张页表一一对应地映射前 16 MB：虚拟地址等于物理地址，所以打开分页的那一刻代码照常运行。</li>
       <li>第 0 页故意不映射，空指针一碰就出错；<code>0xC0000000</code> 也映射到显存，同一块内存有了两个地址，第 0 行的 <code>V</code> 就是从这个地址写进去的。</li>
-      <li>只有用户程序那两页打开了用户位，其中代码页只读。CPU 要求页目录项和页表项两层都允许才放行。内核在特权级 0 不受只读位限制（CR0.WP 为 0）。</li>
+      <li>只有用户程序的代码页和用户栈区里分配了的页打开了用户位，其中代码页只读。CPU 要求页目录项和页表项两层都允许才放行。内核在特权级 0 不受只读位限制（CR0.WP 为 0）。</li>
+      <li>缺页时内核先看两件事：是不是“页不存在”（错误码第 0 位为 0），地址在不在用户栈区 <code>0x40000000</code>～<code>0x403FFFFF</code>。都是就从 <code>get_free_page()</code> 拿一页清零的物理页填进页表，返回后 CPU 重新执行那条指令；页表本身也是第一次缺页时才分配的。Linux 0.11 的 <code>do_no_page()</code> 做同样的事。任务 B 结束时，这些页全部还给分配器。</li>
       <li>缺页时，CPU 把出错的地址放进 CR2；错误码的三位分别表示：页存在吗、是写吗、来自用户态吗。</li>
       <li>Linux 0.11 不靠页表的用户位隔离内核：它的页表把内核也标成了用户可访问，靠的是每个进程的段基址和界限。</li>
     </ul></details>
@@ -635,8 +639,8 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
       <text x="215" y="98" text-anchor="middle" class="t">任务 B · user_main()</text>
       <text id="uk-b-sub" x="215" y="120" text-anchor="middle" class="m"></text>
       <rect class="box user" x="620" y="78" width="250" height="52" rx="10" style="stroke-dasharray: 4 4"/>
-      <text x="745" y="101" text-anchor="middle">它能碰的只有两页：</text>
-      <text x="745" y="120" text-anchor="middle" class="m">代码（只读）+ 栈</text>
+      <text x="745" y="101" text-anchor="middle">它能碰的只有：</text>
+      <text x="745" y="120" text-anchor="middle" class="m">代码页（只读）+ 用到的栈页</text>
 
       <rect class="box kern" x="80" y="290" width="200" height="56" rx="10"/>
       <text x="180" y="314" text-anchor="middle" class="t">内核变量</text>
@@ -658,6 +662,7 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
     </svg></div>
     <div class="cap" id="uk-cap" aria-live="polite"></div>
     <div class="rules">
+      <div class="rule"><b>用到栈上还没分配的页</b><span>不算错：页在用户栈区里</span><span class="r ok">→ 缺页，内核补上一页，接着运行</span></div>
       <div class="rule"><b>直接读写内核内存</b><span>页表里内核的页没有用户位</span><span class="r">→ #PF，任务被结束</span></div>
       <div class="rule"><b>改写自己的代码</b><span>用户代码页是只读的</span><span class="r">→ #PF，任务被结束</span></div>
       <div class="rule"><b>执行 cli、hlt、in、out</b><span>特权指令，EFLAGS 的 IOPL 为 0</span><span class="r">→ #GP，任务被结束</span></div>
@@ -680,9 +685,9 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
     <p><code>make test</code> 在后台启动没有窗口的 QEMU，通过它的监视器读显存、读寄存器、翻译地址、模拟按键，逐项核对。需要故意出错的场景，就另外编一个自检内核。</p>
   </div>
   <div class="big3">
-    <div><b data-fact="tests">32</b><span>项测试，一条 <code>make test</code> 全部跑完</span></div>
-    <div><b data-fact="selftests">18</b><span>个自检内核：除零、越权、坏指针、所有任务退出……</span></div>
-    <div><b data-fact="commits">29</b><span>个提交：每加一个机制，测试通过后单独提交</span></div>
+    <div><b data-fact="tests">37</b><span>项测试，一条 <code>make test</code> 全部跑完</span></div>
+    <div><b data-fact="selftests">22</b><span>个自检内核：除零、越权、坏指针、重复释放、栈用掉 5 页……</span></div>
+    <div><b data-fact="commits">32</b><span>个提交：每加一个机制，测试通过后单独提交</span></div>
   </div>
   <p style="color: var(--ink-2); max-width: 70ch">新加的测试都先在临时副本里把代码故意改坏，确认测试真的会失败，再改回来。</p>
   <h3 style="margin-top: 8px">代码审查发现的问题（节选）</h3>
@@ -695,17 +700,17 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
   <details><summary>全部提交</summary><ol class="commits" id="commits"></ol></details>
 </section>
 
-<footer>源码在仓库的 <code>learning</code> 分支，<code>main</code> 分支是 Linux 0.11 原始源码。页面里的地址取自提交 <span class="mono" data-fact="head">3ee724e</span> 构建出的 kernel.elf。在仓库里运行 <code>make run</code> 可以在 QEMU 中看到真实的屏幕。</footer>
+<footer>源码在仓库的 <code>learning</code> 分支，<code>main</code> 分支是 Linux 0.11 原始源码。页面里的地址取自提交 <span class="mono" data-fact="head">82410b6</span> 构建出的 kernel.elf。在仓库里运行 <code>make run</code> 可以在 QEMU 中看到真实的屏幕。</footer>
 </main>
 
 <script>
 /* ===================== 构建事实：来自 objdump -h / -t build/kernel.elf ===================== */
 const FACTS = {
-  head: "3ee724e", loc: "1,982", kernelKB: "16 KB", kernelSectors: 32, commits: 29, tests: 32,
-  text: 0x10000, rodata: 0x117a8, data: 0x11b6c, user: 0x12000, userData: 0x13000, userEnd: 0x14000,
-  bss: 0x14000, bssEnd: 0x1e190, stackTop: 0x15000, gdt: 0x15010, idt: 0x15060,
-  identity: 0x16000, pageDir: 0x1a000, alias: 0x1b000, ticks: 0x1c000, tss: 0x1c018,
-  taskStacks: 0x1c170, userMain: 0x12000, userStack: 0x13000, kmain: 0x101c0,
+  head: "82410b6", loc: "2,254", kernelKB: "16 KB", kernelSectors: 32, commits: 32, tests: 37,
+  text: 0x10000, rodata: 0x11c48, data: 0x1207c, user: 0x13000, userData: 0x14000, userEnd: 0x14000,
+  bss: 0x14000, bssEnd: 0x1f090, stackTop: 0x15000, gdt: 0x15010, idt: 0x15060,
+  identity: 0x16000, pageDir: 0x1a000, alias: 0x1b000, ticks: 0x1cf08, tss: 0x1cf18,
+  taskStacks: 0x1d070, userMain: 0x13000, kmain: 0x101c0, selftests: 22,
 };
 const $ = id => document.getElementById(id);
 const hex = (n, w = 5) => "0x" + (n >>> 0).toString(16).toUpperCase().padStart(w, "0");
@@ -787,6 +792,7 @@ const MILESTONES = [
   ["I", "中断打开，定时器和键盘开始工作", "sti"],
   ["T", "两个任务开始轮流运行", "sched_start()"],
   ["U", "用户程序第一次请内核帮忙", "int 0x80"],
+  ["F", "第一次缺页被内核补上：用户栈用到才分配", "handle_page_fault()"],
 ];
 (() => {
   const list = $("milestones");
@@ -802,7 +808,7 @@ const MILESTONES = [
     s => s.write(0, 2, "P"),
     s => s.write(0, 3, "K"),
     s => { s.write(0, 4, "C"); s.write(2, 0, "Hello from kmain() in C!"); },
-    s => { s.write(0, 5, "V"); s.write(5, 0, "paging: on, 0xC0000000 -> 0xB8000"); },
+    s => { s.write(0, 5, "V"); s.write(5, 0, "paging: on, 0xC0000000 -> 0xB8000"); s.write(3, 0, "memory: 3840/3840 pages free  page faults: 0"); },
     s => { s.write(4, 0, "ticks: 0"); s.write(6, 0, "tasks: "); s.write(8, 0, "keyboard: "); s.write(0, 6, "I"); st.cur = [8, 10]; },
     s => { s.write(0, 7, "T"); st.running = true; st.last = performance.now(); },
   ];
@@ -810,7 +816,7 @@ const MILESTONES = [
     timers.forEach(clearTimeout); timers = []; cancelAnimationFrame(raf);
     st = { ticks: 0, running: false, acc: 0, last: 0, cur: null, len: 0, window: 0, wake: [0, 0, 0], pos: 0, u: false };
     scr.clear(); mark(0); draw();
-    if (reduce) { steps.forEach(f => f(scr)); for (let i = 0; i < 300; i++) tick(); st.last = performance.now(); mark(9); draw(); }
+    if (reduce) { steps.forEach(f => f(scr)); for (let i = 0; i < 300; i++) tick(); st.last = performance.now(); mark(10); draw(); }
     else steps.forEach((f, i) => timers.push(setTimeout(() => { f(scr); mark(i + 1); draw(); }, 400 + i * 700)));
     raf = requestAnimationFrame(loop);
   }
@@ -820,7 +826,9 @@ const MILESTONES = [
     if (++st.window === 100) { scr.write(4, 20, "idle: 100%"); st.window = 0; }
     for (const t of [1, 2]) if (st.wake[t] <= st.ticks) {
       scr.put(6, OUT + st.pos, t === 1 ? "A" : "B"); st.pos = (st.pos + 1) % W; st.wake[t] = st.ticks + 2;
-      if (t === 2 && !st.u) { st.u = true; scr.write(0, 8, "U"); mark(9); }
+      if (t === 2 && !st.u) {           /* 任务 B 第一条指令就压栈：先缺页（F），再做第一次系统调用（U） */
+        st.u = true; scr.write(0, 9, "F"); scr.write(3, 0, "memory: 3838/3840 pages free  page faults: 1"); scr.write(0, 8, "U"); mark(10);
+      }
     }
   }
   function loop(now) {
@@ -921,14 +929,15 @@ const MILESTONES = [
     ["gdt_init()", "内核自己的段表：内核段、用户段、3 个 TSS", "ABPKC"],
     ["idt_init()", "中断表：0～31 号异常、32～47 号外设，0x80 留给系统调用", "ABPKC"],
     ["paging_init()", "建页表、打开分页，再从 0xC0000000 写出 V", "ABPKCV"],
+    ["mem_init()", "1 MB～16 MB 的 3840 个物理页交给分配器，第 3 行显示还剩几页", "ABPKCV"],
     ["pic_init() · keyboard_init()", "把外设中断挪到 0x20 以后；读光键盘缓冲区", "ABPKCV"],
     ["timer_init(100)", "8253 每秒发 100 次中断", "ABPKCV"],
     ["sched_init()", "填好任务 0、A、B 的寄存器快照（TSS）", "ABPKCV"],
     ["sti", "打开中断：从这一刻起，定时器和键盘可以随时打断 CPU", "ABPKCVI"],
-    ["sched_start()", "打开调度开关，写出 T；下一个 tick 起任务 A、B 轮流运行，任务 B 第一次系统调用时写出 U", "ABPKCVITU"],
+    ["sched_start()", "打开调度开关，写出 T。下一个 tick 起任务 A、B 轮流运行；任务 B 一开始就缺页（F），接着第一次系统调用（U）", "ABPKCVITUF"],
   ];
   const box = $("pipeline");
-  box.innerHTML = P.map(([f, d, row]) => `<div class="pipe"><i class="dot"></i><b>${f}</b><span>${d}</span><span class="mini-vga">${row.padEnd(9, " ")}</span></div>`).join("");
+  box.innerHTML = P.map(([f, d, row]) => `<div class="pipe"><i class="dot"></i><b>${f}</b><span>${d}</span><span class="mini-vga">${row.padEnd(10, " ")}</span></div>`).join("");
   const rows = [...box.children];
   stepper($("init"), P.length, i => rows.forEach((r, k) => { r.classList.toggle("done", k < i); r.classList.toggle("now", k === i); }), 1700);
 })();
@@ -1008,7 +1017,7 @@ const MILESTONES = [
     { t: "任务 B 在用户态执行 int 0x80", d: "此刻 ESP 指向用户栈。EAX=0（write），EBX=1，ECX=&letter，EDX=1。" },
     { swap: true, t: "CPU 先换栈", d: "门指向 0 级代码，特权级要从 3 变 0。CPU 从任务 B 的 TSS 取出 ss0:esp0，换到它的内核栈：用户栈不可信，内核不能在上面工作。" },
     { who: "cpu", l: "用户 SS", v: "0x003B", t: "CPU 压入用户态的 SS", d: "返回时才能回到用户栈。" },
-    { who: "cpu", l: "用户 ESP", v: "user_stack+…", t: "CPU 压入用户态的 ESP", d: "从内核态进入的中断没有这两项。" },
+    { who: "cpu", l: "用户 ESP", v: "0x403FFF…", t: "CPU 压入用户态的 ESP", d: "从内核态进入的中断没有这两项。" },
     { who: "cpu", l: "EFLAGS", v: "0x00000202", t: "CPU 压入 EFLAGS", d: "这是陷阱门，不关中断：系统调用执行时定时器照常工作。" },
     { who: "cpu", l: "CS", v: "0x0033", t: "CPU 压入用户代码段", d: "0x33 的低 2 位是 3，记下了刚才在用户态。CPU 装入 CS=0x08，特权级变成 0。" },
     { who: "cpu", l: "EIP", v: "user_main+…", t: "CPU 压入返回地址", d: "然后跳到 isr_syscall。" },
@@ -1046,14 +1055,18 @@ const MILESTONES = [
 /* ===================== 05 分页翻译 ===================== */
 (() => {
   const PRESETS = [
-    ["显存的第二个地址", 0xC0000004], ["内核代码", FACTS.text], ["用户代码", FACTS.userMain], ["用户栈", FACTS.userStack],
-    ["内核变量 timer_ticks", FACTS.ticks], ["空指针", 0x00000000], ["16 MB 以上", 0x01000000],
+    ["显存的第二个地址", 0xC0000004], ["内核代码", FACTS.text], ["用户代码", FACTS.userMain], ["用户栈顶", 0x403FFFFC],
+    ["栈区里还没用到的页", 0x40000000], ["内核变量 timer_ticks", FACTS.ticks], ["空指针", 0x00000000], ["野指针", 0x50000000],
   ];
   let va = PRESETS[0][1], user = false, write = false;
   const userFirst = FACTS.user >>> 12, userDataFirst = FACTS.userData >>> 12, userEnd = FACTS.userEnd >>> 12;
-  /* 与 paging.c 一致：前 4 个页目录项可写且带用户位，第 768 项（别名）不带用户位。 */
+  /*
+   * 与 paging.c 一致：前 4 个页目录项可写且带用户位，第 768 项（别名）不带用户位；
+   * 第 256 项是用户栈区，页表在第一次缺页时分到 0xFFF000，此刻只有栈顶那一页（0xFFE000）。
+   */
   function pde(d) {
     if (d < 4) return { p: 1, w: 1, u: 1, name: `页表 ${d}`, note: "前 16 MB 一一对应" };
+    if (d === 256) return { p: 1, w: 1, u: 1, name: "页表 0x00FFF000", note: "用户栈区：第一次缺页时才分配" };
     if (d === 768) return { p: 1, w: 1, u: 0, name: "别名页表", note: "只映射了显存那一页" };
     return { p: 0 };
   }
@@ -1065,6 +1078,7 @@ const MILESTONES = [
       return { p: 1, w: isUser && page < userDataFirst ? 0 : 1, u: isUser ? 1 : 0, frame: page * 4096 };
     }
     if (d === 768) return t === 0 ? { p: 1, w: 1, u: 0, frame: 0xB8000 } : { p: 0, why: "别名只映射了一页" };
+    if (d === 256) return t === 1023 ? { p: 1, w: 1, u: 1, frame: 0xFFE000 } : { p: 0, demand: true, why: "用户栈区里这一页还没用到" };
     return { p: 0 };
   }
   const flag = (n, v) => `<span class="flag ${v ? "y" : "n"}">${n}=${v}</span>`;
@@ -1079,13 +1093,13 @@ const MILESTONES = [
     if (!D.p) fail = { at: 1, err, why: "页目录这一项是空的：这片地址根本没有映射" };
     else {
       E = pte(d, t);
-      if (!E.p) fail = { at: 2, err, why: E.why || "页表这一项是空的" };
+      if (!E.p) fail = { at: 2, err, why: E.why || "页表这一项是空的", demand: E.demand };
       else if (user && !(D.u && E.u)) fail = { at: D.u ? 2 : 1, err: err | 1, why: "这一页没有用户位，只有内核能访问" };
       else if (user && write && !(D.w && E.w)) fail = { at: D.w ? 2 : 1, err: err | 1, why: "这一页对用户程序只读" };
       else phys = E.frame + o;
     }
-    const cls = n => fail ? (n < fail.at ? "hop ok" : n === fail.at ? "hop fail" : "hop skip") : "hop ok";
-    const ar = n => `<div class="arrow${fail && n >= fail.at ? " bad" : ""}" aria-hidden="true">→</div>`;
+    const cls = n => fail ? (n < fail.at ? "hop ok" : n === fail.at ? (fail.demand ? "hop fix" : "hop fail") : "hop skip") : "hop ok";
+    const ar = n => `<div class="arrow${fail && !fail.demand && n >= fail.at ? " bad" : ""}" aria-hidden="true">→</div>`;
     const where = phys === null ? "" : phys >= 0xB8000 && phys < 0xC0000 ? "显存" : phys === va ? "和虚拟地址相同" : "";
     $("chain").innerHTML = `
       <div class="${cls(0)}"><span class="k">起点：CR3 寄存器</span><span class="v">${hex(FACTS.pageDir)}</span><span>页目录在这里</span></div>${ar(1)}
@@ -1093,7 +1107,10 @@ const MILESTONES = [
       <div class="${cls(2)}"><span class="k">页表第 ${t} 项</span><span class="v">${E && E.p ? "物理页 " + hex(E.frame) : D.p ? "空" : "—"}</span><span class="flags">${E ? (E.p ? flag("存在", 1) + flag("可写", E.w) + flag("用户", E.u) : flag("存在", 0)) : ""}</span></div>${ar(3)}
       <div class="${cls(3)}"><span class="k">加上页内偏移</span><span class="v">${phys !== null ? hex8(phys) : "—"}</span><span>${where}</span></div>`;
     const v = $("verdict");
-    if (fail) {
+    if (fail && fail.demand) {
+      v.className = "verdict fix";
+      v.innerHTML = `<b>↻ 缺页，内核当场补上</b><span>${fail.why}。CR2 = <code>${hex8(va)}</code>，错误码 ${fail.err}（页不存在、${fail.err & 2 ? "写" : "读"}、${fail.err & 4 ? "来自用户态" : "来自内核"}）。地址在用户栈区，<code>handle_page_fault()</code> 分一页清零的物理页填进这一项，返回后 CPU 重新执行这条指令，这次就能访问了。</span>`;
+    } else if (fail) {
       v.className = "verdict bad";
       v.innerHTML = `<b>✗ 缺页异常 #PF</b><span>${fail.why}。CR2 = <code>${hex8(va)}</code>，错误码 ${fail.err}（${fail.err & 1 ? "页存在但没权限" : "页不存在"}、${fail.err & 2 ? "写" : "读"}、${fail.err & 4 ? "来自用户态" : "来自内核"}）。${user ? "内核只结束这个用户程序。" : "内核自己出错，显示红色异常面板并停机。"}</span>`;
     } else {
@@ -1313,7 +1330,8 @@ const FILES = [
   ["kernel.c", "kmain()：按顺序初始化", "init/main.c"],
   ["gdt.c", "内核 GDT：内核段、TSS、用户段", "boot/head.s"],
   ["interrupt.c", "IDT、8259、分发、异常面板", "kernel/traps.c"],
-  ["paging.c", "页表、用户位", "boot/head.s、mm/memory.c"],
+  ["paging.c", "页表、用户位、缺页时补页、收回用户页", "boot/head.s、mm/memory.c、mm/page.s"],
+  ["mem.c", "物理页分配：mem_map、get_free_page()、free_page()", "mm/memory.c"],
   ["sched.c", "TSS、任务切换、睡眠与唤醒、结束任务", "kernel/sched.c、kernel/exit.c"],
   ["syscall.c / syscall.h", "系统调用表与调用方式", "kernel/system_call.s、include/unistd.h"],
   ["user.c", "用户程序 user_main()", "（Linux 的用户程序在磁盘上）"],
@@ -1332,6 +1350,7 @@ const COMMITS = [
   ["c423036", "审查：开中断前清空键盘缓冲"], ["3bb073a", "审查：Caps Lock 重复、换行退格"], ["7a54d0e", "审查：NMI 不算用户的错"],
   ["83bb84f", "审查：读盘重试、关马达"], ["949996f", "审查：加固测试脚本"], ["ba981d2", "审查：改正 Linux 0.11 对照"], ["ed9baf1", "用户代码页只读"],
   ["0d76fa0", "介绍网页"], ["fbb3639", "重新设计介绍网页"], ["3ee724e", "睡眠时让出 CPU，空闲时回到任务 0"],
+  ["5db62ab", "网页：睡眠让出 CPU"], ["d537d47", "物理页分配"], ["82410b6", "用户栈用到才分配：缺页处理"],
 ];
 $("commits").innerHTML = COMMITS.map(([h, s]) => `<li><span class="h">${h}</span><span>${s}</span></li>`).join("");
 </script>
