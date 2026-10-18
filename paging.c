@@ -107,6 +107,16 @@ int user_range_ok(uint32_t addr, uint32_t size)
            range_within(addr, size, USER_STACK_LOW, USER_STACK_TOP);
 }
 
+/*
+ * 内核要往 [addr, addr + size) 写，它是否完全落在用户可写的内存里：用户栈区，或者用户程序的数据部分。
+ * 用户代码那一页是只读的，不能交给内核去写：打开了 CR0.WP，内核写它会触发缺页，而那不是能补的缺页。
+ */
+int user_write_ok(uint32_t addr, uint32_t size)
+{
+    return range_within(addr, size, (uint32_t)__user_data, (uint32_t)__user_end) ||
+           range_within(addr, size, USER_STACK_LOW, USER_STACK_TOP);
+}
+
 /* 用户栈区正好是一个页目录项管的 4 MB：缺页时只用分配这一张页表，结束时只用收回这一张。 */
 _Static_assert(USER_STACK_LOW % 0x400000u == 0 && USER_STACK_TOP - USER_STACK_LOW == 0x400000u,
                "user stack area must be exactly one page table");

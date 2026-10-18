@@ -68,6 +68,66 @@ void user_main(void)
     char digit = (char)('0' + pid);
     write(1, &digit, 1);
     exit(0);
+#elif SELFTEST == SELFTEST_USER_WAIT
+    /*
+     * 每一项检查通过就写一个字母，期望第 6 行（去掉任务 A 的 A）是 winrhk：
+     *   w：waitpid 返回子进程号，退出码 42 写进父进程的 area[0]。这一页 fork 之前就有，fork 之后
+     *      父进程、keeper、quick 三方共用，是只读的：内核写它也要先复制（CR0.WP），
+     *   i：所以 keeper 醒来后看到的 area[0] 仍是 1。
+     *   n：一直 fork 到失败：16 个任务槽去掉任务 0、A、B，正好能 fork 13 次，第 14 次返回 -1。
+     *   r：waitpid(-1) 把这 13 个子进程一个个收走，退出码都是 7，之后再 waitpid 返回 -1。
+     *   h：WNOHANG：子进程还在睡，立刻返回 0；不是自己的子进程（任务 1）返回 -1；再正常等它。
+     *   k：被异常结束的子进程，状态是 0x100 加异常号（缺页是 14）。
+     */
+    volatile int32_t area[3 * 1024];            /* 12 KB：area[0] 和栈顶的局部变量不在同一页 */
+    int32_t st = 0;
+    area[0] = 1;
+    int32_t keeper = fork();
+    if (keeper == 0) {
+        sleep(30);
+        write(1, area[0] == 1 ? "i" : "x", 1);
+        exit(0);
+    }
+    int32_t quick = fork();
+    if (quick == 0)
+        exit(42);
+    int32_t got = waitpid(quick, (int32_t *)&area[0], 0);
+    write(1, got == quick && area[0] == 42 ? "w" : "X", 1);
+    waitpid(keeper, 0, 0);
+
+    int forked = 0;
+    for (;;) {
+        int32_t pid = fork();
+        if (pid == 0)
+            exit(7);
+        if (pid < 0)
+            break;
+        forked++;
+    }
+    write(1, forked == 13 ? "n" : "N", 1);
+    int reaped = 0, all_seven = 1;
+    while (waitpid(-1, &st, 0) > 0) {
+        reaped++;
+        all_seven &= st == 7;
+    }
+    write(1, reaped == 13 && all_seven ? "r" : "R", 1);
+
+    int32_t slow = fork();
+    if (slow == 0) {
+        sleep(20);
+        exit(9);
+    }
+    int32_t early = waitpid(slow, &st, WNOHANG);
+    int32_t stranger = waitpid(1, &st, 0);
+    got = waitpid(slow, &st, 0);
+    write(1, early == 0 && stranger == -1 && got == slow && st == 9 ? "h" : "H", 1);
+
+    int32_t victim = fork();
+    if (victim == 0)
+        (void)*(volatile uint32_t *)0x50000000;
+    got = waitpid(victim, &st, 0);
+    write(1, got == victim && st == (0x100 | 14) ? "k" : "K", 1);
+    exit(0);
 #elif SELFTEST == SELFTEST_ALL_EXIT
     write(1, "bye", 3);
     exit(2);

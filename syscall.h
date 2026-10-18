@@ -17,7 +17,10 @@
 #define SYS_SLEEP  2                /* sleep(ticks)：等待若干个定时器 tick */
 #define SYS_EXIT   3                /* exit(code)：结束当前任务，不再返回 */
 #define SYS_FORK   4                /* fork()：复制当前任务；父进程得到新任务号，子进程得到 0 */
-#define SYS_CALLS  5
+#define SYS_WAITPID 5               /* waitpid(pid, &status, options)：等子进程结束，返回它的任务号 */
+#define SYS_CALLS  6
+
+#define WNOHANG    1                /* waitpid 的选项：子进程还没结束就立刻返回 0 */
 
 static inline int32_t syscall3(uint32_t nr, uint32_t a, uint32_t b, uint32_t c)
 {
@@ -47,6 +50,11 @@ static inline int32_t sleep(uint32_t ticks)
 static inline int32_t fork(void)
 {
     return syscall3(SYS_FORK, 0, 0, 0);
+}
+
+static inline int32_t waitpid(int32_t pid, int32_t *status, int32_t options)
+{
+    return syscall3(SYS_WAITPID, (uint32_t)pid, (uint32_t)status, (uint32_t)options);
 }
 
 static inline void exit(int code)

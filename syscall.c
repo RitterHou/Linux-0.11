@@ -62,8 +62,7 @@ static int32_t sys_exit(uint32_t code, uint32_t b, uint32_t c, struct interrupt_
     line_append(&line, " exited with code ");
     line_append_dec(&line, code);
     line_show(&line, VGA_YELLOW, TASK_MESSAGE_ROW);
-    sched_exit_current();
-    return 0;                       /* 不会执行到这里 */
+    sched_exit(code & 0xFF);        /* 退出码只留低 8 位，与 Unix 相同 */
 }
 
 /* fork()：只有用户任务能 fork，内核任务 A 没有用户态的现场可以复制。 */
@@ -73,12 +72,24 @@ static int32_t sys_fork(uint32_t a, uint32_t b, uint32_t c, struct interrupt_fra
     return from_user_mode(frame) ? sched_fork(frame) : -1;
 }
 
+/*
+ * waitpid(pid, status, options)：等子进程结束，见 sched.c 的 sched_waitpid()。
+ * status 可以为 0（不要状态）；不为 0 时内核要往那里写 4 个字节，用户传来的地址必须落在用户可写的内存里。
+ */
+static int32_t sys_waitpid(uint32_t pid, uint32_t status, uint32_t options, struct interrupt_frame *frame)
+{
+    if (status != 0 && from_user_mode(frame) && !user_write_ok(status, 4))
+        return -1;
+    return sched_waitpid((int32_t)pid, (uint32_t *)status, (int)options);
+}
+
 static const syscall_fn syscall_table[SYS_CALLS] = {
     [SYS_WRITE]  = sys_write,
     [SYS_GETPID] = sys_getpid,
     [SYS_SLEEP]  = sys_sleep,
     [SYS_EXIT]   = sys_exit,
     [SYS_FORK]   = sys_fork,
+    [SYS_WAITPID] = sys_waitpid,
 };
 
 void syscall_dispatch(struct interrupt_frame *frame)

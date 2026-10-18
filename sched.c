@@ -30,6 +30,8 @@
 #define TASK_UNUSED    0            /* 空槽，或者任务已经结束 */
 #define TASK_RUNNING   1            /* 能运行：正在运行，或者等着轮到它 */
 #define TASK_SLEEPING  2            /* 在 sleep 里等时间到，不参与调度 */
+#define TASK_ZOMBIE    3            /* 已经结束，内存已收回，等父进程用 waitpid 取走退出码 */
+#define TASK_WAITING   4            /* 在 waitpid 里等子进程结束，不参与调度 */
 
 #define OUTPUT_ROW     6
 #define OUTPUT_COL     7            /* 紧跟在 "tasks: " 后面 */
@@ -55,6 +57,8 @@ struct task {
     uint32_t wake_at;               /* 睡眠的任务在 timer_ticks 到达这个值时被叫醒 */
     uint32_t page_dir;              /* 页目录的物理地址，也就是 TSS 里的 CR3 */
     uint32_t kstack;                /* 内核栈所在的页；任务 0 用 entry.asm 的栈，这里是 0 */
+    int parent;                     /* 父进程的任务号；内核建的任务和孤儿是 0，没有人等它们 */
+    uint32_t status;                /* 结束时的状态，waitpid 取走：exit 的退出码，或 0x100 加异常号 */
 };
 
 static struct tss tss[NR_TASKS];
@@ -314,28 +318,93 @@ int sched_fork(const struct interrupt_frame *frame)
         .es = frame->es, .cs = frame->cs, .ss = frame->user_ss, .ds = frame->ds, .fs = frame->fs, .gs = frame->gs,
         .iomap_base = sizeof(struct tss),
     };
-    tasks[n] = (struct task){ .state = TASK_RUNNING, .page_dir = dir, .kstack = kstack };
+    tasks[n] = (struct task){ .state = TASK_RUNNING, .page_dir = dir, .kstack = kstack, .parent = current_task };
     irq_restore(flags);
     return n;
 }
 
+/* 收走一个已经结束的任务：还掉内核栈，任务槽空出来。 */
+static void release(int n)
+{
+    free_page(tasks[n].kstack);
+    tasks[n] = (struct task){ .state = TASK_UNUSED };
+}
+
 /*
- * 结束当前任务，切到下一个任务，不再返回。用户态程序出错或调用 exit 时由内核调用。
- * 它的内存当场收回：用户栈区的页、页表、页目录和内核栈。此刻还在用这个页目录和内核栈，
- * 但中断关着，切走之前没有人会分配内存，这几页的内容不会被改掉；切换时 CPU 把寄存器存进
- * 静态的 tss 数组，也不碰它们。Linux 0.11 的 do_exit() 做的事情更多：关闭文件、通知父进程，
- * 内核栈所在的那一页要等父进程调用 wait 时才释放。
+ * waitpid 系统调用：等子进程结束，取走它的状态，返回它的任务号。pid 为 -1 时等任意一个子进程。
+ * 子进程还在运行，就把自己标成 TASK_WAITING 切走，子进程结束时把父进程叫醒，再重新找一遍；
+ * 带 WNOHANG 时不等，返回 0。没有符合条件的子进程返回 -1。
+ * 查找和睡下之间关着中断，子进程不会恰好在这中间结束，叫醒就不会落空。
+ * status 写在最后、开着中断：它可能落在 fork 留下的只读页上，写的时候要走一次写时复制。
+ * Linux 0.11 的 sys_waitpid() 也是这样一圈圈找，找到僵尸就 release() 它，找不到就睡下再来。
  */
-void sched_exit_current(void)
+int sched_waitpid(int pid, uint32_t *status, int options)
+{
+    for (;;) {
+        uint32_t flags = irq_save();
+        int have_child = 0;
+
+        for (int n = 1; n < NR_TASKS; n++) {
+            if (tasks[n].state == TASK_UNUSED || tasks[n].parent != current_task)
+                continue;
+            if (pid > 0 && n != pid)
+                continue;
+            have_child = 1;
+            if (tasks[n].state == TASK_ZOMBIE) {
+                uint32_t st = tasks[n].status;
+                release(n);
+                irq_restore(flags);
+                if (status)
+                    *status = st;
+                return n;
+            }
+        }
+        if (!have_child || (options & WNOHANG)) {
+            irq_restore(flags);
+            return have_child ? 0 : -1;
+        }
+        tasks[current_task].state = TASK_WAITING;
+        reschedule();
+        irq_restore(flags);
+    }
+}
+
+/*
+ * 结束当前任务，切到下一个任务，不再返回。用户态程序出错或调用 exit 时由内核调用，
+ * status 是留给父进程的状态。
+ *   - 用户内存当场收回：用户栈区的页、页表和页目录。
+ *   - 自己的子进程成了孤儿，交给任务 0：没有人会再等它们，已经结束的当场收走，以后结束的也直接收走。
+ *   - 有父进程等着的，变成僵尸：内核栈和任务槽留着，父进程 waitpid 时取走状态再释放；父进程正在
+ *     waitpid 里睡着，就叫醒它。没有父进程的（内核建的任务、孤儿），内核栈也当场还掉。
+ * 此刻还在用这个页目录和内核栈，但中断关着，切走之前没有人会分配内存，这几页的内容不会被改掉；
+ * 切换时 CPU 把寄存器存进静态的 tss 数组，也不碰它们。
+ * Linux 0.11 的 do_exit() 也是先 free_page_tables()，再把子进程交给 init（任务 1），自己变成
+ * TASK_ZOMBIE，用 SIGCHLD 通知父进程；内核栈所在的那一页由父进程的 waitpid 调用 release() 释放。
+ */
+void sched_exit(uint32_t status)
 {
     struct task *t = &tasks[current_task];
 
     __asm__ volatile("cli");        /* 不再返回，切到的任务从自己的 TSS 装入 EFLAGS，中断状态随之恢复 */
-    t->state = TASK_UNUSED;
     if (t->page_dir != kernel_page_dir())
         free_page_dir(t->page_dir);
-    free_page(t->kstack);
-    t->page_dir = t->kstack = 0;
+    t->page_dir = 0;
+    for (int n = 1; n < NR_TASKS; n++) {
+        if (tasks[n].state != TASK_UNUSED && tasks[n].parent == current_task) {
+            tasks[n].parent = 0;
+            if (tasks[n].state == TASK_ZOMBIE)
+                release(n);
+        }
+    }
+    t->status = status;
+    if (t->parent == 0) {
+        free_page(t->kstack);
+        *t = (struct task){ .state = TASK_UNUSED };
+    } else {
+        t->state = TASK_ZOMBIE;
+        if (tasks[t->parent].state == TASK_WAITING)
+            tasks[t->parent].state = TASK_RUNNING;
+    }
     reschedule();
     for (;;)                        /* 不会执行到这里 */
         __asm__ volatile("hlt");

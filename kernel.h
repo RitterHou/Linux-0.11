@@ -74,6 +74,7 @@ void panic(const char *msg) __attribute__((noreturn));
 #define USER_STACK_TOP 0x40400000u
 void paging_init(void);
 int user_range_ok(uint32_t addr, uint32_t size);
+int user_write_ok(uint32_t addr, uint32_t size);
 int handle_page_fault(uint32_t addr, uint32_t error_code);
 uint32_t kernel_page_dir(void);
 uint32_t new_page_dir(void);
@@ -108,8 +109,10 @@ void schedule(void);
 void sched_sleep(uint32_t ticks);
 int current_pid(void);
 void task_write_char(char ch);
-void sched_exit_current(void);
+void sched_exit(uint32_t status) __attribute__((noreturn));
 int sched_fork(const struct interrupt_frame *frame);
+int sched_waitpid(int pid, uint32_t *status, int options);
+#define EXIT_KILLED 0x100           /* 被异常结束时留给父进程的状态：0x100 加异常号 */
 #define TASK_MESSAGE_ROW 7          /* 任务结束的消息写在第 7 行 */
 
 /* syscall.c：int 0x80 系统调用 */
