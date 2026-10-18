@@ -14,7 +14,7 @@
 extern volatile uint32_t timer_ticks;   /* 内核的变量，所在的页没有用户位 */
 #endif
 
-/* 与内核任务 A 的 task_main() 做同样的事：任务 2 写 B。 */
+/* 与内核任务 A 的 task_main() 做同样的事：任务 2 写 B，它 fork 出的任务 3 写 C。 */
 void user_main(void)
 {
 #if !defined(SELFTEST) || !SELFTEST_IN_USER(SELFTEST)
@@ -51,6 +51,23 @@ void user_main(void)
     exit(3);
 #elif SELFTEST == SELFTEST_USER_WILD_READ
     (void)*(volatile uint32_t *)0x50000000;     /* 不在栈区：内核不能补页，只能结束任务 B */
+#elif SELFTEST == SELFTEST_USER_FORK
+    /*
+     * fork 之后父子各改各的：子进程把栈上的 shared 改成 99，父进程看到的仍是 7。
+     * 子进程写 c 后 exit(5)；父进程等它写完，看自己的 shared 没变就写 p，再写出 fork 返回的任务号。
+     */
+    volatile int shared = 7;
+    int32_t pid = fork();
+    if (pid == 0) {
+        shared = 99;
+        write(1, shared == 99 ? "c" : "x", 1);
+        exit(5);
+    }
+    sleep(10);
+    write(1, shared == 7 ? "p" : "X", 1);
+    char digit = (char)('0' + pid);
+    write(1, &digit, 1);
+    exit(0);
 #elif SELFTEST == SELFTEST_ALL_EXIT
     write(1, "bye", 3);
     exit(2);
@@ -58,6 +75,11 @@ void user_main(void)
 #error "未知的用户态 SELFTEST"
 #endif
 
+    /*
+     * 复制出一个子进程（任务 3）。父子进程都从 fork 返回，接着往下走：
+     * 父进程写 B，子进程写 C。两者的栈一开始是同一批物理页，谁先写谁复制一份。
+     */
+    fork();
     char letter = (char)('A' + getpid() - 1);
 
     for (;;) {

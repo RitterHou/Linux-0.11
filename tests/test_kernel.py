@@ -281,11 +281,12 @@ def boot_ready(m):
 
 def test_boot_screen(m, elf):
     """启动后各行的输出"""
-    m.wait_for(lambda mm: mm.screen(1)[0] == "ABPKCVITUF", timeout=2, what="第 0 行的 ABPKCVITUF")
+    m.wait_for(lambda mm: mm.screen(1)[0] == "ABPKCVITUFW", timeout=2, what="第 0 行的 ABPKCVITUFW")
     rows = m.screen(9)
     check(rows[2] == "Hello from kmain() in C!", f"第 2 行不对：{rows[2]!r}")
-    check(rows[3] == "memory: 3835/3840 pages free  page faults: 1",
-          f"第 3 行应显示用掉了 5 页（A、B 的内核栈，B 的页目录、栈区页表和栈页）、补过 1 次缺页：{rows[3]!r}")
+    check(rows[3] == "memory: 3831/3840 pages free  page faults: 1  copy-on-write: 2",
+          f"第 3 行应显示用掉了 9 页（3 个内核栈，B 和 C 各自的页目录、栈区页表，原来的栈页和复制出的一页）、"
+          f"补过 1 次缺页、处理过 2 次写时复制：{rows[3]!r}")
     check(re.fullmatch(r"ticks: \d+( +idle: +\d+%)?", rows[4]) is not None, f"第 4 行不对：{rows[4]!r}")
     check(rows[5] == "paging: on, 0xC0000000 -> 0xB8000", f"第 5 行不对：{rows[5]!r}")
     check(rows[6].startswith("tasks: "), f"第 6 行不对：{rows[6]!r}")
@@ -453,7 +454,7 @@ def test_user_task(m, elf):
 
 def test_demand_paging(m, elf):
     """每个用户任务有自己的页目录；用户栈按需分配，只有任务 B 用到的栈顶那一页映射了物理页"""
-    m.wait_for(lambda mm: mm.screen(1)[0] == "ABPKCVITUF", timeout=2, what="第 0 行的 F")
+    m.wait_for(lambda mm: mm.screen(1)[0].startswith("ABPKCVITUF"), timeout=2, what="第 0 行的 F")
     table = symbols(elf)
     kernel_dir = table["page_directory"][0]
     cr3 = tss_u32(m, elf, 2, 28)
@@ -471,6 +472,22 @@ def test_demand_paging(m, elf):
     check(pte == phys | 7, f"页表最后一项应为 物理页 | 7（存在、可写、用户）：{pte:#x}")
     check(translate(m, cr3, top_page - 4096) is None, "栈顶下面那一页还没用到，不应映射")
     check(translate(m, cr3, USER_STACK_LOW) is None, "栈区底部不应映射")
+
+
+def test_fork_address_spaces(m, elf):
+    """fork 出的任务 3 有自己的页目录和内核栈；写过之后，父子的栈顶各自映射到不同的物理页"""
+    m.wait_for(lambda mm: mm.screen(1)[0] == "ABPKCVITUFW", timeout=2, what="第 0 行的 W")
+    parent, child = tss_u32(m, elf, 2, 28), tss_u32(m, elf, 3, 28)
+    check(child not in (0, parent, symbols(elf)["page_directory"][0]), f"任务 3 应有自己的页目录：CR3 = {child:#x}")
+    check(tss_u32(m, elf, 3, 4) not in (0, tss_u32(m, elf, 2, 4)), "任务 3 应有自己的内核栈")
+    top = USER_STACK_TOP - 4096
+    p, c = translate(m, parent, top), translate(m, child, top)
+    check(p is not None and c is not None and p != c, f"父子都写过栈之后，栈顶应映射到不同的物理页：{p}、{c}")
+    for cr3 in (parent, child):
+        pte = read_u32(m, (read_u32(m, cr3 + (USER_STACK_LOW >> 22) * 4) & ~0xFFF) + 1023 * 4)
+        check(pte & 2, f"写时复制之后，栈顶的页表项应已改回可写：{pte:#x}")
+    code = symbols(elf)["user_main"][0]
+    check(translate(m, parent, code) == translate(m, child, code) == code, "用户代码那一页父子共用，就是内核映像里那一页")
 
 
 def test_syscall_gate(m, elf):
@@ -513,17 +530,16 @@ def letters_per_tick(m, elf, seconds):
 
 
 def test_tasks_alternate(m, elf):
-    """任务写一个字母就去睡、把 CPU 让给对方：第 6 行 A、B 逐个交替，两个任务各每 2 个 tick 写一个"""
+    """任务写一个字母就去睡、把 CPU 让给别人：第 6 行 A、B、C 逐个轮流，三个任务各每 2 个 tick 写一个"""
     out = task_output(m)
-    check(set(out) <= {"A", "B"}, f"任务输出中只应有 A 和 B：{out!r}")
-    check("A" in out and "B" in out, f"两个任务都应有输出：{out!r}")
-    runs = re.findall(r"A+|B+", out)
-    # 一行 73 格是奇数，写满一圈后新旧字母的交界处会有一次 AA 或 BB
+    check(set(out) == {"A", "B", "C"}, f"任务输出中应正好有 A、B 和 fork 出的 C：{out!r}")
+    runs = re.findall(r"A+|B+|C+", out)
+    # 一行 73 格不是 3 的倍数，写满一圈后新旧字母的交界处会有一次两个相同的字母
     check(len(runs) >= 60 and max(len(r) for r in runs) <= 2,
-          f"A、B 应逐个交替（每个任务写一个字母就去睡），实际是 {out!r}")
+          f"A、B、C 应逐个轮流（每个任务写一个字母就去睡），实际是 {out!r}")
     rate, ticks = letters_per_tick(m, elf, 0.3)
-    check(ticks < OUTPUT_WIDTH, f"采样间隔 {ticks} 个 tick 太长，输出位置可能已经绕了一圈")
-    check(0.8 <= rate <= 1.2, f"两个任务各每 2 个 tick 写一个字母，合计应约 1 个/tick，实测 {rate:.2f}（{ticks} 个 tick）")
+    check(ticks < OUTPUT_WIDTH * 2 // 3, f"采样间隔 {ticks} 个 tick 太长，输出位置可能已经绕了一圈")
+    check(1.2 <= rate <= 1.8, f"三个任务各每 2 个 tick 写一个字母，合计应约 1.5 个/tick，实测 {rate:.2f}（{ticks} 个 tick）")
 
 
 def test_preemption(_m, _elf):
@@ -874,10 +890,25 @@ def test_deep_stack(_m, _elf):
         check("k" in task_output(m) and "x" not in task_output(m),
               f"write 读到栈区里没映射的页时内核应补上，返回 1（用户程序写 k）：{task_output(m)!r}")
         row3 = m.screen(4)[3]
-        match = re.fullmatch(r"memory: (\d+)/3840 pages free  page faults: (\d+)", row3)
+        match = re.fullmatch(r"memory: (\d+)/3840 pages free  page faults: (\d+)  copy-on-write: \d+", row3)
         check(match is not None, f"第 3 行不对：{row3!r}")
         check(int(match.group(2)) >= 5, f"5 页栈应各缺页一次：{row3!r}")
         check(match.group(1) == "3839", f"任务 B 结束后它的页应全部收回，只剩任务 A 的内核栈：{row3!r}")
+        check(not exception_screen(m)[0], f"不应出现异常面板：{exception_screen(m)[0]!r}")
+
+
+def test_fork_isolation(_m, _elf):
+    """fork 后子进程改栈上的变量，父进程看到的仍是原值；fork 在父进程返回 3、在子进程返回 0；结束后内存全部收回"""
+    d = build_selftest("USER_FORK")
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        m.wait_for(lambda mm: message_row(mm) == "task 2 exited with code 0", what="父进程的结束消息")
+        out = task_output(m)
+        check("c" in out and "x" not in out, f"子进程应看到自己改过的值（写 c）：{out!r}")
+        check("p" in out and "X" not in out, f"父进程的变量不应被子进程改掉（写 p）：{out!r}")
+        check(out.index("c") < out.index("p"), f"父进程等了 10 个 tick，子进程应先写：{out!r}")
+        check("p3" in out, f"fork 在父进程中应返回子进程的任务号 3：{out!r}")
+        m.wait_for(lambda mm: mm.screen(4)[3].startswith("memory: 3839/3840 pages free"), timeout=2,
+                   what="父子进程的内存全部收回（只剩任务 A 的内核栈）")
         check(not exception_screen(m)[0], f"不应出现异常面板：{exception_screen(m)[0]!r}")
 
 
@@ -895,14 +926,14 @@ def test_wild_read(_m, _elf):
 # 前几项共用一台正常启动的虚拟机；其余各自启动自检内核。
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_console_scroll,
-                test_idle_in_hlt, test_demand_paging, test_syscall_gate, test_user_setup, test_user_task,
+                test_idle_in_hlt, test_demand_paging, test_fork_address_spaces, test_syscall_gate, test_user_setup, test_user_task,
                 test_tasks_alternate]
 SEPARATE_TESTS = [test_syscalls, test_page_alloc, test_double_free, test_early_key, test_keyboard_edge_cases, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,
                   test_big_kernel, test_user_write_kernel, test_user_privileged,
                   test_user_bad_pointer, test_user_exit, test_all_tasks_exit,
                   test_nmi_in_user_mode, test_user_write_code, test_preemption,
-                  test_deep_stack, test_wild_read]
+                  test_deep_stack, test_wild_read, test_fork_isolation]
 
 
 def main():
