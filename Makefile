@@ -30,7 +30,7 @@ KERNEL_OBJS := $(addprefix $(BUILD)/, entry.o isr.o kernel.o vga.o gdt.o \
 	interrupt.o paging.o mem.o swap.o hd.o buffer.o fs.o file.o pipe.o exec.o tty.o serial.o timer.o sched.o syscall.o keyboard.o selftest.o user.o string.o)
 KERNEL_HEADERS := kernel.h io.h syscall.h selftest.h fs.h
 
-.PHONY: all run test clean
+.PHONY: all run test clean web web-files
 
 all: $(BUILD)/floppy.img $(BUILD)/kernel.elf $(BUILD)/hd.img $(BUILD)/hdb.img
 
@@ -116,6 +116,35 @@ run: $(BUILD)/floppy.img $(BUILD)/hd.img $(BUILD)/hdb.img
 		-drive file=$(BUILD)/hdb.img,format=raw,if=ide,index=1 \
 		-boot order=a -display $(QEMU_DISPLAY) \
 		-nic none -chardev stdio,id=com1,signal=off -serial chardev:com1 -monitor none -no-reboot $(QEMU_FLAGS)
+
+# 浏览器里的真机：v86（JavaScript 和 WebAssembly 写的 x86 模拟器，BSD-2 许可）加载 build/ 下的三个镜像开机。
+# make web-files 把 web/index.html、介绍网页 docs/tour.html、镜像和 v86 放进 build/web/；make web 再起一个本地服务器。
+# v86 用固定的版本：libv86.js 和 v86.wasm 取自 npm 上的 v86 包，BIOS 取自同一个提交的 GitHub 仓库，下载后核对 web/v86.sha256。
+V86_VERSION := 0.5.470
+V86_COMMIT := 6db8b157974dbaf1b54d2c2ec12dd71ddc1891e9
+WEB_PORT ?= 8000
+WEB := $(BUILD)/web
+V86_FILES := $(addprefix $(WEB)/v86/, libv86.js v86.wasm seabios.bin vgabios.bin)
+
+$(WEB)/v86/libv86.js:
+	mkdir -p $(WEB)/v86
+	curl -fsSL https://registry.npmjs.org/v86/-/v86-$(V86_VERSION).tgz | tar -xzf - -C $(WEB)/v86 --strip-components 2 package/build/libv86.js package/build/v86.wasm
+	cd $(WEB)/v86 && shasum -a 256 -c $(CURDIR)/web/v86.sha256 --ignore-missing || { rm -f libv86.js v86.wasm; exit 1; }
+
+$(WEB)/v86/v86.wasm: $(WEB)/v86/libv86.js
+
+$(WEB)/v86/%.bin:
+	mkdir -p $(WEB)/v86
+	curl -fsSL -o $@ https://raw.githubusercontent.com/copy/v86/$(V86_COMMIT)/bios/$*.bin
+	cd $(WEB)/v86 && shasum -a 256 -c $(CURDIR)/web/v86.sha256 --ignore-missing || { rm -f $*.bin; exit 1; }
+
+web-files: $(BUILD)/floppy.img $(BUILD)/hd.img $(BUILD)/hdb.img $(V86_FILES) web/index.html docs/tour.html
+	cp web/index.html docs/tour.html $(WEB)/
+	cp $(BUILD)/floppy.img $(BUILD)/hd.img $(BUILD)/hdb.img $(WEB)/
+
+web: web-files
+	@echo "在浏览器里打开 http://localhost:$(WEB_PORT)/ （按 Ctrl+C 停止）"
+	$(PYTHON) -m http.server $(WEB_PORT) --bind 127.0.0.1 --directory $(WEB)
 
 # 在无头 QEMU 中运行全部测试；自检内核由测试脚本按需构建到 build/selftest/ 下。
 test: all

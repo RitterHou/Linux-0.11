@@ -2,7 +2,7 @@
 
 这是 `learning` 分支上的独立实验。`main` 分支保留 Linux 0.11 原始源码。
 
-`docs/tour.html` 是一个可交互的介绍网页：启动的八个阶段、中断时栈的变化、分页的地址翻译、任务切换、系统调用、fork、文件系统、shell、管道、写文件和信号都配有一步步演示的动画，头图里还有一个能敲命令的模拟 shell，用浏览器直接打开即可。页面里的地址、i 节点号、块号都取自真实的构建：改了内核或用户程序之后，先 `make`，再运行 `python3 tools/tour_data.py docs/tour.html` 回填。
+`docs/tour.html` 是一个可交互的介绍网页：启动、中断、分页、任务切换、系统调用、fork、文件系统、shell、管道、写文件、信号、作业控制、权限和交换都配有一步步演示的动画，头图里还有一个能敲命令的模拟 shell（JavaScript 写的模型，照着 `user/sh.c`），用浏览器直接打开即可。想看真内核在浏览器里开机，用 `make web`，见下文“在浏览器里运行”。页面里的地址、i 节点号、块号都取自真实的构建：改了内核或用户程序之后，先 `make`，再运行 `python3 tools/tour_data.py docs/tour.html` 回填。
 
 ## 运行
 
@@ -45,6 +45,20 @@ QEMU 打开窗口后应看到：
 - `make clean`：删除生成的 `build/` 目录。
 - 默认使用 macOS 的 Cocoa 窗口。其他系统可按 QEMU 支持情况设置，例如 `make run QEMU_DISPLAY=gtk`。
 - Apple Silicon 本机是 ARM，QEMU 使用 TCG 模拟一台 x86 PC。
+
+## 在浏览器里运行
+
+```sh
+make web
+```
+
+然后用浏览器打开它打印的地址（默认 http://localhost:8000/，端口用 `WEB_PORT=8080 make web` 改）。这一页（`web/index.html`）用 v86 运行真正的内核：v86 是一个用 JavaScript 和 WebAssembly 写的 x86 模拟器，加载的就是 `make` 生成的 `floppy.img`、`hd.img`、`hdb.img`，从软盘的第 0 个扇区开始执行。左边是控制台（点一下屏幕，键盘就交给内核），右边是串口 COM1 上的 login（user / user 或 root / root）。第 0 行每出现一个里程碑字母，屏幕下面就点亮一格。`build/web/` 里还放着介绍网页 `tour.html`，整个目录可以拷给别人，用任何静态网页服务器打开。
+
+- `make web-files` 只准备 `build/web/`，不起服务器：镜像、`web/index.html`、`docs/tour.html`，以及 v86。v86 用固定的版本：`libv86.js` 和 `v86.wasm` 取自 npm 上的 v86 0.5.470（BSD-2 许可），SeaBIOS 和 VGA BIOS 取自 v86 仓库同一个提交（6db8b15）的 `bios/`。第一次要联网下载，下载后逐个核对 `web/v86.sha256`，对不上就删掉、报错。
+- 要从服务器打开，不能双击 html 文件：浏览器不让 `file://` 页面读取镜像。
+- 写硬盘只写在浏览器的内存里，重新开机就回到 `make` 生成时的样子。
+- 硬件是 v86 模拟的，第 1 行的硬盘型号是 `v86 ATA HD`；CPU 和定时器的节奏与 QEMU 不同，数字会略有出入。
+- 新的用户任务都先在特权级 0 起步，再用 `iretd` 进入用户态（见下文“fork 与写时复制”）：v86 在硬件任务切换的中途就把特权级换成 3，直接切进用户态的 TSS 会让它停下。
 
 ## 自动化测试
 
@@ -837,6 +851,7 @@ shell 运行 `ls /bin | grep e | wc` 时，先建第一个管道，fork 出 ls�
 | `tools/mkshadow.py` | 生成 `/etc/shadow`：默认密码的散列 | |
 | `tools/mkbig.py` | 生成测试用的 600 KB 大文件 `/big` | 无 |
 | `tools/tour_data.py` | 把最新构建出的地址、i 节点号、块号和文件系统的内容回填进 `docs/tour.html` | 无 |
+| `web/index.html` · `web/v86.sha256` | 浏览器里的真机：用 v86 运行 `build/` 下的镜像，`make web` 把它放进 `build/web/` 再起一个本地服务器；v86 各个文件的 sha256 | 无 |
 | `keyboard.c` | 键盘扫描码转字符，支持 Shift 和 Caps Lock，交给终端 | `kernel/chr_drv/keyboard.S` |
 | `tty.c` | 终端：控制台和串口各一个，一行的编辑、回显（可以关掉）、退格、Ctrl+D、Ctrl+C，读一行，写，`ioctl` | `kernel/chr_drv/tty_io.c`、`tty_ioctl.c` |
 | `serial.c` | 串口 COM1：8250/16550 UART 的初始化、收字符的中断、发字符 | `kernel/chr_drv/serial.c`、`rs_io.s` |
