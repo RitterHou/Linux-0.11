@@ -44,6 +44,7 @@
 #define SELFTEST_USER_TIME         40   /* 时间：日期换算、time 往前走、文件和目录的修改时间、utime */
 #define SELFTEST_USER_FCNTL        41   /* dup2、fcntl、close-on-exec */
 #define SELFTEST_USER_NICE         42   /* nice 和 times：nice 值、继承、按 nice 分 CPU、utime 和 stime、cutime */
+#define SELFTEST_USER_PERM         43   /* 用户和权限：用户号、读写执行、新建和删除、粘滞位、chmod、chown、kill、setuid 程序 */
 
 #define SELFTEST_IN_USER(n) ((n) >= 20)
 

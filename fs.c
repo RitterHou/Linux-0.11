@@ -154,6 +154,24 @@ int32_t inode_read(const struct minix_inode *ip, uint32_t pos, void *dst, uint32
     return (int32_t)done;
 }
 
+/*
+ * 当前任务对 i 节点 ip 有没有 mask（MAY_READ、MAY_WRITE、MAY_EXEC 的组合）这几样权限：有效用户号是文件的主人，
+ * 看主人那三位；不是主人、有效组号是文件的组，看组那三位；都不是，看其他人那三位。只看一组：主人自己去掉了写权限，
+ * 就算其他人能写，主人也不能写。root 什么都可以，只有执行例外：普通文件一个执行位都没有，root 也不能执行
+ * （目录的“执行”是在里面查找，root 照样可以）。Linux 0.11 的 permission() 一样，root 执行的例外写在 do_execve() 里。
+ */
+int permission(const struct minix_inode *ip, int mask)
+{
+    uint32_t mode = ip->mode;
+    if (suser())
+        return !(mask & MAY_EXEC) || (mode & S_IFMT) == S_IFDIR || (mode & 0111);
+    if (sched_id(ID_EUID) == ip->uid)
+        mode >>= 6;
+    else if (sched_id(ID_EGID) == ip->gid)
+        mode >>= 3;
+    return (mode & (uint32_t)mask & 7) == (uint32_t)mask;
+}
+
 /* 路径是不是以 / 结尾（根目录 / 自己不算）。 */
 static int trailing_slash(const char *path)
 {
@@ -204,8 +222,8 @@ int namei(const char *path, uint32_t *ino, struct minix_inode *ip)
         int len = 0;
         while (p[len] && p[len] != '/')
             len++;
-        if (len > NAME_LEN)
-            return -1;
+        if (len > NAME_LEN || (ip->mode & S_IFMT) != S_IFDIR || !permission(ip, MAY_EXEC))
+            return -1;              /* 在目录里查找要有它的执行权限：/tmp/priv 是 0700，别人连 /tmp/priv/f 都 stat 不到 */
         n = lookup(ip, p, len);
         if (n == 0 || read_inode(n, ip) < 0)
             return -1;
@@ -565,6 +583,7 @@ static struct m_inode *dir_of(const char *path, const char **name, int *len)
 /*
  * 新建一个文件或目录，返回它的 i 节点（iget 过）。已经存在、目录不存在、磁盘或 i 节点用完了返回 0。
  * 以 / 结尾的路径只能新建目录：open("/tmp/a/", O_CREAT) 不会建出一个叫 a 的普通文件。
+ * 要有所在目录的写和执行权限；新文件的主人和组是当前任务的有效用户号和有效组号，与 Linux 0.11 相同。
  */
 static struct m_inode *create(const char *path, uint16_t mode)
 {
@@ -575,7 +594,7 @@ static struct m_inode *create(const char *path, uint16_t mode)
 
     if (!dir)
         return 0;
-    if (find_entry(dir, name, len, &where)) {
+    if (!permission(&dir->d, MAY_WRITE | MAY_EXEC) || find_entry(dir, name, len, &where)) {
         iput(dir);
         return 0;
     }
@@ -587,7 +606,8 @@ static struct m_inode *create(const char *path, uint16_t mode)
         iput(dir);
         return 0;
     }
-    ip->d = (struct minix_inode){ .mode = mode, .nlinks = 1, .time = current_time() };
+    ip->d = (struct minix_inode){ .mode = mode, .nlinks = 1, .time = current_time(),
+                                  .uid = (uint16_t)sched_id(ID_EUID), .gid = (uint8_t)sched_id(ID_EGID) };
     write_inode(ip);
     if (add_entry(dir, name, len, ino) < 0) {
         ip->d.nlinks = 0;
@@ -650,6 +670,8 @@ static int dir_empty(struct m_inode *dir)
  * unlink 和 rmdir：从目录里删掉 path 那一项，被删的 i 节点链接数减一。
  * 文件还开着也可以删：目录里看不见了，打开它的程序还能接着读写，最后一个关掉时才真正收回（iput）。
  * want_dir 为 1 是 rmdir：只删空目录，父目录的链接数也减一（它少了一个 ..）。
+ * 要有所在目录的写和执行权限，不用有文件本身的：删的是目录里的一项。目录有粘滞位（/tmp）时，还得是文件的主人、
+ * 目录的主人或 root，不然谁都能删掉别人放在 /tmp 里的文件。Linux 0.11 没有粘滞位。
  */
 static int remove_entry(const char *path, int want_dir)
 {
@@ -662,8 +684,13 @@ static int remove_entry(const char *path, int want_dir)
         return -1;
     uint32_t ino = (len == 1 && name[0] == '.') || (len == 2 && name[0] == '.' && name[1] == '.')
                        ? 0 : find_entry(dir, name, len, &where);
-    struct m_inode *ip = ino && ino != ENTRY_ERROR ? iget(ino) : 0;
+    struct m_inode *ip = ino && ino != ENTRY_ERROR && permission(&dir->d, MAY_WRITE | MAY_EXEC) ? iget(ino) : 0;
     int is_dir = ip && (ip->d.mode & S_IFMT) == S_IFDIR;
+    uint32_t euid = sched_id(ID_EUID);
+    if (ip && (dir->d.mode & S_ISVTX) && !suser() && euid != ip->d.uid && euid != dir->d.uid) {
+        iput(ip);
+        ip = 0;
+    }
     /* unlink("/tmp/a/")：末尾的 / 说的是目录，a 却是文件，也不删 */
     if (!ip || is_dir != want_dir || (!is_dir && trailing_slash(path)) || (is_dir && !dir_empty(ip))) {
         iput(ip);
@@ -690,13 +717,18 @@ int fs_unlink(const char *path)
     return remove_entry(path, 0);
 }
 
-/* utime：把文件的修改时间设成 t，t 为 0 就是现在。Linux 0.11 的 sys_utime() 同时设访问时间，Minix v1 的 i 节点只有一个时间。 */
+/*
+ * utime：把文件的修改时间设成 t，t 为 0 就是现在。Linux 0.11 的 sys_utime() 同时设访问时间，Minix v1 的 i 节点只有一个时间。
+ * 设成现在，有写权限就行（touch 别人允许你写的文件）；设成任意时间，得是主人或 root，与 POSIX 相同。Linux 0.11 不查。
+ */
 int fs_utime(const char *path, uint32_t t)
 {
     uint32_t ino;
     struct minix_inode d;
 
     if (namei(path, &ino, &d) < 0)
+        return -1;
+    if (!suser() && sched_id(ID_EUID) != d.uid && (t || !permission(&d, MAY_WRITE)))
         return -1;
     struct m_inode *ip = iget(ino);
     if (!ip)
@@ -707,14 +739,19 @@ int fs_utime(const char *path, uint32_t t)
     return 0;
 }
 
-/* chmod：改文件的权限位（低 12 位），类型不变。Linux 0.11 的 sys_chmod() 也是这样，它还要检查是不是文件的主人。 */
+/*
+ * chmod：改文件的权限位（低 12 位），类型不变。只有文件的主人和 root 能改，与 Linux 0.11 的 sys_chmod() 相同。
+ * 不是 root、自己又不在文件的组里，setgid 位设不上（POSIX 的规定）：不然能做出一个让别人以那个组运行的程序。
+ */
 int fs_chmod(const char *path, uint32_t mode)
 {
     uint32_t ino;
     struct minix_inode d;
 
-    if (namei(path, &ino, &d) < 0)
+    if (namei(path, &ino, &d) < 0 || (!suser() && sched_id(ID_EUID) != d.uid))
         return -1;
+    if (!suser() && sched_id(ID_EGID) != d.gid)
+        mode &= ~(uint32_t)S_ISGID;
     struct m_inode *ip = iget(ino);
     if (!ip)
         return -1;
@@ -742,6 +779,10 @@ int fs_link(const char *oldpath, const char *newpath)
     struct m_inode *dir = trailing_slash(newpath) ? 0 : dir_of(newpath, &name, &len);
     if (!dir)
         return -1;
+    if (!permission(&dir->d, MAY_WRITE | MAY_EXEC)) {    /* 新名字所在的目录要能写 */
+        iput(dir);
+        return -1;
+    }
     struct m_inode *ip = find_entry(dir, name, len, &where) ? 0 : iget(ino);
     if (!ip || ip->d.nlinks >= LINK_MAX || add_entry(dir, name, len, ino) < 0) {
         iput(ip);
@@ -752,6 +793,32 @@ int fs_link(const char *oldpath, const char *newpath)
     write_inode(ip);
     iput(ip);
     iput(dir);
+    return 0;
+}
+
+/*
+ * chown：改文件的主人和组，-1（0xFFFFFFFF）表示这一样不改。只有 root 能改，与 Linux 0.11 的 sys_chown() 相同：
+ * 要是谁都能把文件送给别人，配额和 setuid 程序都没法管。普通文件改了主人，setuid、setgid 位都清掉，
+ * 免得一个 setuid 程序换了主人以后，以新主人的身份运行。Minix v1 的组号只有一个字节，大于 255 不行。
+ */
+int fs_chown(const char *path, uint32_t uid, uint32_t gid)
+{
+    uint32_t ino;
+    struct minix_inode d;
+
+    if (namei(path, &ino, &d) < 0 || !suser() || (uid != 0xFFFFFFFF && uid > 0xFFFF) || (gid != 0xFFFFFFFF && gid > 0xFF))
+        return -1;
+    struct m_inode *ip = iget(ino);
+    if (!ip)
+        return -1;
+    if (uid != 0xFFFFFFFF)
+        ip->d.uid = (uint16_t)uid;
+    if (gid != 0xFFFFFFFF)
+        ip->d.gid = (uint8_t)gid;
+    if ((ip->d.mode & S_IFMT) == S_IFREG)
+        ip->d.mode &= (uint16_t)~(S_ISUID | S_ISGID);
+    write_inode(ip);
+    iput(ip);
     return 0;
 }
 

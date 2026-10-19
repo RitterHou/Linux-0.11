@@ -1,9 +1,12 @@
 """把一个目录打包成 Minix v1 文件系统镜像，格式与 Linux 0.11 使用的相同（include/linux/fs.h）。
 
-Usage: python3 tools/mkfs.py <image> <dir> [--chr 路径=主设备号,次设备号 ...]
+Usage: python3 tools/mkfs.py <image> <dir> [--chr 路径=主设备号,次设备号 ...] [--own 路径=主人,组,权限 ...]
 
 --chr 在镜像里加一个字符设备文件，例如 --chr /dev/tty0=4,0：普通用户在 macOS 上建不了设备文件，
 所以不放在目录里，由这里直接写进镜像。设备号存在 i 节点的第一个区块号里，与 Linux 0.11 相同。
+--own 设一个文件的主人、组和权限（八进制，可以带 setuid、setgid、粘滞位），例如 --own /tmp=0,0,1777：
+目录里的文件在宿主机上都是自己的，权限也不一定是想要的。没写到的文件主人和组都是 0（root），
+目录 0755，有执行权限的文件 0755，别的 0644。
 
 布局（块大小 1024 字节）：
   块 0          引导块，这里写一行说明文字
@@ -34,13 +37,18 @@ def ceil_div(a, b):
 def main():
     image, src = sys.argv[1], sys.argv[2]
     devices = {}                        # 镜像里的路径（不以 / 开头）-> 设备号
+    owners = {}                         # 镜像里的路径 -> (主人, 组, 权限)
     args = sys.argv[3:]
     while args:
-        if args[0] != "--chr" or len(args) < 2:
+        if args[0] not in ("--chr", "--own") or len(args) < 2:
             sys.exit(__doc__)
         path, numbers = args[1].split("=")
-        major, minor = (int(x) for x in numbers.split(","))
-        devices[path.strip("/")] = major << 8 | minor
+        if args[0] == "--chr":
+            major, minor = (int(x) for x in numbers.split(","))
+            devices[path.strip("/")] = major << 8 | minor
+        else:
+            uid, gid, perm = numbers.split(",")
+            owners[path.strip("/")] = (int(uid), int(gid), int(perm, 8))
         args = args[2:]
     nzones = NZONES
     imap_blocks = ceil_div(NINODES + 1, BLOCK * 8)
@@ -112,6 +120,9 @@ def main():
         sys.exit("文件太多，i 节点不够")
     ino_of = {path: i + 1 for i, path in enumerate(order)}
 
+    for path in owners:
+        if path not in tree:
+            sys.exit(f"--own 的文件不存在：/{path}")
     inodes = {}
     now = int(time.time())
     for path in order:
@@ -135,7 +146,11 @@ def main():
             nlinks, zones = 1, store(content)
         # 修改时间：普通文件取源文件的，目录和设备文件取打包的时刻
         mtime = int(os.stat(kind).st_mtime) if isinstance(kind, str) and kind != "dir" else now
-        inodes[ino_of[path]] = struct.pack("<HHIIBB9H", mode, 0, len(content), mtime, 0, nlinks, *zones)
+        uid, gid = 0, 0
+        if path in owners:
+            uid, gid, perm = owners[path]
+            mode = (mode & 0o170000) | perm
+        inodes[ino_of[path]] = struct.pack("<HHIIBB9H", mode, uid, len(content), mtime, gid, nlinks, *zones)
     nodes = order
 
     # 位图：第 0 位保留不用，置 1；超出范围的位也置 1，免得被当成空闲

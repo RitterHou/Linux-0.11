@@ -3,7 +3,7 @@
  * 16 字节的目录项（2 字节 i 节点号加 14 字节名字），直接 read 出来；大小和类型再用 stat 去问。
  * 早年的 Unix 的 ls 也是这样直接读目录文件。
  * -l 换一种长格式：类型和权限（rwx 各三位：主人、同组、别人）、链接数、主人、组、大小、修改时间（UTC）、名字，
- * 和 Unix 的 ls -l 差不多。
+ * 和 Unix 的 ls -l 差不多。主人和组直接写号码（像 ls -n）；setuid、setgid、粘滞位写成 s、t，例如 /bin/su 是 -rwsr-xr-x。
  */
 #include "ulib.h"
 
@@ -15,6 +15,13 @@ static void print_mode(uint16_t mode)
     for (int i = 0; i < 9; i++)
         if (mode & (0400 >> i))
             s[1 + i] = "rwx"[i % 3];
+    /* setuid、setgid、粘滞位写在三个 x 的位置上：有 x 是小写的 s、t，没有 x 是大写的 */
+    if (mode & S_ISUID)
+        s[3] = s[3] == 'x' ? 's' : 'S';
+    if (mode & S_ISGID)
+        s[6] = s[6] == 'x' ? 's' : 'S';
+    if (mode & S_ISVTX)
+        s[9] = s[9] == 'x' ? 't' : 'T';
     print(s);
 }
 

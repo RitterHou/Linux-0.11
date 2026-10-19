@@ -21,6 +21,19 @@ void print_width(uint32_t n, uint32_t width, char pad);   /* 右对齐到 width 
 void print_int(int32_t n);          /* 有符号的十进制数：-5 */
 void write_ticks(int32_t fd, uint32_t ticks);   /* tick 数写成秒，两位小数：123 写成 1.23 */
 void print_time(uint32_t t, int seconds);   /* 2026-10-19 05:12（seconds 为 1 时再加 :33），UTC */
+/*
+ * /etc/passwd 的一行是 名字:x:用户号:组号:说明:家目录:shell，谁都能读；密码不放在这里（x），放在只有 root 能读的
+ * /etc/shadow 里。/etc/group 的一行是 组名:x:组号:成员。找到返回 1，找不到返回 0。
+ */
+struct passwd {
+    char name[16];
+    uint32_t uid, gid;
+    char home[64], shell[64];
+};
+int getpwnam(const char *name, struct passwd *pw);
+int getpwuid(uint32_t uid, struct passwd *pw);
+int getgrnam(const char *name, uint32_t *gid);
+int getgrgid(uint32_t gid, char *name, uint32_t size);
 void *sbrk(int32_t increment);      /* 把堆往上推 increment 个字节，返回原来的末尾；失败返回 (void *)-1 */
 void *malloc(uint32_t n);           /* 从堆上要 n 个字节，要不到返回 0 */
 void free(void *p);

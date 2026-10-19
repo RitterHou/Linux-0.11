@@ -67,7 +67,7 @@ $(BUILD)/floppy.img: $(BUILD)/boot.bin $(BUILD)/loader.bin $(BUILD)/kernel.bin M
 	dd if=$(BUILD)/kernel.bin of=$@ bs=512 seek=2 conv=notrunc
 
 # 用户程序：每个 user/名称.c 和 user/ulib.c 链接成 build/user/名称.elf，装进硬盘的 /bin/名称。
-USER_PROGS := sh ls cat echo ps wc grep sort rm ln mv mkdir rmdir chmod touch df sync pwd date kill sleep nice hello check letter
+USER_PROGS := sh ls cat echo ps wc grep sort rm ln mv mkdir rmdir chmod chown touch df sync pwd date kill sleep nice id hello check letter
 USER_ELFS := $(addprefix $(BUILD)/user/, $(addsuffix .elf, $(USER_PROGS)))
 
 $(BUILD)/user:
@@ -84,16 +84,17 @@ $(USER_ELFS): $(BUILD)/user/%.elf: $(BUILD)/user/%.o $(BUILD)/user/ulib.o user/u
 
 # 硬盘镜像：接在主 IDE 通道上，是一个 Minix v1 文件系统，内容是 rootfs/ 目录、
 # /bin 下的用户程序，测试用的 600 KB 大文件 /big，以及两个终端设备文件：
-# /dev/tty0 是控制台（第 8～18 行），/dev/tty1 是第 6 行。
+# /dev/tty0 是控制台（第 8～18 行），/dev/tty1 是第 6 行。/tmp 谁都能写（有粘滞位），/home/user 是用户 user（100）的家目录。
 ROOTFS_FILES := $(shell find rootfs -type f)
 
 $(BUILD)/hd.img: tools/mkfs.py tools/mkbig.py $(ROOTFS_FILES) $(USER_ELFS) | $(BUILD)
 	rm -rf $(BUILD)/rootfs
 	cp -R rootfs $(BUILD)/rootfs
-	mkdir -p $(BUILD)/rootfs/bin $(BUILD)/rootfs/tmp
+	mkdir -p $(BUILD)/rootfs/bin $(BUILD)/rootfs/tmp $(BUILD)/rootfs/home/user
 	for p in $(USER_PROGS); do cp $(BUILD)/user/$$p.elf $(BUILD)/rootfs/bin/$$p; done
 	$(PYTHON) tools/mkbig.py $(BUILD)/rootfs/big
-	$(PYTHON) tools/mkfs.py $@ $(BUILD)/rootfs --chr /dev/tty0=4,0 --chr /dev/tty1=4,1
+	$(PYTHON) tools/mkfs.py $@ $(BUILD)/rootfs --chr /dev/tty0=4,0 --chr /dev/tty1=4,1 \
+		--own /tmp=0,0,1777 --own /home/user=100,100,755
 
 run: $(BUILD)/floppy.img $(BUILD)/hd.img
 	$(QEMU) -name "Two-stage boot - C kernel" \

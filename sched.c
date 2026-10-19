@@ -90,6 +90,8 @@ struct task {
     int priority;                   /* 每一轮补多少个 tick：DEF_PRIORITY - nice，1～40。fork 继承，exec 保留 */
     uint32_t utime, stime;          /* 在用户态、内核态运行了多少个 tick */
     uint32_t cutime, cstime;        /* waitpid 收走的子进程（连同它们收走的子进程）用了多少 */
+    uint16_t uid, euid, suid;       /* 实际、有效、保存的用户号：内核建的任务都是 0（root）。fork 继承 */
+    uint16_t gid, egid, sgid;       /* 组号，同上 */
 };
 
 static struct tss tss[NR_TASKS];
@@ -169,6 +171,7 @@ int sched_taskinfo(int pid, struct taskinfo *info)
         return -1;
     info->state = t.state;
     info->parent = t.parent;
+    info->uid = t.uid;
     info->nice = DEF_PRIORITY - t.priority;
     info->priority = t.priority;
     info->ticks = t.utime + t.stime;
@@ -181,11 +184,14 @@ int sched_taskinfo(int pid, struct taskinfo *info)
  * nice 系统调用：自己的 nice 值加上 inc（可以是负数），限制在 -20～19，返回新的 nice 值。
  * nice 越大越谦让：每一轮补的 tick（priority = 20 - nice）越少。这一轮剩下的 counter 不动，下一轮才按新的补。
  * Linux 0.11 的 sys_nice() 直接从 priority 里减掉 inc（减完还大于 0 才减），返回 0；
- * 返回新的 nice 值是 POSIX 的规定。谁都能调低自己的 nice 值（多要 CPU）：还没有用户，下一步才限制只有 root 可以。
+ * 返回新的 nice 值是 POSIX 的规定。只有 root 能调低 nice 值（多要 CPU），别人这样做返回 -1，什么也不改：
+ * -1 也可能是新的 nice 值，所以调用者要用 nice(0) 再看一眼。Linux 0.11 不查，谁都能调高自己的优先级。
  */
 int sched_nice(int inc)
 {
     struct task *t = &tasks[current_task];
+    if (inc < 0 && !suser())
+        return -1;
     if (inc > NICE_MAX - NICE_MIN)  /* 先限制一下，加起来才不会溢出 */
         inc = NICE_MAX - NICE_MIN;
     if (inc < NICE_MIN - NICE_MAX)
@@ -194,6 +200,68 @@ int sched_nice(int inc)
     nice = nice < NICE_MIN ? NICE_MIN : nice > NICE_MAX ? NICE_MAX : nice;
     t->priority = DEF_PRIORITY - nice;
     return nice;
+}
+
+/* 当前任务的用户号或组号：which 是 ID_UID 等。 */
+uint32_t sched_id(int which)
+{
+    struct task *t = &tasks[current_task];
+    return which == ID_UID ? t->uid : which == ID_EUID ? t->euid : which == ID_GID ? t->gid : t->egid;
+}
+
+/* 有效用户号是 0：root 做什么都不查权限。Linux 0.11 的 suser() 也是这样。 */
+int suser(void)
+{
+    return tasks[current_task].euid == 0;
+}
+
+/*
+ * setuid：有效用户号是 root 的，把实际、有效、保存的三个用户号都换成 uid，从此再也变不回 root（su、login 就这样换成别人）；
+ * 不是 root 的，只能把有效用户号换成实际的或保存的那一个。按 POSIX 的规定。
+ * Linux 0.11 的 sys_setuid() 是 setreuid(uid, uid)，没有保存的用户号；它只在 uid > 0 时才改，setuid(0) 什么也不做。
+ */
+int sched_setuid(uint32_t uid)
+{
+    struct task *t = &tasks[current_task];
+    if (uid > 0xFFFF)
+        return -1;
+    if (t->euid == 0)
+        t->uid = t->euid = t->suid = (uint16_t)uid;
+    else if (uid == t->uid || uid == t->suid)
+        t->euid = (uint16_t)uid;
+    else
+        return -1;
+    return 0;
+}
+
+/* setgid：同 setuid，看的也是有效用户号是不是 root。 */
+int sched_setgid(uint32_t gid)
+{
+    struct task *t = &tasks[current_task];
+    if (gid > 0xFF)                 /* Minix v1 的 i 节点里组号只有一个字节 */
+        return -1;
+    if (t->euid == 0)
+        t->gid = t->egid = t->sgid = (uint16_t)gid;
+    else if (gid == t->gid || gid == t->sgid)
+        t->egid = (uint16_t)gid;
+    else
+        return -1;
+    return 0;
+}
+
+/*
+ * exec 换上新程序时：程序文件有 setuid 位，有效用户号换成文件的主人；有 setgid 位，有效组号换成文件的组。
+ * 然后把有效的记成保存的：程序可以先换回实际的用户号做事，需要时再换回来。Linux 0.11 的 do_execve() 也这样设 euid、egid。
+ */
+void sched_exec_ids(int set_uid, uint32_t uid, int set_gid, uint32_t gid)
+{
+    struct task *t = &tasks[current_task];
+    if (set_uid)
+        t->euid = (uint16_t)uid;
+    if (set_gid)
+        t->egid = (uint16_t)gid;
+    t->suid = t->euid;
+    t->sgid = t->egid;
 }
 
 /* times 系统调用：自己和收走的子进程用了多少 CPU 时间，返回开机以来的 tick 数。Linux 0.11 的 sys_times() 也返回 jiffies。 */
@@ -498,26 +566,37 @@ static void send_signal(int n, int sig)
 }
 
 /*
+ * 当前任务能不能给任务 n 发信号：root 能给谁都发；别人要自己的实际或有效用户号，等于对方的实际或保存的用户号。
+ * 所以普通用户能结束自己运行的 su（实际用户号是自己），结束不了 root 的程序。按 POSIX 的规定；
+ * Linux 0.11 的 send_sig() 只比两边的有效用户号。终端发的 Ctrl+C 不经过这里，不查。
+ */
+static int may_signal(int n)
+{
+    const struct task *me = &tasks[current_task], *t = &tasks[n];
+    return me->euid == 0 || me->uid == t->uid || me->uid == t->suid || me->euid == t->uid || me->euid == t->suid;
+}
+
+/*
  * kill 系统调用：pid > 0 发给那个任务；pid 为 0 发给自己所在的进程组（自己也收到）；pid < -1 发给 -pid 那一组。
  * 任务 0、A 和 init 收不到：前两个是内核任务，从不回到用户态，信号永远处理不了；init 结束了就没人收养孤儿、拉起 shell。
- * 一个也没找到返回 -1。Linux 0.11 的 sys_kill() 一样按 pid 分几种情况；pid 为 -1 时发给所有进程，这里不支持。
+ * 一个也没找到、找到的都没有权限（见 may_signal()）返回 -1。Linux 0.11 的 sys_kill() 一样按 pid 分几种情况；pid 为 -1 时发给所有进程，这里不支持。
  */
 int sched_kill(int pid, int sig)
 {
     if (sig < 1 || sig > 32 || pid == -1)
         return -1;
     uint32_t flags = irq_save();
-    int group = pid == 0 ? tasks[current_task].pgrp : -pid, found = 0;
+    int group = pid == 0 ? tasks[current_task].pgrp : -pid, sent = 0;
 
     for (int n = INIT_TASK + 1; n < NR_TASKS; n++) {
-        if (tasks[n].state == TASK_UNUSED || (pid > 0 ? n != pid : tasks[n].pgrp != group))
+        if (tasks[n].state == TASK_UNUSED || (pid > 0 ? n != pid : tasks[n].pgrp != group) || !may_signal(n))
             continue;
-        found = 1;
+        sent = 1;
         if (tasks[n].state != TASK_ZOMBIE)  /* 已经结束了，信号也没用了 */
             send_signal(n, sig);
     }
     irq_restore(flags);
-    return found ? 0 : -1;
+    return sent ? 0 : -1;               /* 一个也没找到，或者找到的都没有权限 */
 }
 
 /*
@@ -761,7 +840,9 @@ int sched_fork(const struct interrupt_frame *frame)
                               .restorer = tasks[current_task].restorer, .pgrp = tasks[current_task].pgrp,   /* 收到的信号不继承 */
                               .start_brk = tasks[current_task].start_brk, .brk = tasks[current_task].brk,
                               .cloexec = tasks[current_task].cloexec,
-                              .priority = tasks[current_task].priority, .counter = tasks[current_task].priority };
+                              .priority = tasks[current_task].priority, .counter = tasks[current_task].priority,
+                              .uid = tasks[current_task].uid, .euid = tasks[current_task].euid, .suid = tasks[current_task].suid,
+                              .gid = tasks[current_task].gid, .egid = tasks[current_task].egid, .sgid = tasks[current_task].sgid };
     for (int i = 0; i < 32; i++)
         tasks[n].action[i] = tasks[current_task].action[i];
     set_name(n, tasks[current_task].name);

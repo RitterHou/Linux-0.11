@@ -424,7 +424,7 @@ def test_timer_rate(m, elf):
 
 KEY_NAMES = {" ": "spc", "/": "slash", ".": "dot", "-": "minus", "&": "shift-7", "_": "shift-minus",
              "!": "shift-1", "@": "shift-2", "#": "shift-3", "|": "shift-backslash", ">": "shift-dot", "<": "shift-comma",
-             "\\": "backslash", "\n": "ret"}
+             ":": "shift-semicolon", ";": "semicolon", "\\": "backslash", "\n": "ret"}
 
 
 def type_text(m, text):
@@ -1164,6 +1164,22 @@ def test_nice(_m, _elf):
             check(len(out) > i and out[i] == ch, f"第 {i + 1} 项（{meaning[ch]}）没有通过：第 6 行去掉 A 后是 {out!r}，应为 {expected!r}")
 
 
+def test_permissions(_m, _elf):
+    """用户和权限：用户号和 setuid；读写执行权限；在谁的目录里能新建、删除；/tmp 的粘滞位；chmod、chown、utime；kill 和 nice；setuid 程序"""
+    d = build_selftest("USER_PERM")
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        m.wait_for(lambda mm: message_row(mm) == "task 2 exited with code 0", timeout=15, what="init 的结束消息")
+        out = task_output(m).replace("A", "")
+        expected = "urcsxmke!"
+        meaning = {"u": "init 是 root；setgid、setuid(100) 以后四个号都是 100，回不去", "r": "读写权限：读得了的、写不了的、O_TRUNC、0700 的目录",
+                   "c": "root 的目录里建不了文件、目录、链接；/tmp 里能建，主人是 100", "s": "/tmp 的粘滞位：删不掉 root 的文件，能删自己的",
+                   "x": "0644 的程序执行不了；0700 的目录里 stat 不到、进不去", "m": "chmod 只有主人能改；chown 只有 root；utime 的两种情况",
+                   "k": "kill 不了 root 的进程、能 kill 自己的；nice 调低不了", "e": "setuid root 的 /bin/id 打印 euid=0(root)",
+                   "!": "回到 root：能删用户的文件；root 也执行不了没有执行位的程序，有了就能；能进 0700 的目录；chown 清掉 setuid 位"}
+        for i, ch in enumerate(expected):
+            check(len(out) > i and out[i] == ch, f"第 {i + 1} 项（{meaning[ch]}）没有通过：第 6 行去掉 A 后是 {out!r}，应为 {expected!r}")
+
+
 def test_no_disk(_m, _elf):
     """不接硬盘开机：第 1 行显示 disk: none；exec 不了 /bin/letter，任务 3 用内核映像里的代码写 C；init 隔一会儿才重试 shell"""
     tmp = tempfile.mkdtemp(prefix="kernel-nodisk-")
@@ -1357,9 +1373,10 @@ def test_shell(m, elf):
     check(out == ["Hello from the Minix file system on hda!"], f"cat 应打印 /hello.txt：{out!r}")
     out = run_command(m, "help")
     progs = [p for p in bin_programs() if p != "sh"]
-    listed = out[0].split()[1:] + out[1].split()[1:] if len(out) == 4 else []
-    check(len(out) == 4 and out[0].startswith("files: ") and out[1].startswith("tasks: ") and sorted(listed) == progs,
-          f"help 应是 4 行，每行都放得下（不折行），头两行合起来列出 /bin 里除了 sh 的每个程序 {progs}：{out!r}")
+    listed = out[0].split()[1:] + out[1].split()[1:] + out[2].split()[1:] if len(out) == 5 else []
+    check(len(out) == 5 and out[0].startswith("files: ") and out[1].startswith("tasks: ") and out[2].startswith("users: ") and
+          sorted(listed) == progs and all(len(r) < 80 for r in out),
+          f"help 应是 5 行，每行都放得下（不折行），头三行合起来列出 /bin 里除了 sh 的每个程序 {progs}：{out!r}")
     free_before = m.screen(4)[3].split("/")[0]
     check(run_command(m, "nosuch") == ["sh: nosuch: not found"], "找不到的命令应报告 not found")
     check(run_command(m, "check") == ["check ok"], "check 应通过")
@@ -1451,7 +1468,7 @@ def test_cwd(m, elf):
         check(out == expected, f"{command} 应输出 {expected!r}，实际是 {out!r}")
     run_command(m, "cd /etc")
     out = run_command(m, "ls")
-    check(names(out) == [".", "..", "issue"], f"ls 不带参数应列出当前目录 /etc：{out!r}")
+    check(names(out) == [".", "..", "group", "issue", "passwd"], f"ls 不带参数应列出当前目录 /etc：{out!r}")
     check(names(run_command(m, "ls ..")) == names(run_command(m, "ls /")), "ls .. 应与 ls / 相同")
     wait_prompt(m)
     type_text(m, "exit\n")
@@ -1757,7 +1774,7 @@ def test_clock(m, elf):
     check(len(out) == 1 and out[0].endswith(" UTC"), f"date 的输出：{out!r}")
     shown = datetime.datetime.strptime(out[0][:-4], "%Y-%m-%d %H:%M:%S")
     check(abs((shown - utc_now()).total_seconds()) <= 5, f"date 的时间 {shown} 应和宿主机的 UTC 时间 {utc_now()} 差不到 5 秒")
-    line = re.compile(r"([-dc])([-r][-w][-x]){3} +\d+ +0 +0 +\d+ (\d{4}-\d\d-\d\d \d\d:\d\d) (\S+)")
+    line = re.compile(r"([-dc])[-r][-w][-xsS][-r][-w][-xsS][-r][-w][-xtT] +\d+ +0 +0 +\d+ (\d{4}-\d\d-\d\d \d\d:\d\d) (\S+)")
     for row in run_command(m, "ls -l /"):
         check(line.fullmatch(row), f"ls -l 的格式：类型和权限、链接数、主人、组、大小、修改时间、名字：{row!r}")
     check(run_command(m, "ls -l /bin | grep sh")[0].startswith("-rwxr-xr-x  1    0    0 "), "/bin 里的程序有执行权限")
@@ -1768,7 +1785,7 @@ def test_clock(m, elf):
     for name, mode in [("clock1", "-rw-r--r--"), ("clock2", "-rw-r-----")]:
         row = rows.get(name, "")
         check(row.startswith(mode), f"{name} 的权限应是 {mode}：{row!r}")
-        when = datetime.datetime.strptime(line.fullmatch(row).group(3), "%Y-%m-%d %H:%M")
+        when = datetime.datetime.strptime(line.fullmatch(row).group(2), "%Y-%m-%d %H:%M")
         check(abs((when - utc_now()).total_seconds()) <= 120, f"{name} 的修改时间 {when} 应该就是现在 {utc_now()}")
     check(run_command(m, "touch /nothing/x") == ["touch: /nothing/x: cannot touch"], "touch 不了的报错")
     check(run_command(m, "rm /tmp/clock1") == [] and run_command(m, "rm /tmp/clock2") == [], "清理")
@@ -1800,14 +1817,15 @@ def test_nice_shell(m, elf):
     pid = out[0][1:-1]
     out = run_command(m, "ps -l | grep sleep")
     rows = [r.split() for r in out]
-    check(any(r[0] == pid and r[2:5] == ["S", "15", "5"] and r[-1] == "sleep" for r in rows),
-          f"ps -l：nice 5 的 sleep 每轮 15 个 tick（PRI 15、NI 5），在睡（S）：{out!r}")
+    check(any(r[0] == pid and r[2:6] == ["S", "0", "15", "5"] and r[-1] == "sleep" for r in rows),
+          f"ps -l：root 运行的 nice 5 的 sleep 每轮 15 个 tick（UID 0、PRI 15、NI 5），在睡（S）：{out!r}")
     out = run_command(m, "ps -l")
-    check(out[0] == "PID PPID S PRI  NI    TIME NAME", f"ps -l 的表头：{out[0]!r}")
+    check(out[0] == "PID PPID S   UID PRI  NI    TIME NAME", f"ps -l 的表头：{out[0]!r}")
     for r in out[1:]:
-        check(re.fullmatch(r" ?\d+ +\d+ [RSZWB] +\d+ +-?\d+ +\d+\.\d\d \S+", r), f"ps -l 每行是任务号、父进程、状态、PRI、NI、TIME、名字：{r!r}")
+        check(re.fullmatch(r" ?\d+ +\d+ [RSZWB] +\d+ +\d+ +-?\d+ +\d+\.\d\d \S+", r),
+              f"ps -l 每行是任务号、父进程、状态、UID、PRI、NI、TIME、名字：{r!r}")
     idle = next(r.split() for r in out[1:] if r.split()[-1] == "idle")
-    check(idle[3:6] == ["20", "0", "0.00"], f"任务 0（空闲任务）的时间单独记成空闲比例，不算进 TIME：{idle!r}")
+    check(idle[3:7] == ["0", "20", "0", "0.00"], f"任务 0（空闲任务）是 root 的，它的时间单独记成空闲比例，不算进 TIME：{idle!r}")
 
     tm = re.compile(r"real (\d+\.\d\d) user (\d+\.\d\d) sys (\d+\.\d\d)")
     out = run_command(m, "time sleep 1")
@@ -1829,16 +1847,37 @@ def test_nice_shell(m, elf):
     m.wait_for(lambda mm: "sleep" not in " ".join(run_command(mm, "ps")), timeout=5, what="后台的 sleep 3 睡完退出")
 
 
+def test_users(m, elf):
+    """用户：id；/tmp 有粘滞位、/home/user 是 user 的；chown 用名字或号码改主人和组，错误情况；ls -l 显示 setuid、setgid、粘滞位"""
+    entry = lambda path, name: next((r for r in run_command(m, f"ls -l {path}") if r.split()[-1] == name), "")
+    check(run_command(m, "id") == ["uid=0(root) gid=0(root)"], "shell 是 root 运行的")
+    check(entry("/", "tmp").startswith("drwxrwxrwt "), f"/tmp 谁都能写，有粘滞位：{entry('/', 'tmp')!r}")
+    check(entry("/home", "user").split()[:4] == ["drwxr-xr-x", "2", "100", "100"], f"/home/user 是 user（100）的：{entry('/home', 'user')!r}")
+    for command, expected in [("echo hi > /tmp/owned", []), ("chown user /tmp/owned", []), ("chown", ["usage: chown owner[:group] file..."]),
+                              ("chown nosuch /tmp/owned", ["chown: nosuch: no such user"]),
+                              ("chown user:nogroup /tmp/owned", ["chown: nogroup: no such group"]),
+                              ("chown 1 /nothing", ["chown: /nothing: cannot change owner"])]:
+        out = run_command(m, command)
+        check(out == expected, f"{command} 应输出 {expected!r}，实际是 {out!r}")
+    check(entry("/tmp", "owned").split()[2:4] == ["100", "0"], f"chown user：主人换成 100，组不变：{entry('/tmp', 'owned')!r}")
+    check(run_command(m, "chown user:users /tmp/owned") == [] and entry("/tmp", "owned").split()[2:4] == ["100", "100"], "chown user:users")
+    check(run_command(m, "chown 0:0 /tmp/owned") == [] and entry("/tmp", "owned").split()[2:4] == ["0", "0"], "chown 0:0：写号码也行")
+    for mode, shown in [("4755", "-rwsr-xr-x"), ("2755", "-rwxr-sr-x"), ("4644", "-rwSr--r--"), ("1777", "-rwxrwxrwt"), ("1776", "-rwxrwxrwT")]:
+        check(run_command(m, f"chmod {mode} /tmp/owned") == [] and entry("/tmp", "owned").startswith(shown + " "),
+              f"chmod {mode} 之后 ls -l 显示 {shown}：{entry('/tmp', 'owned')!r}")
+    check(run_command(m, "rm /tmp/owned") == [], "删掉")
+
+
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_console_scroll,
                 test_idle_in_hlt, test_demand_paging, test_fork_address_spaces, test_syscall_gate, test_user_setup, test_user_task,
-                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep, test_cache, test_ln_mv, test_script, test_shell_input, test_script_edge_cases, test_clock, test_stderr, test_nice_shell]
+                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep, test_cache, test_ln_mv, test_script, test_shell_input, test_script_edge_cases, test_clock, test_stderr, test_nice_shell, test_users]
 SEPARATE_TESTS = [test_syscalls, test_page_alloc, test_double_free, test_hd_rw, test_early_key, test_keyboard_edge_cases, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,
                   test_big_kernel, test_user_write_kernel, test_user_privileged,
                   test_user_bad_pointer, test_user_exit, test_all_tasks_exit,
                   test_nmi_in_user_mode, test_user_write_code, test_preemption,
-                  test_deep_stack, test_wild_read, test_fork_isolation, test_waitpid, test_file_system, test_exec, test_pipe, test_fs_write, test_signal_syscalls, test_brk, test_alarm, test_sync, test_sync_to_disk, test_link, test_time_syscalls, test_fcntl, test_nice, test_no_disk]
+                  test_deep_stack, test_wild_read, test_fork_isolation, test_waitpid, test_file_system, test_exec, test_pipe, test_fs_write, test_signal_syscalls, test_brk, test_alarm, test_sync, test_sync_to_disk, test_link, test_time_syscalls, test_fcntl, test_nice, test_permissions, test_no_disk]
 
 
 def main():
