@@ -56,8 +56,8 @@ int main(int argc, char **argv)
         dst = path;
     }
     if (stat(dst, &to) == 0) {
-        if (to.ino == from.ino)
-            return 0;               /* 搬到它自己身上 */
+        if (to.ino == from.ino && to.dev == from.dev)
+            return 0;               /* 搬到它自己身上（i 节点号只在一块盘里不重复，要连设备号一起比） */
         if ((to.mode & 0170000) == 0040000 || unlink(dst) < 0) {
             eprint("mv: ");
             eprint(dst);

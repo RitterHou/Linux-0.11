@@ -363,7 +363,8 @@ int main(int sh_argc, char **sh_argv)
             continue;
         }
         if (strcmp(argv[0], "help") == 0) {
-            print("files: ls cat echo wc grep sort rm ln mv mkdir rmdir chmod touch df sync pwd\n");
+            print("files: ls cat echo wc grep sort rm ln mv mkdir rmdir chmod touch pwd\n");
+            print("disks: df sync mount umount\n");
             print("tasks: ps kill sleep nice date letter hello check\n");
             print("users: id su login passwd chown\n");
             print("built in: cd [dir], exit [code], time command, help\n");

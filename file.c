@@ -44,13 +44,13 @@ static struct file *file_alloc(int type)
  */
 struct file *file_open(const char *path, int flags)
 {
-    uint32_t ino;
+    uint32_t dev, ino;
     struct minix_inode d;
     struct m_inode *ip = 0;
     int access = flags & O_ACCMODE, type = FILE_INODE, tty = 0;
 
     fs_lock();
-    if (namei(path, &ino, &d) == 0) {
+    if (namei(path, &dev, &ino, &d) == 0) {
         /* 读要有读权限，写和清空要有写权限：权限只在打开时查一次，打开以后 chmod 也不影响已经打开的描述符 */
         int want = (access != O_WRONLY ? MAY_READ : 0) | (access != O_RDONLY || (flags & O_TRUNC) ? MAY_WRITE : 0);
         if (((flags & O_CREAT) && (flags & O_EXCL)) || !permission(&d, want))
@@ -67,9 +67,9 @@ struct file *file_open(const char *path, int flags)
                 goto fail;          /* 没有这个设备（没有串口时的 /dev/ttyS0 也是） */
             }
         } else {
-            if ((d.mode & S_IFMT) == S_IFDIR && access != O_RDONLY)
-                goto fail;          /* 目录只有内核能改 */
-            if (!(ip = iget(ino)))
+            if (((d.mode & S_IFMT) == S_IFDIR && access != O_RDONLY) || (d.mode & S_IFMT) == S_IFBLK)
+                goto fail;          /* 目录只有内核能改；硬盘这样的块设备只能 mount，不能直接读写 */
+            if (!(ip = iget(dev, ino)))
                 goto fail;
             if ((flags & O_TRUNC) && access != O_RDONLY)
                 fs_truncate(ip);
@@ -162,7 +162,7 @@ int32_t file_read(struct file *f, void *dst, uint32_t n)
     if (n > left)
         n = left;
     f->pos += n;
-    int32_t got = inode_read(&f->ip->d, start, dst, n);
+    int32_t got = inode_read(f->ip->dev, &f->ip->d, start, dst, n);
     fs_unlock();
     return got;
 }
