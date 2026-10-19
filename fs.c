@@ -650,6 +650,37 @@ int fs_unlink(const char *path)
     return remove_entry(path, 0);
 }
 
+/*
+ * link：给已经存在的文件再起一个名字 newpath。两个名字是目录里的两项，指向同一个 i 节点，链接数加一：
+ * 文件只有一份，从哪个名字打开都一样。删掉一个名字（unlink 的意思就是“去掉一个链接”）只是链接数减一，
+ * 减到 0 才真正收回。目录不行，免得目录树里出现环；新名字已经存在、所在的目录不存在、名字太长也不行。
+ * Linux 0.11 的 sys_link() 也是这样。
+ */
+int fs_link(const char *oldpath, const char *newpath)
+{
+    uint32_t ino, where;
+    struct minix_inode d;
+    const char *name;
+    int len;
+
+    if (namei(oldpath, &ino, &d) < 0 || (d.mode & S_IFMT) == S_IFDIR)
+        return -1;
+    struct m_inode *dir = dir_of(newpath, &name, &len);
+    if (!dir)
+        return -1;
+    struct m_inode *ip = find_entry(dir, name, len, &where) ? 0 : iget(ino);
+    if (!ip || add_entry(dir, name, len, ino) < 0) {
+        iput(ip);
+        iput(dir);
+        return -1;
+    }
+    ip->d.nlinks++;
+    write_inode(ip);
+    iput(ip);
+    iput(dir);
+    return 0;
+}
+
 int fs_rmdir(const char *path)
 {
     return remove_entry(path, 1);

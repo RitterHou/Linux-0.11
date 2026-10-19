@@ -998,6 +998,63 @@ void user_main(void)
     ok &= c.dirty == 0 && c.free_blocks == a.free_blocks && c.free_inodes == a.free_inodes;
     write(1, ok ? "r" : "R", 1);
     exit(0);
+#elif SELFTEST == SELFTEST_USER_LINK
+    /*
+     * 每一项通过就写一个字母，期望第 6 行（去掉任务 A 的 A）是 lwuoe：
+     *   l：link 之后两个名字的 i 节点号一样，链接数是 2，从新名字读到的就是原来的内容。
+     *   w：从一个名字写进去，从另一个名字马上读得到：内存里是同一个 i 节点。
+     *   u：删掉原来的名字，另一个名字照常能读，链接数变回 1，块和 i 节点都没收回；再删掉它，才都收回。
+     *   o：两个名字都删了，可文件还开着：照常能读；关掉以后才收回。
+     *   e：目录不能 link；新名字已经存在（包括 . 和 ..）、源文件不存在、新名字所在的目录不存在，都返回 -1。
+     */
+    struct fsinfo before, now;
+    struct stat a, b;
+    char buf[16];
+    fsinfo(&before);
+    int32_t fd = open("/tmp/a", O_WRONLY | O_CREAT);
+    write(fd, "hello", 5);
+    close(fd);
+    int ok = link("/tmp/a", "/tmp/b") == 0 && stat("/tmp/a", &a) == 0 && stat("/tmp/b", &b) == 0;
+    ok &= a.ino == b.ino && a.nlinks == 2 && b.nlinks == 2;
+    fd = open("/tmp/b", O_RDONLY);
+    ok &= read(fd, buf, sizeof(buf)) == 5 && buf[0] == 'h' && buf[4] == 'o';
+    close(fd);
+    write(1, ok ? "l" : "L", 1);
+
+    int32_t wfd = open("/tmp/a", O_WRONLY | O_APPEND), rfd = open("/tmp/b", O_RDONLY);
+    write(wfd, "!", 1);
+    ok = read(rfd, buf, sizeof(buf)) == 6 && buf[5] == '!';
+    close(wfd);
+    close(rfd);
+    write(1, ok ? "w" : "W", 1);
+
+    ok = unlink("/tmp/a") == 0 && stat("/tmp/a", &a) < 0 && stat("/tmp/b", &b) == 0 && b.nlinks == 1;
+    fsinfo(&now);
+    ok &= now.free_inodes == before.free_inodes - 1 && now.free_blocks == before.free_blocks - 1;
+    ok &= unlink("/tmp/b") == 0;
+    fsinfo(&now);
+    ok &= now.free_inodes == before.free_inodes && now.free_blocks == before.free_blocks;
+    write(1, ok ? "u" : "U", 1);
+
+    fd = open("/tmp/c", O_RDWR | O_CREAT);
+    write(fd, "xyz", 3);
+    ok = link("/tmp/c", "/tmp/d") == 0 && unlink("/tmp/c") == 0 && unlink("/tmp/d") == 0;
+    fsinfo(&now);
+    ok &= now.free_inodes == before.free_inodes - 1;    /* 还开着：没收回 */
+    int32_t again = open("/tmp/c", O_RDONLY);
+    ok &= again < 0;
+    close(fd);
+    fsinfo(&now);
+    ok &= now.free_inodes == before.free_inodes && now.free_blocks == before.free_blocks;
+    write(1, ok ? "o" : "O", 1);
+
+    fd = open("/tmp/e", O_WRONLY | O_CREAT);
+    close(fd);
+    ok = link("/tmp", "/tmp/dir2") < 0 && link("/tmp/e", "/tmp/e") < 0 && link("/tmp/e", "/tmp/.") < 0;
+    ok &= link("/nothing", "/tmp/f") < 0 && link("/tmp/e", "/nothing/f") < 0 && link("/tmp/e", "/tmp/abcdefghijklmno") < 0;
+    ok &= stat("/tmp/e", &a) == 0 && a.nlinks == 1 && unlink("/tmp/e") == 0;
+    write(1, ok ? "e" : "E", 1);
+    exit(0);
 #elif SELFTEST == SELFTEST_ALL_EXIT
     write(1, "bye", 3);
     exit(2);

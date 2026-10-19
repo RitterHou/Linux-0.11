@@ -39,7 +39,8 @@
 #define SYS_ALARM  24               /* alarm(seconds)：几秒之后给自己发 SIGALRM；0 是取消 */
 #define SYS_PAUSE  25               /* pause()：睡到来了一个信号为止 */
 #define SYS_SYNC   26               /* sync()：把缓冲区缓存里所有改过的块写回硬盘 */
-#define SYS_CALLS  27
+#define SYS_LINK   27               /* link(old, new)：给文件 old 再起一个名字 new */
+#define SYS_CALLS  28
 
 /* fsinfo 写回的内容 */
 struct fsinfo {
@@ -218,6 +219,11 @@ static inline uint32_t brk(uint32_t addr)
 static inline uint32_t alarm(uint32_t seconds)
 {
     return (uint32_t)syscall3(SYS_ALARM, seconds, 0, 0);
+}
+
+static inline int32_t link(const char *oldpath, const char *newpath)
+{
+    return syscall3(SYS_LINK, (uint32_t)oldpath, (uint32_t)newpath, 0);
 }
 
 static inline int32_t sync(void)
