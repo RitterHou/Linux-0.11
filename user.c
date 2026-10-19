@@ -1055,6 +1055,65 @@ void user_main(void)
     ok &= stat("/tmp/e", &a) == 0 && a.nlinks == 1 && unlink("/tmp/e") == 0;
     write(1, ok ? "e" : "E", 1);
     exit(0);
+#elif SELFTEST == SELFTEST_USER_TIME
+    /*
+     * 每一项通过就写一个字母，期望第 6 行（去掉任务 A 的 A）是 ctmdu：
+     *   c：日期换算：1970-01-01 是 0；2000-02-29 12:00 是 951825600（2000 年能被 400 整除，是闰年）；
+     *      2100-03-01 是 4107542400，它前一秒是 2100-02-28 23:59:59（2100 年不是闰年）；0xFFFFFFFF 是 2106-02-07 06:28:15。
+     *   t：time 是开机时从 CMOS 读的时钟往后数：年份在 2024 以后；睡 1.5 秒，time 多了 1 或 2。
+     *   m：新建的文件，修改时间就是现在；utime 改成 12345，stat 读回来就是 12345；往里写东西，又变成现在。
+     *   d：目录里加一项、删一项，目录的修改时间也变成现在。
+     *   u：文件的主人和组都是 0（root）。
+     * 中间要睡 1.5 秒，第 6 行会被任务 A 的 A 绕回来盖掉：结果先攒着，最后一次写出去。
+     */
+    char res[8];
+    int nres = 0;
+    struct date d = { 1970, 1, 1, 0, 0, 0 };
+    int ok = date_to_unix(&d) == 0;
+    d = (struct date){ 2000, 2, 29, 12, 0, 0 };
+    ok &= date_to_unix(&d) == 951825600;
+    d = (struct date){ 2100, 3, 1, 0, 0, 0 };
+    ok &= date_to_unix(&d) == 4107542400u;
+    unix_to_date(4107542400u - 1, &d);
+    ok &= d.year == 2100 && d.month == 2 && d.day == 28 && d.hour == 23 && d.minute == 59 && d.second == 59;
+    unix_to_date(0xFFFFFFFFu, &d);
+    ok &= d.year == 2106 && d.month == 2 && d.day == 7 && d.hour == 6 && d.minute == 28 && d.second == 15;
+    unix_to_date(951825600, &d);
+    ok &= d.year == 2000 && d.month == 2 && d.day == 29 && d.hour == 12;
+    res[nres++] = ok ? 'c' : 'C';
+
+    uint32_t t1 = time();
+    unix_to_date(t1, &d);
+    sleep(150);
+    uint32_t t2 = time();
+    ok = d.year >= 2024 && t2 - t1 >= 1 && t2 - t1 <= 2;
+    res[nres++] = ok ? 't' : 'T';
+
+    struct stat st;
+    int32_t fd = open("/tmp/f", O_WRONLY | O_CREAT);
+    uint32_t now = time();
+    ok = fd >= 0 && stat("/tmp/f", &st) == 0 && st.mtime + 1 >= now && st.mtime <= now;
+    ok &= utime("/tmp/f", 12345) == 0 && stat("/tmp/f", &st) == 0 && st.mtime == 12345;
+    write(fd, "x", 1);
+    close(fd);
+    now = time();
+    ok &= stat("/tmp/f", &st) == 0 && st.mtime + 1 >= now && st.mtime <= now;
+    ok &= utime("/tmp/f", 0) == 0 && stat("/tmp/f", &st) == 0 && st.mtime + 1 >= now;
+    ok &= utime("/nothing", 0) < 0;
+    res[nres++] = ok ? 'm' : 'M';
+
+    ok = utime("/tmp", 1000) == 0 && unlink("/tmp/f") == 0;
+    now = time();
+    ok &= stat("/tmp", &st) == 0 && st.mtime + 1 >= now;
+    ok &= utime("/tmp", 1000) == 0 && (fd = open("/tmp/g", O_WRONLY | O_CREAT)) >= 0;
+    close(fd);
+    ok &= stat("/tmp", &st) == 0 && st.mtime + 1 >= now && unlink("/tmp/g") == 0;
+    res[nres++] = ok ? 'd' : 'D';
+
+    ok = stat("/hello.txt", &st) == 0 && st.uid == 0 && st.gid == 0;
+    res[nres++] = ok ? 'u' : 'U';
+    write(1, res, (uint32_t)nres);
+    exit(0);
 #elif SELFTEST == SELFTEST_ALL_EXIT
     write(1, "bye", 3);
     exit(2);

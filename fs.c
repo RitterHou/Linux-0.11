@@ -415,8 +415,10 @@ int32_t inode_write(struct m_inode *ip, uint32_t pos, const void *src, uint32_t 
         brelse(b);
         done += chunk;
     }
-    if (pos + done > ip->d.size) {
-        ip->d.size = pos + done;
+    if (done) {                     /* 写进了东西：记下修改时间（目录里增删一项也走这里） */
+        if (pos + done > ip->d.size)
+            ip->d.size = pos + done;
+        ip->d.time = current_time();
         write_inode(ip);
     }
     return done || n == 0 ? (int32_t)done : -1;
@@ -453,6 +455,7 @@ static void truncate_inode(struct m_inode *ip)
     for (int i = 0; i < 9; i++)
         ip->d.zone[i] = 0;
     ip->d.size = 0;
+    ip->d.time = current_time();
     write_inode(ip);
 }
 
@@ -555,7 +558,7 @@ static struct m_inode *create(const char *path, uint16_t mode)
         iput(dir);
         return 0;
     }
-    ip->d = (struct minix_inode){ .mode = mode, .nlinks = 1 };
+    ip->d = (struct minix_inode){ .mode = mode, .nlinks = 1, .time = current_time() };
     write_inode(ip);
     if (add_entry(dir, name, len, ino) < 0) {
         ip->d.nlinks = 0;
@@ -648,6 +651,23 @@ static int remove_entry(const char *path, int want_dir)
 int fs_unlink(const char *path)
 {
     return remove_entry(path, 0);
+}
+
+/* utime：把文件的修改时间设成 t，t 为 0 就是现在。Linux 0.11 的 sys_utime() 同时设访问时间，Minix v1 的 i 节点只有一个时间。 */
+int fs_utime(const char *path, uint32_t t)
+{
+    uint32_t ino;
+    struct minix_inode d;
+
+    if (namei(path, &ino, &d) < 0)
+        return -1;
+    struct m_inode *ip = iget(ino);
+    if (!ip)
+        return -1;
+    ip->d.time = t ? t : current_time();
+    write_inode(ip);
+    iput(ip);
+    return 0;
 }
 
 /* chmod：改文件的权限位（低 12 位），类型不变。Linux 0.11 的 sys_chmod() 也是这样，它还要检查是不是文件的主人。 */

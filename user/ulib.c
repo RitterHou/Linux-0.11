@@ -169,3 +169,33 @@ void *realloc(void *p, uint32_t n)
     free(p);
     return q;
 }
+
+void print_width(uint32_t n, uint32_t width, char pad)
+{
+    char c[2] = { pad, '\0' };
+    uint32_t len = 1;
+    for (uint32_t m = n; m >= 10; m /= 10)
+        len++;
+    for (uint32_t i = len; i < width; i++)
+        print(c);
+    print_num(n);
+}
+
+void print_time(uint32_t t, int seconds)
+{
+    struct date d;
+    unix_to_date(t, &d);
+    print_width((uint32_t)d.year, 4, '0');
+    print("-");
+    print_width((uint32_t)d.month, 2, '0');
+    print("-");
+    print_width((uint32_t)d.day, 2, '0');
+    print(" ");
+    print_width((uint32_t)d.hour, 2, '0');
+    print(":");
+    print_width((uint32_t)d.minute, 2, '0');
+    if (seconds) {
+        print(":");
+        print_width((uint32_t)d.second, 2, '0');
+    }
+}

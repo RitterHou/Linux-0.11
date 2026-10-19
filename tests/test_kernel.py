@@ -8,6 +8,7 @@ make test：在无头 QEMU 中启动内核，检查启动输出、定时器、�
 
 在仓库根目录运行：python3 tests/test_kernel.py（make test 会先构建再调用它）。
 """
+import datetime
 import os
 import re
 import socket
@@ -294,7 +295,7 @@ def test_boot_screen(m, elf):
     # 内核栈、页目录、页表、栈页，letter 的代码页，sh 的代码页和数据页，约 15 页
     match = re.fullmatch(r"memory: (\d+)/3840 pages free  page faults: 1  copy-on-write: (\d+)", rows[3])
     check(match and 3815 <= int(match.group(1)) <= 3830 and int(match.group(2)) >= 2, f"第 3 行不对：{rows[3]!r}")
-    check(re.fullmatch(r"ticks: \d+( +idle: +\d+%)?", rows[4]) is not None, f"第 4 行不对：{rows[4]!r}")
+    check(re.fullmatch(r"ticks: \d+( +idle: +\d+%)? +\d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC", rows[4]) is not None, f"第 4 行不对：{rows[4]!r}")
     check(rows[5] == "paging: on, 0xC0000000 -> 0xB8000", f"第 5 行不对：{rows[5]!r}")
     check(rows[6].startswith("tasks: "), f"第 6 行不对：{rows[6]!r}")
     check(rows[8] == "shell on hda: try help, ls /bin, cat /hello.txt, ps", f"第 8 行应是 shell 的欢迎语：{rows[8]!r}")
@@ -1178,6 +1179,19 @@ def test_link(_m, _elf):
             check(len(out) > i and out[i] == ch, f"第 {i + 1} 项（{meaning[ch]}）没有通过：第 6 行去掉 A 后是 {out!r}，应为 {expected!r}")
 
 
+def test_time_syscalls(_m, _elf):
+    """时间：日期换算（闰年、2100 年、2106 年）、time 往前走、文件和目录的修改时间、utime、文件的主人"""
+    d = build_selftest("USER_TIME")
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        m.wait_for(lambda mm: message_row(mm) == "task 2 exited with code 0", timeout=10, what="init 的结束消息")
+        out = task_output(m).replace("A", "")
+        expected = "ctmdu"
+        meaning = {"c": "日期和秒数互相换算", "t": "time 从 CMOS 的时钟往后数", "m": "文件的修改时间、utime",
+                   "d": "目录里增删一项，目录的修改时间变成现在", "u": "文件的主人和组是 0"}
+        for i, ch in enumerate(expected):
+            check(len(out) > i and out[i] == ch, f"第 {i + 1} 项（{meaning[ch]}）没有通过：第 6 行去掉 A 后是 {out!r}，应为 {expected!r}")
+
+
 def test_fs_write(_m, _elf):
     """写文件：O_EXCL、读写权限、O_TRUNC、O_APPEND、删掉开着的文件、目录的错误、同一个文件开两次共用 i 节点"""
     d = build_selftest("USER_FSWRITE")
@@ -1496,17 +1510,49 @@ def test_script(m, elf):
         run_command(m, f"rm {f}")
 
 
+
+def utc_now():
+    return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+
+
+def test_clock(m, elf):
+    """时间：第 4 行和 date 显示的时间与宿主机的 UTC 时间一致；ls -l 的格式；新写的文件修改时间是现在；touch、chmod"""
+    clock = re.search(r"(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) UTC", m.screen(5)[4])
+    check(clock is not None, f"第 4 行右边应显示时间：{m.screen(5)[4]!r}")
+    shown = datetime.datetime.strptime(clock.group(1), "%Y-%m-%d %H:%M:%S")
+    check(abs((shown - utc_now()).total_seconds()) <= 5, f"第 4 行的时间 {shown} 应和宿主机的 UTC 时间 {utc_now()} 差不到 5 秒")
+    out = run_command(m, "date")
+    check(len(out) == 1 and out[0].endswith(" UTC"), f"date 的输出：{out!r}")
+    shown = datetime.datetime.strptime(out[0][:-4], "%Y-%m-%d %H:%M:%S")
+    check(abs((shown - utc_now()).total_seconds()) <= 5, f"date 的时间 {shown} 应和宿主机的 UTC 时间 {utc_now()} 差不到 5 秒")
+    line = re.compile(r"([-dc])([-r][-w][-x]){3} +\d+ +0 +0 +\d+ (\d{4}-\d\d-\d\d \d\d:\d\d) (\S+)")
+    for row in run_command(m, "ls -l /"):
+        check(line.fullmatch(row), f"ls -l 的格式：类型和权限、链接数、主人、组、大小、修改时间、名字：{row!r}")
+    check(run_command(m, "ls -l /bin | grep sh")[0].startswith("-rwxr-xr-x  1    0    0 "), "/bin 里的程序有执行权限")
+    check(run_command(m, "ls -l /dev | grep tty0")[0].startswith("crw-rw-rw-  1"), "设备文件")
+    check(run_command(m, "echo hi > /tmp/clock1") == [] and run_command(m, "touch /tmp/clock2") == [] and
+          run_command(m, "chmod 640 /tmp/clock2") == [], "写文件、touch、chmod")
+    rows = {r.split()[-1]: r for r in run_command(m, "ls -l /tmp")}
+    for name, mode in [("clock1", "-rw-r--r--"), ("clock2", "-rw-r-----")]:
+        row = rows.get(name, "")
+        check(row.startswith(mode), f"{name} 的权限应是 {mode}：{row!r}")
+        when = datetime.datetime.strptime(line.fullmatch(row).group(3), "%Y-%m-%d %H:%M")
+        check(abs((when - utc_now()).total_seconds()) <= 120, f"{name} 的修改时间 {when} 应该就是现在 {utc_now()}")
+    check(run_command(m, "touch /nothing/x") == ["touch: /nothing/x: cannot touch"], "touch 不了的报错")
+    check(run_command(m, "rm /tmp/clock1") == [] and run_command(m, "rm /tmp/clock2") == [], "清理")
+
+
 # 前几项共用一台正常启动的虚拟机；其余各自启动自检内核。
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_console_scroll,
                 test_idle_in_hlt, test_demand_paging, test_fork_address_spaces, test_syscall_gate, test_user_setup, test_user_task,
-                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep, test_cache, test_ln_mv, test_script]
+                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep, test_cache, test_ln_mv, test_script, test_clock]
 SEPARATE_TESTS = [test_syscalls, test_page_alloc, test_double_free, test_hd_rw, test_early_key, test_keyboard_edge_cases, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,
                   test_big_kernel, test_user_write_kernel, test_user_privileged,
                   test_user_bad_pointer, test_user_exit, test_all_tasks_exit,
                   test_nmi_in_user_mode, test_user_write_code, test_preemption,
-                  test_deep_stack, test_wild_read, test_fork_isolation, test_waitpid, test_file_system, test_exec, test_pipe, test_fs_write, test_signal_syscalls, test_brk, test_alarm, test_sync, test_link, test_no_disk]
+                  test_deep_stack, test_wild_read, test_fork_isolation, test_waitpid, test_file_system, test_exec, test_pipe, test_fs_write, test_signal_syscalls, test_brk, test_alarm, test_sync, test_link, test_time_syscalls, test_no_disk]
 
 
 def main():
