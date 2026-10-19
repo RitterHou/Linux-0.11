@@ -40,7 +40,8 @@
 #define SYS_PAUSE  25               /* pause()：睡到来了一个信号为止 */
 #define SYS_SYNC   26               /* sync()：把缓冲区缓存里所有改过的块写回硬盘 */
 #define SYS_LINK   27               /* link(old, new)：给文件 old 再起一个名字 new */
-#define SYS_CALLS  28
+#define SYS_CHMOD  28               /* chmod(path, mode)：改文件的权限，比如 0755 让脚本能直接运行 */
+#define SYS_CALLS  29
 
 /* fsinfo 写回的内容 */
 struct fsinfo {
@@ -224,6 +225,11 @@ static inline uint32_t alarm(uint32_t seconds)
 static inline int32_t link(const char *oldpath, const char *newpath)
 {
     return syscall3(SYS_LINK, (uint32_t)oldpath, (uint32_t)newpath, 0);
+}
+
+static inline int32_t chmod(const char *path, uint32_t mode)
+{
+    return syscall3(SYS_CHMOD, (uint32_t)path, mode, 0);
 }
 
 static inline int32_t sync(void)

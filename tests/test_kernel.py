@@ -363,7 +363,8 @@ def test_timer_rate(m, elf):
 
 
 KEY_NAMES = {" ": "spc", "/": "slash", ".": "dot", "-": "minus", "&": "shift-7", "_": "shift-minus",
-             "!": "shift-1", "@": "shift-2", "|": "shift-backslash", ">": "shift-dot", "<": "shift-comma", "\n": "ret"}
+             "!": "shift-1", "@": "shift-2", "#": "shift-3", "|": "shift-backslash", ">": "shift-dot", "<": "shift-comma",
+             "\n": "ret"}
 
 
 def type_text(m, text):
@@ -1451,11 +1452,55 @@ def test_ln_mv(m, elf):
     check(first is not None, "有 i 节点号")
 
 
+
+def test_script(m, elf):
+    """脚本：sh 脚本一行行执行、跳过注释、cd 不影响外面；chmod 之后 #! 脚本能直接运行；#! 的参数排法和上限；嵌套、没有解释器、没有执行权限都不行；Ctrl+C 结束脚本"""
+    lines = ["#!/bin/sh", "# a comment", "echo one", "cd /etc", "cat issue", "pwd"]
+    check(run_command(m, f"echo {lines[0]} > /tmp/s") == [], "写脚本的第一行")
+    for line in lines[1:]:
+        check(run_command(m, f"echo {line} >> /tmp/s") == [], f"写脚本：{line}")
+    want = ["one", "Linux 0.11 learning kernel", "/etc"]
+    check(run_command(m, "sh /tmp/s") == want, "sh 脚本：一行行执行，# 开头的是注释")
+    check(run_command(m, "pwd") == ["/"], "脚本里的 cd 换的是运行脚本的那个 sh 的当前目录，外面的 shell 不变")
+    check(run_command(m, "/tmp/s") == ["sh: /tmp/s: not found"], "新建的文件权限是 0644，没有执行位，exec 不了")
+    for command, expected in [("chmod 755 /tmp/s", []), ("/tmp/s", want), ("chmod", ["usage: chmod mode file..."]),
+                              ("chmod 9 /tmp/s", ["usage: chmod mode file..."]), ("chmod 644 /nothing", ["chmod: /nothing: cannot change mode"]),
+                              ("sh /nothing", ["sh: /nothing: cannot open"]),
+                              ("echo #!/bin/hello one two > /tmp/h", []), ("chmod 755 /tmp/h", []),
+                              ("/tmp/h a b", ["hello one two /tmp/h a b"]),
+                              ("/tmp/h 1 2 3 4 5 6 7 8 9 10 11 12 13", ["hello one two /tmp/h 1 2 3 4 5 6 7 8 9 10 11 12 13"]),
+                              ("/tmp/h 1 2 3 4 5 6 7 8 9 10 11 12 13 14", ["sh: /tmp/h: not found"]),
+                              ("echo #! > /tmp/e", []), ("chmod 755 /tmp/e", []), ("/tmp/e", ["sh: /tmp/e: not found"]),
+                              ("echo #!/tmp/h > /tmp/n", []), ("chmod 755 /tmp/n", []), ("/tmp/n", ["sh: /tmp/n: not found"])]:
+        out = run_command(m, command)
+        check(out == expected, f"{command} 应输出 {expected!r}，实际是 {out!r}")
+    check(run_command(m, "echo #!/bin/sh > /tmp/slow") == [] and run_command(m, "echo sleep 100 >> /tmp/slow") == [] and
+          run_command(m, "echo echo after >> /tmp/slow") == [] and run_command(m, "chmod 755 /tmp/slow") == [], "写一个睡很久的脚本")
+    out = run_command(m, "sh /tmp/slow &")
+    check(len(out) == 1 and re.fullmatch(r"\[\d+\]", out[0]), f"后台运行脚本：{out!r}")
+    pid = out[0][1:-1]
+    # ps 的输出可能比窗口还长（前面的测试留下了后台程序），用 grep 只取要看的几行
+    rows = [r.split() for r in run_command(m, "ps | grep s")]
+    sleeper = [r[0] for r in rows if r[-1] == "sleep" and r[1] == pid]
+    check(any(r[0] == pid and r[-1] == "sh" for r in rows) and len(sleeper) == 1, f"后台的 sh 在运行脚本，脚本里的 sleep 是它的子进程：{rows!r}")
+    check(run_command(m, f"kill -9 {pid} {sleeper[0]}") == [], "结束后台的脚本和它的 sleep")
+    wait_prompt(m)
+    type_text(m, "/tmp/slow\n")
+    time.sleep(0.5)
+    m.sendkeys(["ctrl-c"])
+    m.wait_for(lambda mm: [r for r in console(mm) if r][-3:] == ["$ /tmp/slow", "^C", "$"], timeout=2,
+               what="按 Ctrl+C：运行脚本的 sh 和它里面的 sleep 都被结束（不会接着打印 after），回到提示符")
+    out = run_command(m, "ps | grep s")
+    check(not any(r.split()[-1] in ("slow", "sleep") for r in out), f"前台的脚本（ps 里叫 slow）和它的 sleep 都结束了：{out!r}")
+    for f in ("/tmp/s", "/tmp/h", "/tmp/e", "/tmp/n", "/tmp/slow"):
+        run_command(m, f"rm {f}")
+
+
 # 前几项共用一台正常启动的虚拟机；其余各自启动自检内核。
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_console_scroll,
                 test_idle_in_hlt, test_demand_paging, test_fork_address_spaces, test_syscall_gate, test_user_setup, test_user_task,
-                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep, test_cache, test_ln_mv]
+                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep, test_cache, test_ln_mv, test_script]
 SEPARATE_TESTS = [test_syscalls, test_page_alloc, test_double_free, test_hd_rw, test_early_key, test_keyboard_edge_cases, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,
                   test_big_kernel, test_user_write_kernel, test_user_privileged,
