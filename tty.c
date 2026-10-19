@@ -14,6 +14,11 @@
  *   - Ctrl+C 丢掉正在编辑的这一行，回显 ^C 和换行，给终端的前台进程组发 SIGINT（tty_intr）。
  * 关掉回显（termios 的 ECHO，输密码时）以后，敲的字照样进这一行，只是不显示，退格和 ^C 也不显示。
  * 串口那头的终端敲回车送来的是 \r，退格送来的是 DEL（0x7F）：分别当成换行和退格（termios 的 ICRNL 和 VERASE）。
+ * 方向键送来的是转义序列 ESC [ A 这样的三个字符：规范模式不认得它们，整个丢掉。
+ *
+ * 关掉 ICANON 是原始模式：不攒成一行，每个字符（方向键的转义序列、Ctrl+D 也是）马上放进读队列，read 有一个就返回；
+ * 退格、Ctrl+D 都只是普通的字符，交给程序自己处理。shell 读命令时这样做，自己处理行编辑和历史。
+ * Ctrl+C 两种模式下都是给前台进程组发 SIGINT（ISIG），回显关着时不回显 ^C。
  * read(0) 一次最多读走一行；还没有敲完的行，程序读不到，它就睡下等。
  * 程序 write(1) 的输出也写在这个窗口里，和回显共用一个光标，就像一台真正的终端。
  * Linux 0.11 的终端有三个队列：read_q 存键盘送来的原始字符，copy_to_cooked() 处理退格和回显，
@@ -36,6 +41,7 @@ struct tty {
     struct wait_queue wait;         /* 等着读的任务 */
     int pgrp;                       /* 前台进程组：Ctrl+C 发给这一组；0 表示还没有（自检内核不拉起 shell） */
     uint32_t lflag;                 /* termios 的 c_lflag：开机时一行一行地读、回显 */
+    int esc;                        /* 规范模式下正在丢掉的转义序列：1 收到了 ESC，2 收到了 ESC [ */
     void (*putc)(char ch);          /* 输出一个字符：写显存，或者从串口发出去 */
 };
 
@@ -77,6 +83,27 @@ void tty_input(int tty, char ch)
         ch = '\n';
     if (ch == 0x7F)                 /* 终端的退格键 */
         ch = '\b';
+    if (!(t->lflag & ICANON) && ch != INTR_CHAR) {    /* 原始模式：原样交出去 */
+        if (READY_SIZE - (t->ready_tail - t->ready_head) >= 1) {
+            t->ready[t->ready_tail++ % READY_SIZE] = ch;
+            echo(t, ch);
+            wake_up(&t->wait);
+        }
+        return;
+    }
+    if (t->esc == 1) {              /* 规范模式丢掉方向键的转义序列：ESC、[、数字和分号，到别的字符（字母或 ~）为止 */
+        t->esc = ch == '[' ? 2 : 0;
+        return;
+    }
+    if (t->esc == 2) {
+        if (!((ch >= '0' && ch <= '9') || ch == ';'))
+            t->esc = 0;
+        return;
+    }
+    if (ch == 0x1B) {
+        t->esc = 1;
+        return;
+    }
     if (ch == INTR_CHAR) {
         /*
          * Linux 0.11 的 copy_to_cooked() 遇到 INTR_CHAR 调用 tty_intr()，给 tty->pgrp 里的每个进程挂上 SIGINT，
@@ -118,7 +145,7 @@ void tty_input(int tty, char ch)
 }
 
 /*
- * ioctl：TCGETS 取工作方式，TCSETS 设。现在只认 ECHO；ICANON 还不能关（读的时候总是一行一行的），想关就返回 -1。
+ * ioctl：TCGETS 取工作方式，TCSETS 设。认 ECHO 和 ICANON 两个标志。
  * Linux 0.11 的 tty_ioctl() 把整个 struct termios 存在 tty->termios 里，copy_to_cooked() 按里面的标志处理每个字符。
  */
 int tty_ioctl(int tty, uint32_t cmd, struct termios *t)
@@ -127,9 +154,10 @@ int tty_ioctl(int tty, uint32_t cmd, struct termios *t)
         *t = (struct termios){ .c_lflag = ttys[tty].lflag };
         return 0;
     }
-    if (cmd != TCSETS || !(t->c_lflag & ICANON))
+    if (cmd != TCSETS)
         return -1;
     ttys[tty].lflag = t->c_lflag & (ICANON | ECHO);
+    ttys[tty].esc = 0;
     return 0;
 }
 
@@ -150,8 +178,14 @@ int32_t tty_read(int tty, void *dst, uint32_t n)
             return -EINTR;          /* 等着的时候来了信号，比如按了 Ctrl+C */
         }
     }
+    int raw = !(t->lflag & ICANON);
     while (got < n && got < LINE_MAX && t->ready_tail != t->ready_head) {
         char c = t->ready[t->ready_head % READY_SIZE];
+        if (raw) {                  /* 原始模式：有多少给多少，不分行 */
+            t->ready_head++;
+            tmp[got++] = c;
+            continue;
+        }
         if (c == EOF_CHAR) {        /* 结束标记：读掉它，不交给程序；它前面没有字符时 read 返回 0 */
             t->ready_head++;
             break;
