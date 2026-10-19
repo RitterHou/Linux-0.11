@@ -11,9 +11,10 @@
  *     后台的子进程改成忽略，exec 之后也不变，所以 Ctrl+C 停不了后台程序，要用 kill。后台运行的脚本也是这样：
  *     运行它的 sh 一开始就忽略 SIGINT，它运行的每条命令也跟着忽略，不然这些命令和前台的 shell 在同一个进程组里，
  *     会被 Ctrl+C 结束。
- *   - 内建命令：cd 换当前目录（不带参数回到根目录），exit 退出 shell（init 会再拉起一个），help 显示能用的命令。
+ *   - 内建命令：cd 换当前目录（不带参数回到根目录），exit [退出码] 退出 shell（init 会再拉起一个），help 显示能用的命令。
  *     cd 必须是内建的：子进程换了目录，父进程的当前目录不会跟着变。
- *   - sh 脚本：从文件里一行行读命令，不打提示符，# 开头的行是注释；读完就退出。#! 开头、有执行权限的脚本
+ *   - sh 脚本：从文件里一行行读命令，不打提示符，# 开头的行是注释；读完就退出。参数之间可以是空格或 Tab，
+ *     行尾的回车不算；超过 127 个字节的行报错跳过。脚本的描述符设了 close-on-exec，它运行的命令拿不到。#! 开头、有执行权限的脚本
  *     可以直接运行：exec 发现 #!/bin/sh，就改成运行 sh 脚本（见 exec.c）。运行脚本的 sh 不接住 Ctrl+C，
  *     它和它正在运行的程序一起被结束。
  * Linux 0.11 的 init 运行的是磁盘上的 /bin/sh（当年的 bash），道理相同：pipe、fork、dup、exec、wait。
@@ -25,19 +26,25 @@
 
 static int intr_ignored;            /* 启动时 SIGINT 就是忽略的（在后台运行的脚本）：它运行的命令也忽略 */
 
-/* 原地把 line 按空格切开，argv 指向每一段，返回段数。 */
+/* 空格、Tab 和回车都算分隔：Tab 缩进的行、Windows 写的每行末尾带回车的脚本也能运行。 */
+static int is_blank(char c)
+{
+    return c == ' ' || c == '\t' || c == '\r';
+}
+
+/* 原地把 line 按空白切开，argv 指向每一段，返回段数。 */
 static int split(char *line, char **argv)
 {
     int argc = 0;
     char *p = line;
 
     while (*p && argc < MAX_ARGS) {
-        while (*p == ' ')
+        while (is_blank(*p))
             *p++ = '\0';
         if (*p == '\0')
             break;
         argv[argc++] = p;
-        while (*p && *p != ' ')
+        while (*p && !is_blank(*p))
             p++;
     }
     *p = '\0';                      /* 参数满了：最后一个参数到这里为止，后面的都不要了 */
@@ -100,7 +107,7 @@ static void redirect(char **argv)
     argv[out] = 0;
 }
 
-/* 在子进程里：命令名里没有 / 就到 /bin 下找，exec 它；exec 失败就报告、以 127 退出。 */
+/* 在子进程里：命令名里没有 / 就到 /bin 下找，exec 它；exec 失败就报告、以 127 退出。名字太长不截短：截短了可能是别的程序。 */
 static void exec_command(char **argv)
 {
     redirect(argv);
@@ -115,7 +122,13 @@ static void exec_command(char **argv)
     if (!has_slash)
         for (const char *p = "/bin/"; *p; p++)
             path[len++] = *p;
-    for (const char *p = argv[0]; *p && len < sizeof(path) - 1; p++)
+    if (len + strlen(argv[0]) > sizeof(path) - 1) {
+        eprint("sh: ");
+        eprint(argv[0]);
+        eprint(": name too long\n");
+        exit(127);
+    }
+    for (const char *p = argv[0]; *p; p++)
         path[len++] = *p;
     path[len] = '\0';
     execv(path, argv);
@@ -210,8 +223,11 @@ static void on_intr(int sig)
     (void)sig;
 }
 
+#define LINE_TOO_LONG (-2)
+
 /*
- * 从 fd 读一行，去掉换行放进 line，返回长度；读完了返回 -1；被信号打断返回 -EINTR，已经读到的半行丢掉。
+ * 从 fd 读一行，去掉换行放进 line，返回长度；读完了返回 -1；被信号打断返回 -EINTR，已经读到的半行丢掉；
+ * 一行超过 127 个字节返回 LINE_TOO_LONG，整行都不要：截短了照样执行，可能删错文件。
  * 终端一次 read 正好是一行；文件一次读进来好几行，多出来的留在 buf 里给下一次。
  * 文件的最后一行没有换行也算一行，下一次再返回 -1。终端上在一行字后面按 Ctrl+D，read 交来的是不带换行的半行：
  * 先留着，接上后面敲的字，回车时一起算一行；接着再按一次 Ctrl+D（read 返回 0），这半行算一行，然后结束。
@@ -224,19 +240,22 @@ static int at_end;
 static int32_t read_line(int32_t fd, char *line)
 {
     uint32_t n = 0;
+    int too_long = 0;
     for (;;) {
         while (buf_pos < buf_len) {
             char c = buf[buf_pos++];
             if (c == '\n') {
                 line[n] = '\0';
-                return (int32_t)n;
+                return too_long ? LINE_TOO_LONG : (int32_t)n;
             }
-            if (n < LINE_LEN - 1)       /* 太长的行截断 */
+            if (n < LINE_LEN - 1)
                 line[n++] = c;
+            else
+                too_long = 1;
         }
         if (at_end) {
             line[n] = '\0';
-            return n ? (int32_t)n : -1;
+            return too_long ? LINE_TOO_LONG : n ? (int32_t)n : -1;
         }
         int32_t got = read(fd, buf, sizeof(buf));
         if (got == -EINTR)
@@ -254,13 +273,28 @@ int main(int sh_argc, char **sh_argv)
     char *argv[MAX_ARGS + 1];
     int32_t st, in = 0;
     int interactive = sh_argc < 2;
+    struct stat script;
 
+    if (!interactive && sh_argv[1][0] == '-') {     /* 不认识任何选项：#!/bin/sh -x 不能把 -x 当成脚本去打开 */
+        eprint("sh: ");
+        eprint(sh_argv[1]);
+        eprint(": unknown option\n");
+        return 2;
+    }
     if (!interactive && (in = open(sh_argv[1], O_RDONLY)) < 0) {
         eprint("sh: ");
         eprint(sh_argv[1]);
         eprint(": cannot open\n");
         return 1;
     }
+    if (!interactive && (stat(sh_argv[1], &script) < 0 || (script.mode & 0170000) == 0040000)) {
+        eprint("sh: ");
+        eprint(sh_argv[1]);
+        eprint(": is a directory\n");     /* 目录也能 read，读出来的是目录项，不能当命令 */
+        return 1;
+    }
+    if (!interactive)
+        fcntl(in, F_SETFD, FD_CLOEXEC);  /* 脚本的描述符不留给它运行的命令：每个任务只有 8 个 */
     /* 先问一下 SIGINT 原来怎么处理：signal 返回原来的处理方式，问的时候设成忽略，下面马上改回来 */
     sighandler_t old_intr = signal(SIGINT, SIG_IGN);
     intr_ignored = old_intr == SIG_IGN;
@@ -277,6 +311,10 @@ int main(int sh_argc, char **sh_argv)
         int32_t n = read_line(in, line);
         if (n == -1)                /* 读完了：脚本读到末尾，或者在空行上按了 Ctrl+D，像 exit 一样退出 */
             return 0;
+        if (n == LINE_TOO_LONG) {
+            eprint("sh: line too long\n");
+            continue;
+        }
         if (n < 0)
             continue;               /* 在提示符上按了 Ctrl+C（-EINTR）：终端已经回显 ^C，重新打提示符 */
         int argc = split(line, argv);
@@ -288,8 +326,16 @@ int main(int sh_argc, char **sh_argv)
             if (argc == 0)
                 continue;
         }
-        if (strcmp(argv[0], "exit") == 0)
-            return 0;
+        if (strcmp(argv[0], "exit") == 0) {     /* exit [退出码]：不给就是 0 */
+            uint32_t code = 0;
+            if (argc > 1 && !parse_uint(argv[1], 10, 255, &code)) {
+                eprint("sh: exit: ");
+                eprint(argv[1]);
+                eprint(": bad number\n");
+                continue;
+            }
+            return (int)code;
+        }
         if (strcmp(argv[0], "cd") == 0) {
             const char *dir = argc > 1 ? argv[1] : "/";
             if (chdir(dir) < 0) {
@@ -302,7 +348,7 @@ int main(int sh_argc, char **sh_argv)
         if (strcmp(argv[0], "help") == 0) {
             print("files: ls cat echo wc grep sort rm ln mv mkdir rmdir chmod touch df sync pwd\n");
             print("tasks: ps kill sleep date letter hello check\n");
-            print("built in: cd [dir], exit, help\n");
+            print("built in: cd [dir], exit [code], help\n");
             print("try: ls /bin | wc, echo hi > /tmp/a, cat < /tmp/a, cd /etc, letter D &\n");
             continue;
         }

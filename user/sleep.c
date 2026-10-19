@@ -16,19 +16,11 @@ static void on_alarm(int sig)
 
 int main(int argc, char **argv)
 {
-    uint32_t n = 0;
-    const char *p = argc == 2 ? argv[1] : "";
+    uint32_t n;
 
-    if (*p == '\0') {
+    if (argc != 2 || !parse_uint(argv[1], 10, 0xFFFFFFFF, &n)) {    /* 4294967296 不会回绕成 0 */
         eprint("usage: sleep seconds\n");
         return 2;
-    }
-    for (; *p; p++) {
-        if (*p < '0' || *p > '9') {
-            eprint("usage: sleep seconds\n");
-            return 2;
-        }
-        n = n * 10 + (uint32_t)(*p - '0');
     }
     if (n == 0)
         return 0;

@@ -5,6 +5,7 @@
  * check crash：往自己的代码里写，代码页是只读的，期望被缺页异常结束。
  * check badptr：把自己代码页的地址交给要写用户内存的系统调用，内核应当逐个返回 -1，自己照常运行，
  * 最后打印 badptr ok。内核要是等到写的时候才发现那一页是只读的，就只能停机了。
+ * check fds：打印开着的描述符，例如 fds: 0 1 2。看 exec 之后还留着哪些描述符（close-on-exec 关掉了哪些）。
  */
 #include "ulib.h"
 
@@ -98,6 +99,17 @@ int main(int argc, char **argv)
         for (uint32_t i = 0; ok && i < 25 * 1024; i++)
             ok &= p[i] == i;
         return ok ? 0 : 1;
+    }
+    if (argc == 2 && strcmp(argv[1], "fds") == 0) {
+        print("fds:");
+        for (int32_t fd = 0; fd < 8; fd++) {
+            if (fcntl(fd, F_GETFD, 0) >= 0) {
+                print(" ");
+                print_num((uint32_t)fd);
+            }
+        }
+        print("\n");
+        return 0;
     }
     if (argc == 2 && strcmp(argv[1], "malloc") == 0)
         return check_malloc() ? 0 : 1;

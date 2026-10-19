@@ -4,22 +4,15 @@
  */
 #include "ulib.h"
 
-/* 把十进制数（可以带负号）转成整数；不是数返回 0。 */
+/* 把十进制数（可以带负号）转成整数；不是数、太大返回 0。4294967297 不会回绕成 1，把信号发给别的任务。 */
 static int parse(const char *s, int32_t *out)
 {
     int neg = *s == '-';
-    int32_t n = 0;
+    uint32_t n;
 
-    if (neg)
-        s++;
-    if (*s == '\0')
+    if (!parse_uint(s + neg, 10, 0x7FFFFFFF, &n))
         return 0;
-    for (; *s; s++) {
-        if (*s < '0' || *s > '9')
-            return 0;
-        n = n * 10 + (*s - '0');
-    }
-    *out = neg ? -n : n;
+    *out = neg ? -(int32_t)n : (int32_t)n;
     return 1;
 }
 

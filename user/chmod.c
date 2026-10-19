@@ -3,19 +3,11 @@
 
 int main(int argc, char **argv)
 {
-    uint32_t mode = 0;
-    const char *p = argc >= 3 ? argv[1] : "";
+    uint32_t mode;
 
-    if (*p == '\0') {
+    if (argc < 3 || !parse_uint(argv[1], 8, 07777, &mode)) {
         eprint("usage: chmod mode file...\n");
         return 2;
-    }
-    for (; *p; p++) {
-        if (*p < '0' || *p > '7') {
-            eprint("usage: chmod mode file...\n");
-            return 2;
-        }
-        mode = mode * 8 + (uint32_t)(*p - '0');
     }
     int status = 0;
     for (int i = 2; i < argc; i++) {
