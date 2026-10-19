@@ -1526,6 +1526,48 @@ def test_script(m, elf):
         run_command(m, f"rm {f}")
 
 
+def test_shell_input(m, elf):
+    """shell 读命令：Ctrl+C 结束不了后台脚本里的命令；半行之后按 Ctrl+D 留着接上后面的字；半行之后按 Ctrl+C 丢掉它，shell 照常"""
+    for line in ("echo sleep 2 > /tmp/bg", "echo echo after >> /tmp/bg"):
+        check(run_command(m, line) == [], f"写脚本：{line}")
+    out = run_command(m, "sh /tmp/bg &")
+    check(len(out) == 1 and re.fullmatch(r"\[\d+\]", out[0]), f"后台运行脚本：{out!r}")
+    start = time.time()
+    time.sleep(0.3)
+    m.sendkeys(["ctrl-c"])
+    m.wait_for(lambda mm: "$ ^C" in console(mm), timeout=2, what="在提示符上按 Ctrl+C，终端回显 ^C")
+    time.sleep(max(0, 1.3 - (time.time() - start)))
+    printed = lambda mm: any("after" in r and "echo" not in r for r in console(mm))    # 不算敲进去的 echo echo after
+    check(not printed(m), f"后台脚本里的 sleep 2 不该被 Ctrl+C 结束，1.3 秒时还不该打印 after：{console(m)!r}")
+    m.wait_for(printed, timeout=4, what="后台脚本睡完 2 秒，接着打印 after")
+    m.sendkeys(["ret"])
+    wait_prompt(m)
+
+    before = run_command(m, "ps | grep sh")
+    type_text(m, "echo hi")
+    m.sendkeys(["ctrl-d"])
+    time.sleep(0.3)
+    type_text(m, "x\n")
+    m.wait_for(lambda mm: [r for r in console(mm) if r][-2:] == ["hix", "$"], timeout=3,
+               what="敲 echo hi、Ctrl+D、再敲 x 回车：半行留着，接上 x，一起执行，打印 hix")
+
+    type_text(m, "echo hi")
+    m.sendkeys(["ctrl-d"])
+    time.sleep(0.3)
+    m.sendkeys(["ctrl-c"])
+    m.wait_for(lambda mm: [r for r in console(mm) if r][-2:] == ["$ echo hi^C", "$"], timeout=3,
+               what="敲 echo hi、Ctrl+D、再按 Ctrl+C：回到提示符")
+    out = run_command(m, "echo ok")
+    check(out == ["ok"], f"Ctrl+C 丢掉了那半行，接着敲的命令照常执行：{out!r}")
+    rows = [r for r in console(m) if r]
+    check("hi" not in rows, f"被 Ctrl+C 取消的半行 echo hi 不该执行：{rows!r}")
+    after = run_command(m, "ps | grep sh")
+    shells = lambda rows: [r.split()[0] for r in rows if r.split()[1:2] == ["2"] and r.endswith(" sh")]   # init 拉起的 shell
+    check(len(shells(before)) == 1 and shells(before) == shells(after),
+          f"还是原来那个 shell，没有退出、被 init 重新拉起：之前 {before!r}，之后 {after!r}")
+    run_command(m, "rm /tmp/bg")
+
+
 
 def utc_now():
     return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
@@ -1573,7 +1615,7 @@ def test_stderr(m, elf):
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_console_scroll,
                 test_idle_in_hlt, test_demand_paging, test_fork_address_spaces, test_syscall_gate, test_user_setup, test_user_task,
-                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep, test_cache, test_ln_mv, test_script, test_clock, test_stderr]
+                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep, test_cache, test_ln_mv, test_script, test_shell_input, test_clock, test_stderr]
 SEPARATE_TESTS = [test_syscalls, test_page_alloc, test_double_free, test_hd_rw, test_early_key, test_keyboard_edge_cases, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,
                   test_big_kernel, test_user_write_kernel, test_user_privileged,
