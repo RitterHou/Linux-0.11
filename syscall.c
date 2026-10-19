@@ -415,6 +415,20 @@ static int32_t sys_brk(uint32_t addr, uint32_t b, uint32_t c, struct interrupt_f
     return (int32_t)sched_brk(addr);
 }
 
+/* alarm(seconds)：定闹钟，返回上一个还剩几秒，见 sched_alarm()。 */
+static int32_t sys_alarm(uint32_t seconds, uint32_t b, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)b, (void)c, (void)frame;
+    return (int32_t)sched_alarm(seconds);
+}
+
+/* pause()：等一个信号，返回 -EINTR。 */
+static int32_t sys_pause(uint32_t a, uint32_t b, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)a, (void)b, (void)c, (void)frame;
+    return sched_pause();
+}
+
 static const syscall_fn syscall_table[SYS_CALLS] = {
     [SYS_WRITE]  = sys_write,
     [SYS_GETPID] = sys_getpid,
@@ -440,6 +454,8 @@ static const syscall_fn syscall_table[SYS_CALLS] = {
     [SYS_SIGNAL] = sys_signal,
     [SYS_SETSID] = sys_setsid,
     [SYS_BRK]    = sys_brk,
+    [SYS_ALARM]  = sys_alarm,
+    [SYS_PAUSE]  = sys_pause,
 };
 
 void syscall_dispatch(struct interrupt_frame *frame)
