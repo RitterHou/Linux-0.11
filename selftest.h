@@ -41,6 +41,7 @@
 #define SELFTEST_USER_ALARM        37   /* alarm 和 pause：闹钟准时、剩几秒、取消、默认结束进程、fork 不继承、exec 保留 */
 #define SELFTEST_USER_SYNC         38   /* 延迟写回：写文件不马上写盘、sync 写回、换块时写回、读回来的内容对 */
 #define SELFTEST_USER_LINK         39   /* 硬链接：两个名字一个 i 节点、链接数、删一个名字不收回、错误情况 */
+#define SELFTEST_USER_TIME         40   /* 时间：日期换算、time 往前走、文件和目录的修改时间、utime */
 
 #define SELFTEST_IN_USER(n) ((n) >= 20)
 

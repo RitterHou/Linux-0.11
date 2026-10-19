@@ -107,6 +107,9 @@ void mem_show(void);
 #define TIMER_HZ 100                /* 与 Linux 0.11 的 HZ 相同，每 10 ms 一次 */
 extern volatile uint32_t timer_ticks;
 void timer_init(uint32_t hz);
+void time_init(void);
+uint32_t current_time(void);
+void clock_show(void);
 void timer_handle(void);
 
 /* sched.c：任务表、任务切换、睡眠与唤醒 */

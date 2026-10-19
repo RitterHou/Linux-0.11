@@ -67,7 +67,7 @@ $(BUILD)/floppy.img: $(BUILD)/boot.bin $(BUILD)/loader.bin $(BUILD)/kernel.bin M
 	dd if=$(BUILD)/kernel.bin of=$@ bs=512 seek=2 conv=notrunc
 
 # 用户程序：每个 user/名称.c 和 user/ulib.c 链接成 build/user/名称.elf，装进硬盘的 /bin/名称。
-USER_PROGS := sh ls cat echo ps wc grep sort rm ln mv mkdir rmdir chmod df sync pwd kill sleep hello check letter
+USER_PROGS := sh ls cat echo ps wc grep sort rm ln mv mkdir rmdir chmod touch df sync pwd date kill sleep hello check letter
 USER_ELFS := $(addprefix $(BUILD)/user/, $(addsuffix .elf, $(USER_PROGS)))
 
 $(BUILD)/user:

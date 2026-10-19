@@ -199,6 +199,9 @@ static int32_t sys_stat(uint32_t path, uint32_t st, uint32_t c, struct interrupt
     out->nlinks = inode.nlinks;
     out->size = inode.size;
     out->ino = ino;
+    out->uid = inode.uid;
+    out->gid = inode.gid;
+    out->mtime = inode.time;
     return 0;
 }
 
@@ -268,6 +271,27 @@ static int32_t path_op(uint32_t path, struct interrupt_frame *frame, int (*op)(c
         return -1;
     fs_lock();
     int ret = op(name);
+    fs_unlock();
+    return ret;
+}
+
+/* time()：现在的时间。Linux 0.11 的 sys_time() 还可以顺便写进用户给的变量。 */
+static int32_t sys_time(uint32_t a, uint32_t b, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)a, (void)b, (void)c, (void)frame;
+    return (int32_t)current_time();
+}
+
+/* utime(path, t)：改文件的修改时间。 */
+static int32_t sys_utime(uint32_t path, uint32_t t, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)c;
+    char name[PATH_MAX];
+
+    if (get_path(name, path, from_user_mode(frame)) < 0)
+        return -1;
+    fs_lock();
+    int ret = fs_utime(name, t);
     fs_unlock();
     return ret;
 }
@@ -497,6 +521,8 @@ static const syscall_fn syscall_table[SYS_CALLS] = {
     [SYS_SYNC]   = sys_sync,
     [SYS_LINK]   = sys_link,
     [SYS_CHMOD]  = sys_chmod,
+    [SYS_TIME]   = sys_time,
+    [SYS_UTIME]  = sys_utime,
 };
 
 void syscall_dispatch(struct interrupt_frame *frame)

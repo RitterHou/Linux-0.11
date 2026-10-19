@@ -342,6 +342,7 @@ static void account_idle(void)
         len++;
     vga_write_at(IDLE_ROW, IDLE_COL, "idle:    %", VGA_GRAY);
     vga_write_at(IDLE_ROW, IDLE_COL + 9 - len, digits, VGA_GRAY);   /* 百分数右对齐在 % 前面 */
+    clock_show();                   /* 每秒也刷新一次右边的时间 */
     idle = total = 0;
 }
 

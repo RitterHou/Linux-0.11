@@ -15,6 +15,7 @@ i 节点从 1 开始编号，1 号是根目录。每个 i 节点有 9 个区块�
 """
 import os
 import struct
+import time
 import sys
 
 BLOCK = 1024
@@ -112,6 +113,7 @@ def main():
     ino_of = {path: i + 1 for i, path in enumerate(order)}
 
     inodes = {}
+    now = int(time.time())
     for path in order:
         kind = tree[path]
         zones = [0] * 9
@@ -131,7 +133,9 @@ def main():
                 sys.exit(f"文件太大：{kind}")
             mode = S_IFREG | (0o755 if os.access(kind, os.X_OK) else 0o644)
             nlinks, zones = 1, store(content)
-        inodes[ino_of[path]] = struct.pack("<HHIIBB9H", mode, 0, len(content), 0, 0, nlinks, *zones)
+        # 修改时间：普通文件取源文件的，目录和设备文件取打包的时刻
+        mtime = int(os.stat(kind).st_mtime) if isinstance(kind, str) and kind != "dir" else now
+        inodes[ino_of[path]] = struct.pack("<HHIIBB9H", mode, 0, len(content), mtime, 0, nlinks, *zones)
     nodes = order
 
     # 位图：第 0 位保留不用，置 1；超出范围的位也置 1，免得被当成空闲

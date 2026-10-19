@@ -41,7 +41,9 @@
 #define SYS_SYNC   26               /* sync()：把缓冲区缓存里所有改过的块写回硬盘 */
 #define SYS_LINK   27               /* link(old, new)：给文件 old 再起一个名字 new */
 #define SYS_CHMOD  28               /* chmod(path, mode)：改文件的权限，比如 0755 让脚本能直接运行 */
-#define SYS_CALLS  29
+#define SYS_TIME   29               /* time()：现在是 1970 年 1 月 1 日（UTC）以来的第几秒 */
+#define SYS_UTIME  30               /* utime(path, t)：把文件的修改时间设成 t，t 为 0 就是现在 */
+#define SYS_CALLS  31
 
 /* fsinfo 写回的内容 */
 struct fsinfo {
@@ -57,7 +59,56 @@ struct stat {
     uint16_t nlinks;
     uint32_t size;
     uint32_t ino;
+    uint16_t uid, gid;              /* 文件的主人和组 */
+    uint32_t mtime;                 /* 最后一次修改的时间：1970 年以来的秒数 */
 };
+
+/*
+ * 日期和“1970 年 1 月 1 日 0 点（UTC）以来的秒数”互相换算，内核和用户程序都用。闰年：能被 4 整除，
+ * 但能被 100 整除的不是，能被 400 整除的又是。32 位无符号的秒数能用到 2106 年。
+ * Linux 0.11 的 kernel_mktime() 只认“每 4 年一个闰年”，也只用两位的年份：到了 2000 年就算错了（千年虫）。
+ */
+struct date {
+    int year, month, day;           /* month 和 day 从 1 开始 */
+    int hour, minute, second;
+};
+
+static inline int leap_year(int y)
+{
+    return (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+}
+
+static inline int month_days(int y, int m)
+{
+    static const uint8_t days[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    return days[m - 1] + (m == 2 && leap_year(y));
+}
+
+static inline uint32_t date_to_unix(const struct date *d)
+{
+    uint32_t days = 0;
+    for (int y = 1970; y < d->year; y++)
+        days += 365 + (uint32_t)leap_year(y);
+    for (int m = 1; m < d->month; m++)
+        days += (uint32_t)month_days(d->year, m);
+    days += (uint32_t)d->day - 1;
+    return days * 86400 + (uint32_t)(d->hour * 3600 + d->minute * 60 + d->second);
+}
+
+static inline void unix_to_date(uint32_t t, struct date *d)
+{
+    uint32_t days = t / 86400, rest = t % 86400;
+    d->hour = (int)(rest / 3600);
+    d->minute = (int)(rest / 60 % 60);
+    d->second = (int)(rest % 60);
+    d->year = 1970;
+    while (days >= 365u + (uint32_t)leap_year(d->year))
+        days -= 365u + (uint32_t)leap_year(d->year++);
+    d->month = 1;
+    while (days >= (uint32_t)month_days(d->year, d->month))
+        days -= (uint32_t)month_days(d->year, d->month++);
+    d->day = (int)days + 1;
+}
 
 /* taskinfo 写回的内容 */
 #define TASK_NAME_LEN 16
@@ -225,6 +276,16 @@ static inline uint32_t alarm(uint32_t seconds)
 static inline int32_t link(const char *oldpath, const char *newpath)
 {
     return syscall3(SYS_LINK, (uint32_t)oldpath, (uint32_t)newpath, 0);
+}
+
+static inline uint32_t time(void)
+{
+    return (uint32_t)syscall3(SYS_TIME, 0, 0, 0);
+}
+
+static inline int32_t utime(const char *path, uint32_t t)
+{
+    return syscall3(SYS_UTIME, (uint32_t)path, t, 0);
 }
 
 static inline int32_t chmod(const char *path, uint32_t mode)

@@ -76,6 +76,7 @@ int fs_mkdir(const char *path);
 int fs_unlink(const char *path);
 int fs_link(const char *oldpath, const char *newpath);
 int fs_chmod(const char *path, uint32_t mode);
+int fs_utime(const char *path, uint32_t t);
 int fs_rmdir(const char *path);
 struct fsinfo;
 int fs_info(struct fsinfo *info);

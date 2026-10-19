@@ -33,6 +33,7 @@ void kmain(void)
     pic_init();
     keyboard_init();                /* 读光开中断前就到达的按键，否则键盘中断可能再也不来 */
     timer_init(TIMER_HZ);
+    time_init();                    /* 读 CMOS 里的时钟，记下开机时间；Linux 0.11 的 main() 也在这时调用 time_init() */
     sched_init();                   /* 建好两个任务的 TSS，把 kmain 登记为任务 0 */
     hd_init();                      /* 问出硬盘的大小，第 1 行显示；打开 IRQ14 */
 
