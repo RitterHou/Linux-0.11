@@ -83,14 +83,14 @@ int user_range_ok(uint32_t addr, uint32_t size);
 int user_write_ok(uint32_t addr, uint32_t size);
 int copy_string(char *dst, uint32_t src, uint32_t max, int from_user);
 #define PATH_MAX 128                /* 路径最长 127 个字节（相对路径接上当前目录之后） */
-int handle_page_fault(uint32_t addr, uint32_t error_code);
+int handle_page_fault(uint32_t addr, uint32_t error_code, int can_sleep);
+uint32_t user_page_phys(uint32_t dir, uint32_t addr);
 uint32_t kernel_page_dir(void);
 uint32_t new_page_dir(void);
 void free_page_dir(uint32_t dir);
 uint32_t copy_page_dir(uint32_t src);
 uint32_t map_user_page(uint32_t dir, uint32_t addr, int writable);
-int user_page_writable(uint32_t dir, uint32_t addr);
-extern uint32_t page_faults, cow_faults;
+extern uint32_t page_faults, cow_faults, shared_pages;
 
 /* mem.c：物理页分配，管 LOW_MEM～HIGH_MEM 之间的页 */
 #define LOW_MEM   0x00100000u       /* 1 MB 以下归内核自己 */
@@ -169,6 +169,19 @@ void sched_exec_ids(int set_uid, uint32_t uid, int set_gid, uint32_t gid);
 struct tms;
 uint32_t sched_times(struct tms *buf);
 int do_exec(const char *path, uint32_t user_argv, struct interrupt_frame *frame);
+/* 程序的一个要装入的段：exec 时记下，缺页时照着从文件里读 */
+#define MAX_SEGS 4
+struct segment {
+    uint32_t vaddr, memsz;          /* 在用户空间里占 [vaddr, vaddr + memsz) */
+    uint32_t offset, filesz;        /* 文件里的 [offset, offset + filesz)，后面到 memsz 是 .bss，补 0 */
+    int writable;
+};
+struct m_inode;
+struct m_inode *sched_set_exec(struct m_inode *ip, const struct segment *segs, int n);
+struct m_inode *current_exec(const struct segment **segs, int *n);
+uint32_t sched_share_page(struct m_inode *ip, uint32_t va);
+void sched_drop_exec(void);
+int exec_fill_page(uint32_t va, uint32_t page, int *writable);
 #define EXIT_KILLED 0x100           /* 被异常结束时留给父进程的状态：0x100 加异常号 */
 #define EXIT_SIGNAL 0x200           /* 被信号结束时的状态：0x200 加信号编号 */
 #define TASK_MESSAGE_ROW 7          /* 任务结束的消息写在第 7 行 */

@@ -19,7 +19,7 @@
 static uint8_t mem_map[PAGING_PAGES];   /* 在 .bss，由 entry.asm 清零：开始时全部空闲 */
 static uint32_t free_pages;
 
-/* 第 3 行：还剩几页，以及缺页异常补上了几次（paging.c 的 page_faults）。 */
+/* 第 3 行：还剩几页，缺页异常补上了几次、写时复制了几次、和别的进程共用了几次程序的页（见 paging.c）。 */
 void mem_show(void)
 {
     struct text_line line;
@@ -33,6 +33,8 @@ void mem_show(void)
     line_append_dec(&line, page_faults);
     line_append(&line, "  copy-on-write: ");
     line_append_dec(&line, cow_faults);
+    line_append(&line, "  shared: ");
+    line_append_dec(&line, shared_pages);
     line_show(&line, VGA_GRAY, MEMORY_ROW);
 }
 

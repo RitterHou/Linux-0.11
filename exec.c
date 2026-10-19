@@ -5,8 +5,9 @@
  *   1. 把参数从用户内存复制进内核：马上要扔掉旧的地址空间，它们会跟着消失。路径已由 sys_exec() 复制好。
  *   2. 检查有执行权限（root 也要至少有一个执行位），读 ELF 头和程序头，检查是 32 位 x86 的可执行文件、
  *      要装入的段都落在用户空间里。文件有 setuid 位的，第 5 步成功以后有效用户号换成文件的主人（setgid 位换组）。
- *   3. 建一份新的页目录，把每个要装入的段（PT_LOAD）一页页放进去：分一页，按物理地址把文件内容读进来，
- *      多出来的部分（.bss）保持为 0。代码段只读，数据段可写。
+ *   3. 建一份新的页目录，里面什么也不放：只把每个要装入的段（PT_LOAD）在用户空间里的位置、在文件里的位置记下来，
+ *      程序用到哪一页，缺页异常才从文件里读那一页（按需装入，见 exec_fill_page()），只读的页还能和别的进程共用。
+ *      所以程序运行时要一直引用着它的文件（任务的 exec_ip），这时谁也不能写这个文件。
  *   4. 在栈顶摆好参数：字符串、argv 指针数组、argv、argc，最下面再放一个假的返回地址，
  *      于是程序的入口 _start(argc, argv) 可以写成一个普通的 C 函数。
  *   5. 都成功了，才换上新页目录、收回旧的，再改写栈上保存的现场：EIP 改成程序的入口，ESP 改成新栈顶。
@@ -15,7 +16,7 @@
  * 解释器的名字、那个参数（有的话）、脚本的路径、原来的 argv[1] 以后。于是 #!/bin/sh 开头的脚本，
  * 运行起来就是 sh 脚本路径 参数…。解释器自己不能又是脚本。Linux 0.11 的 do_execve() 也是这样（tytso 加的），
  * 不同的是：它的第一行可以长到 1022 个字节，这里只有 127；它把行尾的空白留在参数里，这里去掉（后来的 Linux 也去掉）。
- * Linux 0.11 读的是 a.out 格式：程序的页在缺页时才从文件里读（do_no_page() 调用 bread_page()），
+ * Linux 0.11 读的是 a.out 格式，同样是程序的页在缺页时才从文件里读（do_no_page() 调用 bread_page()），
  * 参数放在栈顶的几页里，同样是改写栈上的 eip 和 esp，让系统调用“返回”到新程序。
  */
 #include "kernel.h"
@@ -38,6 +39,7 @@ struct elf_phdr {
 } __attribute__((packed));
 
 #define PT_LOAD 1                   /* 要装入内存的段 */
+static int first_load = 1;          /* 还没从硬盘装入过程序的页：第一次装入时在第 0 行写 E */
 #define PF_W    2                   /* 段可写 */
 
 static int elf_ok(const struct elf_header *eh)
@@ -129,33 +131,64 @@ static int script(const char *path, uint32_t dev, const struct minix_inode *ip, 
     return 0;
 }
 
-/* 把一个要装入的段放进新的页目录 dir。 */
-static int load_segment(uint32_t dir, uint32_t dev, const struct minix_inode *ip, const struct elf_phdr *ph)
+/*
+ * 把一个要装入的段记进 segs[*n]。段要落在程序区里（栈区以下），和别的段共用一页的话可写属性要一样：
+ * 那一页没法同时又只读又可写。用户程序的链接脚本让数据段从新的一页开始。
+ */
+static int add_segment(struct segment *segs, int *n, const struct elf_phdr *ph)
 {
     uint32_t end = ph->vaddr + ph->memsz;
 
-    if (ph->filesz > ph->memsz || ph->vaddr < USER_LOW || end < ph->vaddr || end > STACK_LOW)
+    if (*n == MAX_SEGS || ph->filesz > ph->memsz || ph->vaddr < USER_LOW || end < ph->vaddr || end > STACK_LOW)
         return -1;
-    for (uint32_t va = ph->vaddr & ~(PAGE_SIZE - 1); va < end; va += PAGE_SIZE) {
-        /* 和前一个段共用一页、可写属性又不一样：那一页没法同时又只读又可写，不装 */
-        if (user_page_writable(dir, va) >= 0 && user_page_writable(dir, va) != !!(ph->flags & PF_W))
-            return -1;
-        uint32_t page = map_user_page(dir, va, ph->flags & PF_W);
-        if (page == 0)
-            return -1;
-        /* 这一页里属于文件内容的部分：[lo, hi)；其余是 .bss 或页内的空隙，分页时已经清零 */
-        uint32_t lo = va > ph->vaddr ? va : ph->vaddr;
-        uint32_t hi = va + PAGE_SIZE < ph->vaddr + ph->filesz ? va + PAGE_SIZE : ph->vaddr + ph->filesz;
-        if (lo < hi && inode_read(dev, ip, ph->offset + (lo - ph->vaddr), (void *)(page + (lo - va)), hi - lo) !=
-                           (int32_t)(hi - lo))
+    struct segment seg = { ph->vaddr, ph->memsz, ph->offset, ph->filesz, !!(ph->flags & PF_W) };
+    uint32_t lo = seg.vaddr & ~(PAGE_SIZE - 1), hi = (end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);  /* 占的页 */
+    for (int i = 0; i < *n; i++) {
+        uint32_t a = segs[i].vaddr & ~(PAGE_SIZE - 1);
+        uint32_t b = (segs[i].vaddr + segs[i].memsz + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+        if (segs[i].writable != seg.writable && lo < b && a < hi)
             return -1;
     }
+    segs[(*n)++] = seg;
     return 0;
+}
+
+/*
+ * 缺页时调用（见 paging.c 的 load_program_page()）：把当前任务的程序里 va 这一页的内容放进物理页 page（已清零）。
+ * 一页里可能有好几个段的一部分：每个段属于文件的那部分从文件里读，其余（.bss、段之间的空隙）留着 0。
+ * *writable 告诉调用者这一页要不要可写。读文件要拿文件系统锁、会睡，调用者开着中断。
+ * 返回 1 成功，-1 读不出来。Linux 0.11 的 do_no_page() 用 bread_page() 一次读一页的 4 个块，再把 .bss 的部分清零。
+ */
+int exec_fill_page(uint32_t va, uint32_t page, int *writable)
+{
+    const struct segment *segs;
+    int n, ok = 1;
+    struct m_inode *ip = current_exec(&segs, &n);
+
+    if (!ip)
+        return -1;
+    fs_lock();
+    for (int i = 0; i < n && ok; i++) {
+        const struct segment *sg = &segs[i];
+        if (va >= sg->vaddr + sg->memsz || va + PAGE_SIZE <= sg->vaddr)
+            continue;
+        *writable |= sg->writable;
+        uint32_t lo = va > sg->vaddr ? va : sg->vaddr;
+        uint32_t hi = va + PAGE_SIZE < sg->vaddr + sg->filesz ? va + PAGE_SIZE : sg->vaddr + sg->filesz;
+        if (lo < hi && inode_read(ip->dev, &ip->d, sg->offset + (lo - sg->vaddr), (void *)(page + (lo - va)), hi - lo) !=
+                           (int32_t)(hi - lo))
+            ok = 0;
+    }
+    fs_unlock();
+    if (ok && first_load) {
+        first_load = 0;
+        vga_write_at(0, 11, "E", VGA_GRAY);     /* 第一次从硬盘装入程序的页 */
+    }
+    return ok ? 1 : -1;
 }
 
 int do_exec(const char *path, uint32_t user_argv, struct interrupt_frame *frame)
 {
-    static int first = 1;
     char args[ARG_BYTES];
     uint32_t offsets[MAX_ARGS];
     uint32_t argc = 0, used = 0;
@@ -199,22 +232,33 @@ int do_exec(const char *path, uint32_t user_argv, struct interrupt_frame *frame)
     if (inode_read(dev, &ip, eh.phoff, ph, ph_bytes) != (int32_t)ph_bytes)
         return -1;
 
-    /* 3. 新的地址空间 */
-    uint32_t dir = new_page_dir();
-    if (dir == 0)
-        return -1;
+    /* 3. 新的地址空间：只记下段，一页也不装 */
+    struct segment segs[MAX_SEGS];
+    int nsegs = 0, top_writable = 0;
     uint32_t end = USER_LOW;                /* 最高的段的末尾（.bss 的末尾）：堆从这里开始 */
     for (uint32_t i = 0; i < eh.phnum; i++) {
         if (ph[i].type != PT_LOAD || ph[i].memsz == 0)
             continue;
-        if (load_segment(dir, dev, &ip, &ph[i]) < 0)
-            goto fail;
-        if (ph[i].vaddr + ph[i].memsz > end)
+        if (add_segment(segs, &nsegs, &ph[i]) < 0)
+            return -1;
+        if (ph[i].vaddr + ph[i].memsz > end) {
             end = ph[i].vaddr + ph[i].memsz;
+            top_writable = !!(ph[i].flags & PF_W);
+        }
     }
     /* 最高的段是只读的（程序没有数据段）：它最后一页里剩下的地方写不了，堆从下一页开始 */
-    if ((end & (PAGE_SIZE - 1)) && user_page_writable(dir, end) != 1)
+    if ((end & (PAGE_SIZE - 1)) && !top_writable)
         end = (end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    struct m_inode *prog = iget(dev, ino);  /* 运行期间一直引用着程序文件 */
+    if (!prog || prog->writers > 0) {       /* 有人开着它在写：装进来的页可能对不上（ETXTBSY） */
+        iput(prog);
+        return -1;
+    }
+    uint32_t dir = new_page_dir();
+    if (dir == 0) {
+        iput(prog);
+        return -1;
+    }
 
     /* 4. 栈顶这一页：从上往下依次是参数字符串、argv[argc] = 0、argv[0..argc-1]、argv、argc、假的返回地址 */
     uint32_t top = USER_TOP - PAGE_SIZE;
@@ -236,8 +280,14 @@ int do_exec(const char *path, uint32_t user_argv, struct interrupt_frame *frame)
     sp -= 4, *AT(sp) = 0;
 #undef AT
 
-    /* 5. 换上新的地址空间，收回旧的，改写返回现场 */
+    /* 5. 换上新的地址空间，收回旧的，换上新的程序文件，改写返回现场 */
     free_page_dir(sched_set_page_dir(dir));
+    prog->execs++;
+    struct m_inode *old = sched_set_exec(prog, segs, nsegs);
+    if (old) {                      /* 调用者拿着文件系统锁 */
+        old->execs--;
+        iput(old);
+    }
     frame->eip = eh.entry;
     frame->user_esp = sp;
     frame->eflags = 0x202;          /* IF=1，其余标志清零 */
@@ -246,13 +296,10 @@ int do_exec(const char *path, uint32_t user_argv, struct interrupt_frame *frame)
     sched_exec_ids(ip.mode & S_ISUID, ip.uid, ip.mode & S_ISGID, ip.gid);   /* setuid 程序：以文件主人的身份运行 */
     sched_exec_signals();           /* 原来的处理函数在新程序里没有意义 */
     sched_set_brk(end);             /* 新程序的堆是空的，从它的 .bss 末尾开始 */
-    if (first) {
-        first = 0;
-        vga_write_at(0, 11, "E", VGA_GRAY);     /* 第一次从硬盘装入程序 */
-    }
     return 0;                       /* 作为 EAX 交给新程序 */
 
 fail:
     free_page_dir(dir);
+    iput(prog);
     return -1;
 }
