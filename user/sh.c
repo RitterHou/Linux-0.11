@@ -6,6 +6,9 @@
  *     2> 文件、2>> 文件：标准错误写进文件；2>&1：标准错误也接到标准输出那里。都是子进程在 exec 之前用 dup2 接好。
  *     出错的消息都写到标准错误（2 号），所以管道里只有数据；
  *   - 最后一个参数是 & 的，在后台运行，不等它；每次读命令之前收走已经结束的后台程序；
+ *   - 在终端上交互时，读命令用自己的行编辑（edit_line）：左右方向键挪光标，在光标处插入、退格，Home/End（Ctrl+A/E）
+ *     到行首行尾，上下方向键翻出以前敲过的命令（最近 16 条）。为此读的时候把终端换成原始模式、关掉回显，
+ *     每个键马上交来，回显由 shell 自己用转义序列画；读完换回规范模式再运行命令，程序看到的终端和原来一样。
  *   - Ctrl+C：终端给前台进程组发 SIGINT。shell 自己接住它（on_intr），被打断的 read 返回 -EINTR，
  *     重新打出提示符；被打断的 waitpid 也返回 -EINTR，接着等。前台的子进程在 exec 之前改回默认，就被结束；
  *     后台的子进程改成忽略，exec 之后也不变，所以 Ctrl+C 停不了后台程序，要用 kill。后台运行的脚本也是这样：
@@ -268,6 +271,152 @@ static int32_t read_line(int32_t fd, char *line)
     }
 }
 
+/* ------------------------------------------------------------------ 行编辑和历史 */
+
+#define HISTORY 16
+static char history[HISTORY][LINE_LEN];     /* 敲过的命令，最近 16 条，环形放 */
+static int history_count;                   /* 一共记过几条 */
+static struct termios sane;                 /* 运行命令时终端该有的样子：规范模式、回显，开机时就是这样 */
+
+static void put(const char *s, uint32_t n)
+{
+    if (n)
+        write(1, s, n);
+}
+
+/* 光标往左挪 k 格：ESC [ k D。控制台和串口那头的终端都认得 */
+static void cursor_left(uint32_t k)
+{
+    if (k == 0)
+        return;
+    char buf[16] = "\x1b[";
+    uint32_t n = 2, digits = 1;
+    for (uint32_t v = k; v >= 10; v /= 10)
+        digits++;
+    for (uint32_t i = digits; i > 0; i--, k /= 10)
+        buf[n + i - 1] = (char)('0' + k % 10);
+    n += digits;
+    buf[n++] = 'D';
+    put(buf, n);
+}
+
+/* 光标从 cur 起往后的部分重画：打印 line[cur..n)，擦掉行尾剩下的旧字，再挪回 cur */
+static void redraw_tail(const char *line, uint32_t cur, uint32_t n)
+{
+    put(line + cur, n - cur);
+    put("\x1b[K", 3);
+    cursor_left(n - cur);
+}
+
+/* 换成另一行（翻历史时）：光标退到行首，画新的一行，擦掉旧的剩下的字 */
+static void replace_line(char *line, uint32_t *cur, uint32_t *n, const char *text)
+{
+    cursor_left(*cur);
+    *n = 0;
+    while (text[*n] && *n < LINE_LEN - 1) {
+        line[*n] = text[*n];
+        (*n)++;
+    }
+    *cur = *n;
+    put(line, *n);
+    put("\x1b[K", 3);
+}
+
+/*
+ * 在终端上读一行命令（提示符已经打好了），去掉换行放进 line，返回长度；在空行上按 Ctrl+D 返回 -1；Ctrl+C 返回 -EINTR。
+ * 终端换成原始模式、关掉回显，一次读一个字节，自己处理：
+ *   普通字符插在光标处；退格删掉光标前的一个；左右方向键挪光标；Home、End（Ctrl+A、Ctrl+E）到行首行尾；
+ *   上下方向键翻历史：往上是更早的命令，往下回到较新的，最下面是正在敲的这一行；回车交出这一行，不空就记进历史。
+ * 屏幕上的样子靠转义序列画：ESC [ n D 往左挪，ESC [ K 擦到行尾，往右挪是 ESC [ C。读完换回规范模式。
+ * bash 用的 readline 库做的是同样的事，还多得多。
+ */
+static int32_t edit_line(char *line)
+{
+    struct termios raw = sane;
+    raw.c_lflag &= ~(uint32_t)(ICANON | ECHO);
+    ioctl(0, TCSETS, &raw);
+    uint32_t n = 0, cur = 0;
+    int browse = history_count;                 /* 正在看第几条历史；等于 history_count 是正在敲的这一行 */
+    char typing[LINE_LEN];                      /* 翻历史之前正在敲的这一行 */
+    int32_t result;
+
+    for (;;) {
+        char c, seq[2];
+        int32_t got = read(0, &c, 1);
+        if (got == -EINTR) {
+            print("^C\n");                    /* 回显关着，终端没有回显 ^C */
+            result = -EINTR;
+            break;
+        }
+        if (got <= 0) {
+            result = -1;
+            break;
+        }
+        if (c == '\n') {
+            print("\n");
+            line[n] = '\0';
+            result = (int32_t)n;
+            break;
+        }
+        if (c == 0x04) {                        /* Ctrl+D：空行上是结束输入，否则不理 */
+            if (n == 0) {
+                result = -1;
+                break;
+            }
+            continue;
+        }
+        if (c == 0x1B) {                        /* 方向键：ESC [ 再一个字母 */
+            if (read(0, &seq[0], 1) != 1 || seq[0] != '[' || read(0, &seq[1], 1) != 1)
+                continue;
+            c = seq[1] == 'D' ? 0x02 : seq[1] == 'C' ? 0x06 : seq[1] == 'H' ? 0x01 : seq[1] == 'F' ? 0x05 :
+                seq[1] == 'A' ? 0x10 : seq[1] == 'B' ? 0x0E : 0;     /* 换成 Emacs 的键：Ctrl+B、F、A、E、P、N */
+        }
+        if (c == 0x02 && cur > 0) {             /* 左 */
+            cursor_left(1);
+            cur--;
+        } else if (c == 0x06 && cur < n) {      /* 右 */
+            put("\x1b[C", 3);
+            cur++;
+        } else if (c == 0x01) {                 /* 行首 */
+            cursor_left(cur);
+            cur = 0;
+        } else if (c == 0x05) {                 /* 行尾 */
+            put(line + cur, n - cur);
+            cur = n;
+        } else if ((c == 0x10 && browse > 0 && browse > history_count - HISTORY) || (c == 0x0E && browse < history_count)) {
+            if (browse == history_count) {      /* 离开正在敲的这一行：先存起来 */
+                for (uint32_t i = 0; i < n; i++)
+                    typing[i] = line[i];
+                typing[n] = '\0';
+            }
+            browse += c == 0x10 ? -1 : 1;
+            replace_line(line, &cur, &n, browse == history_count ? typing : history[browse % HISTORY]);
+        } else if (c == '\b' && cur > 0) {      /* 退格：删掉光标前的一个 */
+            for (uint32_t i = cur - 1; i + 1 < n; i++)
+                line[i] = line[i + 1];
+            n--, cur--;
+            cursor_left(1);
+            redraw_tail(line, cur, n);
+        } else if ((uint8_t)c >= ' ' && c != 0x7F && n < LINE_LEN - 1) {     /* 普通字符：插在光标处 */
+            for (uint32_t i = n; i > cur; i--)
+                line[i] = line[i - 1];
+            line[cur] = c;
+            n++;
+            put(&line[cur], 1);
+            cur++;
+            if (cur < n)
+                redraw_tail(line, cur, n);
+        }
+    }
+    ioctl(0, TCSETS, &sane);
+    if (result > 0 && (history_count == 0 || strcmp(history[(history_count - 1) % HISTORY], line) != 0)) {
+        for (uint32_t i = 0; i <= n; i++)       /* 和上一条一样的不重复记 */
+            history[history_count % HISTORY][i] = line[i];
+        history_count++;
+    }
+    return result;
+}
+
 int main(int sh_argc, char **sh_argv)
 {
     char line[LINE_LEN];
@@ -300,6 +449,9 @@ int main(int sh_argc, char **sh_argv)
     sighandler_t old_intr = signal(SIGINT, SIG_IGN);
     intr_ignored = old_intr == SIG_IGN;
     signal(SIGINT, interactive && !intr_ignored ? on_intr : old_intr);  /* Ctrl+C 结束的是前台程序，不是 shell 自己 */
+    /* 标准输入是终端（TCGETS 成功）才用行编辑；管道、文件照旧一行行读。终端开机时是规范模式、回显，记下来 */
+    int editing = interactive && ioctl(0, TCGETS, &sane) == 0;
+    sane.c_lflag |= ICANON | ECHO;
     if (interactive) {
         signal(SIGTERM, SIG_IGN);   /* kill 0 发给这一组，也不该把 shell 自己结束；kill -9 才行 */
         print("shell on hda: try help, ls /bin, cat /hello.txt, ps\n");
@@ -309,7 +461,7 @@ int main(int sh_argc, char **sh_argv)
             ;                       /* 收走结束了的后台程序 */
         if (interactive)
             print("$ ");
-        int32_t n = read_line(in, line);
+        int32_t n = editing ? edit_line(line) : read_line(in, line);
         if (n == -1)                /* 读完了：脚本读到末尾，或者在空行上按了 Ctrl+D，像 exit 一样退出 */
             return 0;
         if (n == LINE_TOO_LONG) {
@@ -317,7 +469,7 @@ int main(int sh_argc, char **sh_argv)
             continue;
         }
         if (n < 0)
-            continue;               /* 在提示符上按了 Ctrl+C（-EINTR）：终端已经回显 ^C，重新打提示符 */
+            continue;               /* 在提示符上按了 Ctrl+C（-EINTR）：已经回显 ^C，重新打提示符 */
         int argc = split(line, argv);
         if (argc == 0 || argv[0][0] == '#')
             continue;               /* 空行和注释 */
