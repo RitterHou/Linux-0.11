@@ -2341,6 +2341,7 @@ def test_shell_language(m, elf):
         ("x=hello", []), ("echo $x ${x}! \"$x  world\" '$x' \\$x", ["hello hello! hello  world $x $x"]),
         ("echo 'a  b'   c\\ d", ["a  b c d"]), ("echo $nosuch end", ["end"]), ('echo "" end', [" end"]),
         ("echo a # a comment", ["a"]), ("echo a#b", ["a#b"]),
+        ("echo $$ > /tmp/pid; echo $$ | cat >> /tmp/pid", []),
         ("false; echo $?", ["1"]), ("true; echo $?", ["0"]), ("nosuch; echo $?", ["sh: nosuch: not found", "127"]),
         ("echo $((1+2*3)) $(( (2+3) % 4 )) $((-7/2))", ["7 1 -3"]), ("echo $((10-2-3)) $((20/2/5))", ["5 2"]), ("i=5; echo $((i*2-1)) $(($i>4)) $((i==4))", ["9 1 0"]),
         ("echo $((7/0)); echo $?", ["sh: division by zero", "1"]), ("echo ${x", ["sh: bad substitution"]),
@@ -2359,6 +2360,11 @@ def test_shell_language(m, elf):
         ("fi", ["sh: syntax error near fi"]), ("if true; then echo x; done", ["sh: syntax error near done"]),
         ("echo a ;; echo b", ["sh: syntax error near ;"]), ("echo $?", ["2"]),
     ])
+    # $$ 是 shell 自己的号：命令的词在子进程里展开，也不能变成子进程的号
+    shell = [r.split() for r in run_command(m, "ps") if r.split()[2:] == ["W", "sh"]]
+    pids = run_command(m, "cat /tmp/pid")
+    check(len(shell) == 1 and pids == [shell[0][0]] * 2, f"$$ 应是 shell 的任务号 {shell!r}，echo $$ 和管道里的 echo $$ 得到 {pids!r}")
+    run_command(m, "rm /tmp/pid")
     # 没写完：if 没有 fi、末尾是 |，接着打 > 读下一行
     wait_prompt(m)
     for line, prompt in [("if true", "> "), ("then echo multi", "> "), ("fi", None)]:
