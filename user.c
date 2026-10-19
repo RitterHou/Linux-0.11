@@ -872,7 +872,8 @@ void user_main(void)
 #elif SELFTEST == SELFTEST_USER_ALARM
     /*
      * 每一项通过就写一个字母，期望第 6 行（去掉任务 A 的 A）是 crpkfe：
-     *   c：alarm(1) 之后一直 sleep(5)：大约 20 次之后 SIGALRM 来了，处理函数接住，正在睡的 sleep 被打断。
+     *   c：alarm(1) 之后 sleep 3 秒：1 秒后 SIGALRM 来了，处理函数接住，正在睡的 sleep 被打断，提前返回
+     *      （按 time 算睡了 1 或 2 秒；不被打断要睡满 3 秒）。
      *   r：alarm 返回上一个闹钟还剩几秒（向上取整）：没有就是 0，刚定了 3 秒就是 3，过了半秒还是 3；alarm(0) 取消，之后睡 1.5 秒也不响。
      *   p：pause 睡到闹钟响，处理函数运行之后返回 -EINTR。
      *   k：没设处理函数的子进程，闹钟一响就被 SIGALRM 结束（状态 0x20E）。
@@ -886,12 +887,10 @@ void user_main(void)
     signal(SIGALRM, on_alarm);
     rang = 0;
     alarm(1);
-    int k = 0;
-    while (!rang && k < 100) {
-        sleep(5);
-        k++;
-    }
-    int ok = rang == SIGALRM && k >= 15 && k <= 25;
+    uint32_t t0 = time();
+    sleep(300);
+    uint32_t slept = time() - t0;
+    int ok = rang == SIGALRM && slept >= 1 && slept <= 2;
     res[nres++] = ok ? 'c' : 'C';
 
     rang = 0;

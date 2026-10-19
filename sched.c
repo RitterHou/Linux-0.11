@@ -310,11 +310,10 @@ static void reschedule(void)
         switch_to(next);
 }
 
-/* 叫醒睡到时间的任务。用差值比较，timer_ticks 回绕到 0 后也对。 */
 static void send_signal(int n, int sig);
 
 /*
- * 叫醒到时间的任务，给闹钟到了的任务发 SIGALRM（它要是在睡，信号也会把它叫醒）。
+ * 叫醒到时间的任务，给闹钟到了的任务发 SIGALRM（它要是在睡，信号也会把它叫醒）。用差值比较，timer_ticks 回绕到 0 后也对。
  * Linux 0.11 的 schedule() 开头也是这样查一遍每个任务的 alarm。
  */
 static void wake_sleepers(void)
@@ -561,7 +560,9 @@ uint32_t sched_alarm(uint32_t seconds)
 
 /*
  * pause 系统调用：睡下，直到来了一个信号，返回 -EINTR。信号设了处理函数的，处理完 pause 才返回；
- * 没设的，进程就此结束。和 sleep 一样是可以被信号打断的睡眠，ps 里是 S。Linux 0.11 的 sys_pause() 也是这样。
+ * 没设的，进程就此结束。和 sleep 一样是可以被信号打断的睡眠，ps 里是 S。
+ * Linux 0.11 的 sys_pause() 只把状态设成 TASK_INTERRUPTIBLE、调度一次，醒来就返回 0：能叫醒这种睡眠的
+ * 只有信号，效果差不多。这里醒来再查一遍有没有信号，没有就接着睡；返回 -EINTR 是 POSIX 的规定。
  */
 int sched_pause(void)
 {
