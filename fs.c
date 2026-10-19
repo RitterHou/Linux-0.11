@@ -23,6 +23,11 @@
 #define SUPER_MAGIC 0x137F           /* Minix v1，文件名 14 个字节 */
 #define INODES_PER_BLOCK (BLOCK_SIZE / sizeof(struct minix_inode))
 #define ZONES_PER_BLOCK  (BLOCK_SIZE / 2)
+/*
+ * 一个 i 节点最多有几个名字。链接数在 Minix v1 的 i 节点里只有一个字节，第 256 个名字会让它回绕成 0，
+ * 文件就在还有 255 个名字指着的时候被收回了。Linux 0.11 的 sys_link() 不查，后来 Linux 的 minix 驱动定为 250。
+ */
+#define LINK_MAX 250
 
 static struct {                     /* 磁盘上的超级块 */
     uint16_t ninodes;
@@ -149,7 +154,16 @@ int32_t inode_read(const struct minix_inode *ip, uint32_t pos, void *dst, uint32
     return (int32_t)done;
 }
 
-/* 在目录 dir 里找名字为 name（长 len）的项，返回它的 i 节点号；找不到返回 0。 */
+/* 路径是不是以 / 结尾（根目录 / 自己不算）。 */
+static int trailing_slash(const char *path)
+{
+    int n = 0;
+    while (path[n])
+        n++;
+    return n > 1 && path[n - 1] == '/';
+}
+
+/* 在目录 dir 里找名字为 name（长 len）的项，返回它的 i 节点号；找不到返回 0。读目录出错也返回 0，当作没找到。 */
 static uint32_t lookup(const struct minix_inode *dir, const char *name, int len)
 {
     struct dir_entry de;
@@ -197,6 +211,8 @@ int namei(const char *path, uint32_t *ino, struct minix_inode *ip)
             return -1;
         p += len;
     }
+    if (trailing_slash(path) && (ip->mode & S_IFMT) != S_IFDIR)
+        return -1;                  /* /hello.txt/：末尾的 / 说的是目录，可它是文件 */
     *ino = n;
     return 0;
 }
@@ -326,9 +342,15 @@ static uint32_t alloc_block(void)
         return 0;
     uint32_t block = sb.firstdatazone + bit - 1;
     struct buffer *b = bget(block);
-    if (!b)
+    if (!b) {                       /* 缓冲区换不出来（脏块写不回去）：把位还回去，不然这一块就再也分不出去了 */
+        free_bit(2 + sb.imap_blocks, bit);
         return 0;
-    bdirty(b);                      /* 清零了的新块：以后写回去，免得硬盘上留着这一块原来的内容 */
+    }
+    /*
+     * 清零了的新块：以后写回去，免得文件里读到这一块原来的内容。写回没有先后顺序，突然断电时可能 i 节点和
+     * 间接块已经写到硬盘上，这一块还没有，文件里就露出了旧数据；Linux 0.11 的 new_block() 也是这样。
+     */
+    bdirty(b);
     brelse(b);
     return block;
 }
@@ -467,14 +489,18 @@ void fs_truncate(struct m_inode *ip)
 
 /* ------------------------------------------------------------------ 目录项 */
 
-/* 在目录 dir 里找名字为 name（长 len）的项，返回它的 i 节点号，并给出它在目录里的位置。 */
+/*
+ * 在目录 dir 里找名字为 name（长 len）的项，返回它的 i 节点号，并给出它在目录里的位置；找不到返回 0。
+ * 读目录出错返回 ENTRY_ERROR：要是也当成“没找到”，新建文件时就可能在目录里加出两个同名的项。
+ */
+#define ENTRY_ERROR 0xFFFFFFFFu
 static uint32_t find_entry(struct m_inode *dir, const char *name, int len, uint32_t *where)
 {
     struct dir_entry de;
 
     for (uint32_t pos = 0; pos + sizeof(de) <= dir->d.size; pos += sizeof(de)) {
         if (inode_read(&dir->d, pos, &de, sizeof(de)) != sizeof(de))
-            return 0;
+            return ENTRY_ERROR;
         if (de.inode == 0)
             continue;
         int i = 0;
@@ -536,13 +562,16 @@ static struct m_inode *dir_of(const char *path, const char **name, int *len)
     return iget(ino);
 }
 
-/* 新建一个文件或目录，返回它的 i 节点（iget 过）。已经存在、目录不存在、磁盘或 i 节点用完了返回 0。 */
+/*
+ * 新建一个文件或目录，返回它的 i 节点（iget 过）。已经存在、目录不存在、磁盘或 i 节点用完了返回 0。
+ * 以 / 结尾的路径只能新建目录：open("/tmp/a/", O_CREAT) 不会建出一个叫 a 的普通文件。
+ */
 static struct m_inode *create(const char *path, uint16_t mode)
 {
     const char *name;
     int len;
     uint32_t where;
-    struct m_inode *dir = dir_of(path, &name, &len);
+    struct m_inode *dir = (mode & S_IFMT) == S_IFDIR || !trailing_slash(path) ? dir_of(path, &name, &len) : 0;
 
     if (!dir)
         return 0;
@@ -576,16 +605,23 @@ struct m_inode *fs_create(const char *path)
     return create(path, S_IFREG | 0644);
 }
 
-/* mkdir：新建目录，里面先放 . 和 ..；父目录多了一个子目录，链接数加一（子目录的 .. 指向它）。 */
+/*
+ * mkdir：新建目录，里面先放 . 和 ..；父目录多了一个子目录，链接数加一（子目录的 .. 指向它）。
+ * 父目录的链接数已经到了 LINK_MAX（248 个子目录），就不能再建。
+ */
 int fs_mkdir(const char *path)
 {
-    struct m_inode *ip = create(path, S_IFDIR | 0755);
-    if (!ip)
-        return -1;
     const char *name;
     int len;
     struct m_inode *dir = dir_of(path, &name, &len);
-    int ok = dir && add_entry(ip, ".", 1, ip->ino) == 0 && add_entry(ip, "..", 2, dir->ino) == 0;
+    if (!dir)
+        return -1;
+    struct m_inode *ip = dir->d.nlinks < LINK_MAX ? create(path, S_IFDIR | 0755) : 0;
+    if (!ip) {
+        iput(dir);
+        return -1;
+    }
+    int ok = add_entry(ip, ".", 1, ip->ino) == 0 && add_entry(ip, "..", 2, dir->ino) == 0;
     if (ok) {
         ip->d.nlinks = 2;
         write_inode(ip);
@@ -626,9 +662,10 @@ static int remove_entry(const char *path, int want_dir)
         return -1;
     uint32_t ino = (len == 1 && name[0] == '.') || (len == 2 && name[0] == '.' && name[1] == '.')
                        ? 0 : find_entry(dir, name, len, &where);
-    struct m_inode *ip = ino ? iget(ino) : 0;
+    struct m_inode *ip = ino && ino != ENTRY_ERROR ? iget(ino) : 0;
     int is_dir = ip && (ip->d.mode & S_IFMT) == S_IFDIR;
-    if (!ip || is_dir != want_dir || (is_dir && !dir_empty(ip))) {
+    /* unlink("/tmp/a/")：末尾的 / 说的是目录，a 却是文件，也不删 */
+    if (!ip || is_dir != want_dir || (!is_dir && trailing_slash(path)) || (is_dir && !dir_empty(ip))) {
         iput(ip);
         iput(dir);
         return -1;
@@ -690,8 +727,8 @@ int fs_chmod(const char *path, uint32_t mode)
 /*
  * link：给已经存在的文件再起一个名字 newpath。两个名字是目录里的两项，指向同一个 i 节点，链接数加一：
  * 文件只有一份，从哪个名字打开都一样。删掉一个名字（unlink 的意思就是“去掉一个链接”）只是链接数减一，
- * 减到 0 才真正收回。目录不行，免得目录树里出现环；新名字已经存在、所在的目录不存在、名字太长也不行。
- * Linux 0.11 的 sys_link() 也是这样。
+ * 减到 0 才真正收回。目录不行，免得目录树里出现环；新名字已经存在、所在的目录不存在、名字太长、以 / 结尾
+ * （那说的是目录）也不行。Linux 0.11 的 sys_link() 也是这样，只是没有查链接数到没到 LINK_MAX。
  */
 int fs_link(const char *oldpath, const char *newpath)
 {
@@ -702,11 +739,11 @@ int fs_link(const char *oldpath, const char *newpath)
 
     if (namei(oldpath, &ino, &d) < 0 || (d.mode & S_IFMT) == S_IFDIR)
         return -1;
-    struct m_inode *dir = dir_of(newpath, &name, &len);
+    struct m_inode *dir = trailing_slash(newpath) ? 0 : dir_of(newpath, &name, &len);
     if (!dir)
         return -1;
     struct m_inode *ip = find_entry(dir, name, len, &where) ? 0 : iget(ino);
-    if (!ip || add_entry(dir, name, len, ino) < 0) {
+    if (!ip || ip->d.nlinks >= LINK_MAX || add_entry(dir, name, len, ino) < 0) {
         iput(ip);
         iput(dir);
         return -1;

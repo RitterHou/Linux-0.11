@@ -1000,16 +1000,22 @@ void user_main(void)
     exit(0);
 #elif SELFTEST == SELFTEST_USER_LINK
     /*
-     * 每一项通过就写一个字母，期望第 6 行（去掉任务 A 的 A）是 lwuoe：
+     * 每一项通过就记一个字母，期望第 6 行（去掉任务 A 的 A）是 lwuoemtv：
      *   l：link 之后两个名字的 i 节点号一样，链接数是 2，从新名字读到的就是原来的内容。
      *   w：从一个名字写进去，从另一个名字马上读得到：内存里是同一个 i 节点。
      *   u：删掉原来的名字，另一个名字照常能读，链接数变回 1，块和 i 节点都没收回；再删掉它，才都收回。
-     *   o：两个名字都删了，可文件还开着：照常能读；关掉以后才收回。
+     *   o：两个名字都删了，可文件还开着：照常能读出原来的内容；关掉以后才收回。
      *   e：目录不能 link；新名字已经存在（包括 . 和 ..）、源文件不存在、新名字所在的目录不存在，都返回 -1。
+     *   m：一个文件最多 250 个名字：再 link 返回 -1，链接数还是 250（一个字节，再加就回绕成 0，文件被收回）。
+     *   t：以 / 结尾的路径说的是目录：文件后面加 / 打不开、stat 不到、删不掉，也不能用它新建文件或链接；
+     *      mkdir、stat、rmdir 目录时末尾带 / 照常可以。
+     *   v：mv 搬进目录时拼出来的名字超过 127 个字节：报错退出，不截短（截短的名字正好是目录里另一个文件，会把它删掉）。
+     * 要运行 /bin/mv，后面几项比较慢，第 6 行会被任务 A 的 A 绕回来盖掉：结果先攒着，最后一次写出去。
      */
     struct fsinfo before, now;
     struct stat a, b;
-    char buf[16];
+    char buf[16], res[8];
+    int nres = 0;
     fsinfo(&before);
     int32_t fd = open("/tmp/a", O_WRONLY | O_CREAT);
     write(fd, "hello", 5);
@@ -1019,14 +1025,14 @@ void user_main(void)
     fd = open("/tmp/b", O_RDONLY);
     ok &= read(fd, buf, sizeof(buf)) == 5 && buf[0] == 'h' && buf[4] == 'o';
     close(fd);
-    write(1, ok ? "l" : "L", 1);
+    res[nres++] = ok ? 'l' : 'L';
 
     int32_t wfd = open("/tmp/a", O_WRONLY | O_APPEND), rfd = open("/tmp/b", O_RDONLY);
     write(wfd, "!", 1);
     ok = read(rfd, buf, sizeof(buf)) == 6 && buf[5] == '!';
     close(wfd);
     close(rfd);
-    write(1, ok ? "w" : "W", 1);
+    res[nres++] = ok ? 'w' : 'W';
 
     ok = unlink("/tmp/a") == 0 && stat("/tmp/a", &a) < 0 && stat("/tmp/b", &b) == 0 && b.nlinks == 1;
     fsinfo(&now);
@@ -1034,26 +1040,108 @@ void user_main(void)
     ok &= unlink("/tmp/b") == 0;
     fsinfo(&now);
     ok &= now.free_inodes == before.free_inodes && now.free_blocks == before.free_blocks;
-    write(1, ok ? "u" : "U", 1);
+    res[nres++] = ok ? 'u' : 'U';
 
-    fd = open("/tmp/c", O_RDWR | O_CREAT);
+    fd = open("/tmp/c", O_WRONLY | O_CREAT);
     write(fd, "xyz", 3);
+    rfd = open("/tmp/c", O_RDONLY);                     /* 没有 lseek：另开一个从头读的描述符 */
     ok = link("/tmp/c", "/tmp/d") == 0 && unlink("/tmp/c") == 0 && unlink("/tmp/d") == 0;
     fsinfo(&now);
     ok &= now.free_inodes == before.free_inodes - 1;    /* 还开着：没收回 */
-    int32_t again = open("/tmp/c", O_RDONLY);
-    ok &= again < 0;
+    ok &= open("/tmp/c", O_RDONLY) < 0 && open("/tmp/d", O_RDONLY) < 0;
+    ok &= read(rfd, buf, sizeof(buf)) == 3 && buf[0] == 'x' && buf[2] == 'z';
     close(fd);
+    close(rfd);
     fsinfo(&now);
     ok &= now.free_inodes == before.free_inodes && now.free_blocks == before.free_blocks;
-    write(1, ok ? "o" : "O", 1);
+    res[nres++] = ok ? 'o' : 'O';
 
     fd = open("/tmp/e", O_WRONLY | O_CREAT);
     close(fd);
     ok = link("/tmp", "/tmp/dir2") < 0 && link("/tmp/e", "/tmp/e") < 0 && link("/tmp/e", "/tmp/.") < 0;
+    ok &= link("/tmp/e", "/tmp/..") < 0;
     ok &= link("/nothing", "/tmp/f") < 0 && link("/tmp/e", "/nothing/f") < 0 && link("/tmp/e", "/tmp/abcdefghijklmno") < 0;
     ok &= stat("/tmp/e", &a) == 0 && a.nlinks == 1 && unlink("/tmp/e") == 0;
-    write(1, ok ? "e" : "E", 1);
+    res[nres++] = ok ? 'e' : 'E';
+
+    /* 249 个新名字放在单独的目录里：一项 16 字节，4 块。数组不用字符串初始化：clang 会调用内核里的 memset，用户态执行不了 */
+    char name[12];
+    for (int i = 0; i < 8; i++)
+        name[i] = "/tmp/ml/"[i];
+    name[11] = '\0';
+    ok = mkdir("/tmp/ml") == 0 && (fd = open("/tmp/m", O_WRONLY | O_CREAT)) >= 0;
+    close(fd);
+    for (int i = 0; i < 249 && ok; i++) {
+        name[8] = (char)('0' + i / 100), name[9] = (char)('0' + i / 10 % 10), name[10] = (char)('0' + i % 10);
+        ok = link("/tmp/m", name) == 0;
+    }
+    ok &= stat("/tmp/m", &a) == 0 && a.nlinks == 250;
+    ok &= link("/tmp/m", "/tmp/ml/more") < 0 && stat("/tmp/ml/more", &b) < 0;
+    ok &= stat("/tmp/m", &a) == 0 && a.nlinks == 250;
+    for (int i = 0; i < 249; i++) {
+        name[8] = (char)('0' + i / 100), name[9] = (char)('0' + i / 10 % 10), name[10] = (char)('0' + i % 10);
+        ok &= unlink(name) == 0;
+    }
+    ok &= stat("/tmp/m", &a) == 0 && a.nlinks == 1 && unlink("/tmp/m") == 0 && rmdir("/tmp/ml") == 0;
+    res[nres++] = ok ? 'm' : 'M';
+
+    ok = open("/tmp/t/", O_WRONLY | O_CREAT) < 0 && stat("/tmp/t", &a) < 0;
+    fd = open("/tmp/t", O_WRONLY | O_CREAT);
+    close(fd);
+    ok &= fd >= 0 && stat("/tmp/t/", &a) < 0 && open("/tmp/t/", O_RDONLY) < 0 && unlink("/tmp/t/") < 0;
+    ok &= link("/tmp/t", "/tmp/u/") < 0 && stat("/tmp/u", &a) < 0 && link("/tmp/t/", "/tmp/u") < 0;
+    ok &= mkdir("/tmp/dd/") == 0 && stat("/tmp/dd/", &a) == 0 && (a.mode & 0170000) == 0040000 && rmdir("/tmp/dd/") == 0;
+    ok &= stat("/tmp/t", &a) == 0 && unlink("/tmp/t") == 0;
+    fsinfo(&now);
+    ok &= now.free_inodes == before.free_inodes && now.free_blocks == before.free_blocks;
+    res[nres++] = ok ? 't' : 'T';
+
+    /* 120 个字节的目录：/tmp/ 加 7 段 14 个字母和 1 段 10 个字母；它下面的 victim 正好 127 个字节 */
+    char dir[128], victim[128];
+    int n = 4;
+    for (int i = 0; i < n; i++)
+        dir[i] = "/tmp"[i];
+    ok = 1;
+    for (int k = 0; k < 8; k++) {
+        dir[n++] = '/';
+        for (int i = 0; i < (k < 7 ? 14 : 10); i++)
+            dir[n++] = (char)('a' + k);
+        dir[n] = '\0';
+        ok &= mkdir(dir) == 0;
+    }
+    for (int i = 0; i <= n; i++)
+        victim[i] = dir[i];
+    const char *v = "/victim";
+    for (int i = 0; v[i]; i++)
+        victim[n + i] = v[i];
+    victim[n + 7] = '\0';
+    ok &= n == 120;
+    fd = open(victim, O_WRONLY | O_CREAT);
+    ok &= write(fd, "keep me", 7) == 7;
+    close(fd);
+    fd = open("/tmp/victimXYZ", O_WRONLY | O_CREAT);
+    ok &= write(fd, "moved in", 8) == 8;
+    close(fd);
+    char *mv_argv[] = { "mv", "/tmp/victimXYZ", dir, 0 };
+    int32_t st = -1, pid = fork();
+    if (pid == 0) {
+        execv("/bin/mv", mv_argv);
+        exit(99);
+    }
+    waitpid(pid, &st, 0);
+    ok &= st == 1;
+    fd = open(victim, O_RDONLY);
+    ok &= read(fd, buf, sizeof(buf)) == 7 && buf[0] == 'k';
+    close(fd);
+    ok &= unlink(victim) == 0 && unlink("/tmp/victimXYZ") == 0;
+    for (int k = 7; k >= 0; k--) {
+        ok &= rmdir(dir) == 0;
+        while (n > 0 && dir[n] != '/')
+            n--;
+        dir[n] = '\0';
+    }
+    res[nres++] = ok ? 'v' : 'V';
+    write(1, res, (uint32_t)nres);
     exit(0);
 #elif SELFTEST == SELFTEST_USER_TIME
     /*
