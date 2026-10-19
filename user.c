@@ -224,6 +224,27 @@ static int32_t start_shell(void)
     }
     return pid;
 }
+
+/*
+ * 串口上运行 login：和 shell 一样先 setsid() 当进程组的头，再把 /dev/ttyS0 打开三次，它就是这一组的控制终端。
+ * login 以 root 运行，问用户名和密码，对了就换成那个用户 exec 他的 shell；shell 退出（或者 login 三次都不对），
+ * init 再拉起一个 login。后来的 Unix 是 init 在每个终端上运行 getty，getty 再 exec login，道理相同。
+ */
+static int32_t start_login(void)
+{
+    int32_t pid = fork();
+    if (pid == 0) {
+        setsid();
+        close(1);
+        open("/dev/ttyS0", O_RDWR);
+        open("/dev/ttyS0", O_RDWR);
+        open("/dev/ttyS0", O_RDWR);
+        char *argv[] = { "login", 0 };
+        execv("/bin/login", argv);
+        exit(1);
+    }
+    return pid;
+}
 #endif
 
 /* 与内核任务 A 的 task_main() 做同样的事：任务 2 写 B；它 fork 出的任务 3 换成 /bin/letter，写 C。 */
@@ -1572,35 +1593,42 @@ void user_main(void)
 #if !defined(SELFTEST)
     /*
      * 再拉起 shell（任务 4），做法与 Linux 0.11 的 init() 相同：子进程关掉继承来的 1 号描述符（第 6 行），
-     * 把控制台 /dev/tty0 打开三次，正好得到 0、1、2 号描述符，再 exec /bin/sh。
-     * 之后 init 一边写 B，一边收走结束了的子进程；shell 退出了就再拉起一个。shell 一下子就退出了
+     * 把控制台 /dev/tty0 打开三次，正好得到 0、1、2 号描述符，再 exec /bin/sh。有串口的话，再在串口上拉起 login（任务 5）。
+     * 之后 init 一边写 B，一边收走结束了的子进程；shell 或 login 退出了就再拉起一个。一下子就退出了
      * （比如没有硬盘，exec 不了），就隔 1 秒再试，免得一刻不停地 fork；fork 失败了也隔 1 秒再试。
      * init 还每隔大约 5 秒调用一次 sync，把缓冲区缓存里改过的块写回硬盘，就像 Linux 0.11 的 update 进程。
      * 自检内核不拉起 shell：它们要用控制台窗口检查键盘回显，shell 的提示符会混进去。
      */
-    int32_t shell = start_shell();
-    int age = 0, wait = 0;          /* shell 活了几圈（每圈约 2 个 tick）；还要等几圈再拉起 */
+    int32_t (*start[2])(void) = { start_shell, start_login };
+    int32_t pids[2] = { -1, -1 };
+    int age[2] = { 0, 0 }, wait[2] = { 0, 0 };  /* 活了几圈（每圈约 2 个 tick）；还要等几圈再拉起 */
+    int32_t serial = open("/dev/ttyS0", O_RDWR);    /* 打不开就是没有串口（QEMU 用 -serial none 启动） */
+    int n = serial >= 0 ? 2 : 1;
+    close(serial);
     int rounds = 0;
     for (;;) {
+        for (int k = 0; k < n; k++) {
+            if (pids[k] < 0 && wait[k]-- <= 0) {
+                pids[k] = start[k]();
+                age[k] = 0;
+                if (pids[k] < 0)
+                    wait[k] = 50;
+            }
+        }
         write(1, &letter, 1);
         sleep(2);
-        age++;
+        age[0]++, age[1]++;
         if (++rounds == 250) {      /* 250 圈约 5 秒 */
             rounds = 0;
             sync();
         }
         int32_t pid;
         while ((pid = waitpid(-1, 0, WNOHANG)) > 0)
-            if (pid == shell) {
-                shell = -1;
-                wait = age < 50 ? 50 : 0;
-            }
-        if (shell < 0 && wait-- <= 0) {
-            shell = start_shell();
-            age = 0;
-            if (shell < 0)
-                wait = 50;
-        }
+            for (int k = 0; k < n; k++)
+                if (pid == pids[k]) {
+                    pids[k] = -1;
+                    wait[k] = age[k] < 50 ? 50 : 0;
+                }
     }
 #else
     for (;;) {

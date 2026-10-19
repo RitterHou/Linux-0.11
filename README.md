@@ -26,7 +26,7 @@ QEMU 打开窗口后应看到：
 | 0 | `ABPKCVITUFWE` | `A` 第一阶段；`B` 第二阶段在实模式下调用 BIOS；`P` 第二阶段进入保护模式后写显存；`K` 内核汇编入口 `entry.asm`；`C` C 函数 `kmain()`；`V` 打开分页后通过虚拟地址 `0xC0000000` 写入；`I` 打开中断之后；`T` 开始任务调度之后；`U` 内核第一次收到来自用户态的系统调用；`F` 内核第一次补上缺页（任务 B 第一次用到栈）；`W` 第一次写时复制（fork 之后父进程先写栈）；`E` 第一次从硬盘装入程序（任务 3 exec `/bin/letter`） |
 | 1 | `disk: 8192 sectors (4096 KB), QEMU HARDDISK` | 硬盘驱动开机时用 IDENTIFY 命令问出的扇区数和型号，见下文“硬盘”；第一次用到文件系统时，右边接着显示 `minix fs: 128 inodes, 4096 blocks` |
 | 2 | `Hello from kmain() in C!` | `kmain()` |
-| 3 | `memory: 3830/3840 pages free  page faults: 1  copy-on-write: 2` | 1 MB～16 MB 之间还有几个 4 KB 的物理页空闲，缺页异常补上了几页，写时复制处理了几次，见下文“物理页分配”“缺页处理”和“fork 与写时复制” |
+| 3 | `memory: 3813/3840 pages free  page faults: 1  copy-on-write: 6` | 1 MB～16 MB 之间还有几个 4 KB 的物理页空闲，缺页异常补上了几页，写时复制处理了几次，见下文“物理页分配”“缺页处理”和“fork 与写时复制” |
 | 4 | `ticks: N        idle: N%      2026-10-19 05:12:33 UTC` | 定时器中断，每秒加 100；右边每秒更新一次上一秒 CPU 空闲的比例，两个任务都在睡眠时接近 100%；最右边是现在的时间（UTC），开机时从 CMOS 读出，每秒刷新 |
 | 5 | `paging: on, 0xC0000000 -> 0xB8000` | 分页已打开 |
 | 6 | `tasks: ABCABCABC…` | 任务 A（内核态）、任务 B（用户态）和 B 用 `fork` 复制出、再 exec 成硬盘上 `/bin/letter` 的任务 3 都通过 `write` 系统调用写自己的字母，每写一个就 `sleep`，把 CPU 让给别人，所以逐个轮流；写满一行后从行首覆盖 |
@@ -36,7 +36,9 @@ QEMU 打开窗口后应看到：
 
 开机后控制台窗口里运行着 shell，可以敲命令：`ls /bin`、`cat /hello.txt`、`cd /etc`、`pwd`、`ps`、`echo 文字`、`ls /bin | grep e`、`echo hi > /tmp/a`、`check`、`letter D &`（在后台运行，第 6 行会多出 D，`kill 任务号` 结束它）、`help`、`exit [退出码]`（init 会再拉起一个 shell）。键盘支持字母、数字、常用符号、空格、回车、退格、左右 Shift、Caps Lock（美式布局）和左 Ctrl 加字母（Ctrl+C 结束前台程序，Ctrl+D 结束输入），暂不支持方向键、Alt 和小键盘。打字前先点一下 QEMU 窗口，让它获得键盘焦点。
 
-关闭 QEMU 窗口，或在启动它的终端按 Ctrl+C，即可退出。修改代码后，先关闭旧窗口，再执行 `make run`。
+`make run` 所在的终端窗口接在虚拟机的串口（COM1）上，那里是 `login:`：可以用 `user`（密码 `user`）或 `root`（密码 `root`）登录，得到另一个 shell，和窗口里的互不相干，见下文“串口”。
+
+关闭 QEMU 窗口即可退出（在终端里按 Ctrl+C 交给的是串口那头的程序，不会结束 QEMU）。修改代码后，先关闭旧窗口，再执行 `make run`。
 
 - `make`：只生成镜像和 `build/kernel.elf`。
 - `make test`：在无头 QEMU 中运行全部自动化测试，见下文“自动化测试”。
@@ -93,6 +95,7 @@ make test
 - fork：任务 3 有自己的页目录和内核栈；父子都写过栈之后，栈顶映射到不同的物理页，页表项都已改回可写；用户代码那一页父子共用。自检 `USER_FORK`：子进程把栈上的变量改成 99，父进程看到的仍是 7；`fork()` 在父进程返回 3、在子进程返回 0；父进程不等子进程就结束时，已经结束的子进程也被收走，内存全部收回。
 - 抢占（自检 `USER_SPIN`，用户程序一直空转、从不睡眠）：任务 A 只能等任务 B 这一轮的 20 个 tick 用完才运行，约每 20 个 tick 写一个字母；空闲比例降到 10% 以下。
 - 用户和权限（自检 `USER_PERM`）：init 是 root，先建好 root 的文件，再 fork 一个子进程换成用户 100 逐项检查：`setgid`、`setuid` 以后四个号都是 100，再也换不回 0；别人能读的能读，`/etc/passwd`、root 的 0644 文件写不了，`O_TRUNC` 也算写，0700 的目录读不了；`/` 和 `/etc` 里建不了文件、目录、链接，`/tmp` 里能建，主人和组是 100；`/tmp` 有粘滞位，删不掉 root 放在里面的文件，自己的能删；0644 的程序执行不了，0700 的目录里的文件 stat 不到、进不去；别人的文件 chmod 不了，谁都不能 chown；`utime` 设成现在要有写权限，设成别的时间要是主人；kill 不了 root 的进程，能 kill 自己的；nice 调低不了；setuid root 的 `/bin/id` 打印 `euid=0(root)`。回到 root：能删用户的文件，能进 0700 的目录，一个执行位都没有的程序 root 也执行不了，chown 以后 setuid 位清掉了。在 shell 里（`test_users`）：`id` 是 root；`/tmp` 是 `drwxrwxrwt`，`/home/user` 是 100 的；`chown user`、`chown user:users`、`chown 0:0` 都对，没有的用户和组报错；`chmod 4755`、`2755`、`4644`、`1777`、`1776` 之后 ls -l 显示 `s`、`S`、`t`、`T`。
+- 串口（`test_serial`）：开机后串口上是 `login:`，用户名回显、回车是 `\r` 当成换行、回显的换行是 `\r\n`，密码不回显；登录以后 `id` 是 user、`pwd` 是 `/home/user`；串口上的输出不出现在控制台，控制台的也不出现在串口上；退格键送来的 DEL 删掉一个字，回显“退格、空格、退格”；串口上按 Ctrl+C 结束串口上的 `sleep 10`，控制台上按 Ctrl+C 不影响串口上的 `sleep 2`；ps 里有 init 拉起、user 运行的 shell；串口上 `su` 输密码也不回显；`exit` 以后 init 再拉起 `login`，密码不对说 `login incorrect`。
 - su、login、passwd（`test_login`）：`/etc/shadow` 里是 `名字:散列`，和 `tools/mkshadow.py` 算的一样，权限 `-rw-------`；`su`、`passwd` 是 `-rwsr-xr-x`，`login` 不是；root 运行 `su user` 不用输密码；换成 user 以后 `id` 是 100，读不了 shadow、写不了 `/`、kill 不了 root 的 sleep、调低不了 nice，新建的文件是 100 的；user 运行 `su user` 要输密码，敲的密码不显示；输错 root 的密码报 `wrong password`，输对就变回 root；`passwd` 先问原来的密码再问两遍新的，改了以后旧密码不对、新密码对；user 改不了 root 的密码，root 能直接改 user 的；`login` 输错密码说 `login incorrect` 再问，输对了进 `/home/user`；在 `login:` 那里按 Ctrl+D 退出；`su nosuch` 报没有这个用户。
 - nice 和 CPU 时间（自检 `USER_NICE`）：`nice` 返回新的 nice 值，停在 -20～19，`taskinfo` 读到的 priority 是 20 - nice；fork 出的子进程继承 nice 值，exec 成 sleep 以后也不变；一个 nice 0、一个 nice 19 的子进程一起空转 2 秒，nice 0 的至少分到 8 倍（量出来是 190:10，算法是 20:1），nice 19 的也没饿死；两个 nice 0 的分得差不多（100:100）；用户态空转的时间记在 utime，一直调用 stat 的记在 stime；收走的子进程用的时间正好加进父进程的 cutime、cstime。在 shell 里（`test_nice_shell`）：`nice` 打印 0，`nice -n 3 nice` 打印 3，`nice nice` 打印 10，超出范围的停在 -20 和 19，参数不对报用法；后台的 `nice -n 5 sleep 3` 在 `ps -l` 里是 PRI 15、NI 5；`ps -l` 每行的格式对，空闲任务的 TIME 是 0.00；`time sleep 1` 过了 1 秒左右、CPU 几乎没用，`time check spin` 半秒几乎都记在 user。
 - 寄存器设为已知值后执行 `ud2`：异常面板显示 `#UD`，EAX～EBP、EIP（`ud2` 的地址）、各段寄存器、CR3 都与预期一致，ESP 落在内核栈内，EFLAGS 的 IF 为 1。
@@ -590,23 +593,32 @@ loader 进入保护模式时用的是写在 `loader.bin` 里的 GDT。进入内�
 
 ### 终端
 
-`tty.c` 是终端，与 Linux 0.11 的 `kernel/chr_drv/tty_io.c` 对应。键盘中断把扫描码翻译成字符后交给 `tty_input()`，这里按“规范模式”处理：
+`tty.c` 是终端，与 Linux 0.11 的 `kernel/chr_drv/tty_io.c` 对应。有两个终端：0 号是控制台（键盘和第 8～18 行的窗口），1 号是串口。每个终端一个 `struct tty`：正在编辑的一行、读队列、等着读的任务、前台进程组、工作方式（`lflag`），还有输出一个字符的函数（写显存或者从串口发出去），所以两个终端互不相干。键盘中断把扫描码翻译成字符后交给 `tty_input(TTY_CONSOLE, ch)`，串口中断交给 `tty_input(TTY_SERIAL, ch)`，这里按“规范模式”处理：
 
 - 普通字符放进正在编辑的这一行（最多 127 个字符），同时回显在屏幕上；
 - 退格删掉这一行的最后一个字符，屏幕上也擦掉，这一行删空了就不能再删：删不到提示符这些程序输出的东西。一行超过屏幕宽度会折到下一行，退格能跨回上一行；
 - 回车把这一行连同换行符放进 `ready` 缓冲区（512 字节的环形缓冲区），叫醒睡在 `tty_wait` 上的任务；
 - Ctrl+D 把这一行（不带换行）交出去，后面跟一个结束标记。这一行是空的，读的程序就得到 0，知道输入结束了：直接运行 `cat` 或 `wc`，敲几行，再按 Ctrl+D。键盘驱动记着左 Ctrl 是否按住，按住时字母变成控制字符，Ctrl+D 是 `0x04`。
-- 回显可以关掉：`ioctl(0, TCSETS, &t)` 把 `t.c_lflag` 里的 `ECHO` 去掉，敲的字照样进这一行，只是不显示，退格和 `^C` 也不显示。输密码时这样做。Linux 0.11 的 `struct termios` 还有一张控制字符表等，`copy_to_cooked()` 按 `L_ECHO(tty)` 决定回不回显；这里的 `struct termios` 只有四个标志字段。
+- 回显可以关掉：`ioctl(0, TCSETS, &t)` 把 `t.c_lflag` 里的 `ECHO` 去掉，敲的字照样进这一行，只是不显示，退格和 `^C` 也不显示。输密码时这样做。每个终端各管各的。Linux 0.11 的 `struct termios` 还有一张控制字符表等，`copy_to_cooked()` 按 `L_ECHO(tty)` 决定回不回显；这里的 `struct termios` 只有四个标志字段。
+
+### 串口
+
+`serial.c` 驱动 PC 的 COM1：一片 8250/16550 UART，端口 0x3F8～0x3FF，接在 8259 的 IRQ4 上，与 Linux 0.11 的 `kernel/chr_drv/serial.c`、`rs_io.s` 对应。开机时 `serial_init()` 先往暂存寄存器写一个数再读回来，看有没有这片芯片（QEMU 用 `-serial none` 启动时没有）；有就设波特率除数（DLAB 置 1 时 +0、+1 两个端口是除数，12 就是 9600 波特，Linux 0.11 用 2400）、8 个数据位无校验 1 个停止位，打开 DTR、RTS 和 OUT2（PC 上不开 OUT2，UART 的中断送不到 8259），只开“收到字符”中断，再打开 IRQ4。
+
+- **收**：IRQ4 的处理函数把 UART 里收到的字符一个个交给串口的 tty。终端那头敲回车送来的是 `\r`，退格送来的是 DEL（0x7F）：`tty_input()` 把它们当成换行和退格，就是 termios 的 ICRNL 和 VERASE。
+- **发**：等线路状态寄存器说发送寄存器空了，再写进去（轮询）。换行要发成 `\r\n`，回到行首再换行（ONLCR）；退格发成“退格、空格、退格”，才能在真的终端上擦掉一个字。Linux 0.11 用发送中断，一次送一个字符，CPU 不用原地等；QEMU 里的 UART 马上就空，轮询更简单。
+- **登录**：`/dev/ttyS0`（设备号 4,64，和后来的 Linux 一样）就是它。有串口的话，init 在上面拉起 `login`：先 `setsid()`，再把 `/dev/ttyS0` 打开三次，所以串口是这个进程组的控制终端，串口上的 Ctrl+C 只发给它这一组。登录以后 exec 用户的 shell；shell 退出了，init 再拉起一个 `login`。后来的 Unix 是 init 在每个终端上运行 getty，getty 再 exec login。
+- `make run` 把启动它的终端窗口接在串口上（`-chardev stdio,signal=off`）；测试脚本让 QEMU 在一个 Unix socket 上等着，开机前就连上它，读串口送出来的字符、往里写。
 
 `read()` 从控制台读时，`ready` 里没有敲完的行就睡下等；有，就读走一行（最多 `count` 个字节）。先在关中断时搬进内核的临时缓冲区，开中断后再复制给用户：复制时可能缺页或写时复制。`write()` 写到控制台时，逐个字符交给 `vga_putc()`，每个字符关一下中断，免得和键盘中断里的回显同时移动光标。Linux 0.11 的终端有三个队列：`read_q` 存键盘送来的原始字符，`copy_to_cooked()` 处理退格和回显后放进 `secondary`，`tty_read()` 从 `secondary` 里读；这里把前两步合在键盘中断里做。
 
 ### 设备文件
 
-程序通过文件找到终端：`make` 让 `mkfs.py` 在镜像里建两个字符设备文件 `/dev/tty0`（设备号 4,0）和 `/dev/tty1`（4,1）。设备文件没有内容，i 节点的类型是字符设备（`0020000`），第一个区块号存的是设备号，与 Linux 0.11 相同。`open()` 打开字符设备时，按设备号把打开的文件标成控制台或第 6 行，之后的 `read`、`write` 交给终端或第 6 行。macOS 上普通用户建不了设备文件，所以它们不放在 `rootfs/` 里，由 `mkfs.py --chr` 直接写进镜像。
+程序通过文件找到终端：`make` 让 `mkfs.py` 在镜像里建三个字符设备文件 `/dev/tty0`（设备号 4,0）、`/dev/tty1`（4,1）和串口 `/dev/ttyS0`（4,64）；没有串口时打开 `/dev/ttyS0` 失败。设备文件没有内容，i 节点的类型是字符设备（`0020000`），第一个区块号存的是设备号，与 Linux 0.11 相同。`open()` 打开字符设备时，按设备号把打开的文件标成控制台或第 6 行，之后的 `read`、`write` 交给终端或第 6 行。macOS 上普通用户建不了设备文件，所以它们不放在 `rootfs/` 里，由 `mkfs.py --chr` 直接写进镜像。
 
 ### init 和 shell
 
-init（任务 B，内核映像里的 `user_main()`）先 fork 出写 C 的 `/bin/letter`，再拉起 shell：子进程关掉继承来的 1 号描述符（第 6 行），把 `/dev/tty0` 打开三次，正好得到 0、1、2 号描述符，再 exec `/bin/sh`。之后 init 一边写 B，一边用 `waitpid(-1, 0, WNOHANG)` 收走结束了的子进程，shell 退出了就再拉起一个；shell 一下子就退出了（比如没有硬盘），就隔 1 秒再试，免得一刻不停地 fork。写 C 的子进程 exec 失败时，用内核映像里的代码接着写 C，不会往下走去拉起第二个 shell。Linux 0.11 的 `init()` 也是打开 `/dev/tty0`、`dup` 两次，再 fork 出 `/bin/sh`，在循环里 `wait` 并重新拉起它。自检内核不拉起 shell：它们要用控制台窗口检查键盘回显。
+init（任务 B，内核映像里的 `user_main()`）先 fork 出写 C 的 `/bin/letter`，再拉起 shell：子进程关掉继承来的 1 号描述符（第 6 行），把 `/dev/tty0` 打开三次，正好得到 0、1、2 号描述符，再 exec `/bin/sh`。之后 init 一边写 B，一边用 `waitpid(-1, 0, WNOHANG)` 收走结束了的子进程，shell 退出了就再拉起一个；shell 一下子就退出了（比如没有硬盘），就隔 1 秒再试，免得一刻不停地 fork。写 C 的子进程 exec 失败时，用内核映像里的代码接着写 C，不会往下走去拉起第二个 shell。有串口的话 init 再在串口上拉起 `login`，也是退出了就再拉起一个，见上文“串口”。Linux 0.11 的 `init()` 也是打开 `/dev/tty0`、`dup` 两次，再 fork 出 `/bin/sh`，在循环里 `wait` 并重新拉起它。自检内核不拉起 shell：它们要用控制台窗口检查键盘回显。
 
 `user/sh.c` 是一个很小的 shell：打印 `$ `，`read(0)` 读一行，按空格切成参数，命令名里没有 `/` 的到 `/bin` 下找；fork 一个子进程去 exec，`waitpid` 等它结束，被异常结束的报告异常号。用 `|` 隔开的几段，每段一个子进程，相邻两段之间一个管道，见下文“管道”。每一段还可以带 `> 文件`（清空后写）、`>> 文件`（接在末尾写）、`< 文件`（从文件读标准输入）：还有 `2> 文件`、`2>> 文件`（标准错误写进文件）和 `2>&1`（标准错误也接到标准输出那里）。子进程在 exec 之前打开那个文件，用 `dup2` 接到 0、1 或 2 号描述符上。程序出错的消息都写到标准错误（`eprint()`），所以 `nosuch | wc` 里 wc 读到的是空的，消息直接出现在屏幕上；`cat /nothing 2>&1 | wc` 才把它也送进管道。在空行上按 Ctrl+D 和 `exit` 一样退出；在一行字后面按 Ctrl+D，终端交来的是不带换行的半行，shell 先留着，接上后面敲的字（dash 这些不带行编辑的 shell 也是这样）；这时按 Ctrl+C，留着的半行就丢掉。`sh 脚本` 从文件里一行行读命令来执行，不打提示符，`#` 开头的行是注释，读完就退出；参数之间可以是空格或 Tab，行尾的回车不算，超过 127 个字节的行报错跳过，不截短了去执行；脚本的描述符设了 close-on-exec，它运行的命令拿不到；sh 不认识任何选项，`sh -x` 报错，`sh 目录` 也报错；运行脚本的 sh 不接住 Ctrl+C，它和它正在运行的程序一起被结束。后台运行的脚本（`sh 脚本 &`）一开始 SIGINT 就是忽略的，它就一直忽略，它运行的每条命令也跟着忽略：这些命令和前台的 shell 在同一个进程组里，不然在提示符上按 Ctrl+C 会把它们结束。POSIX 也规定启动时就被忽略的信号要保持忽略。最后一个参数是 `&` 的在后台运行，不等它，每次读命令之前收走已经结束的后台程序。内建命令有 `cd`（不带参数回到 `/`，为什么必须内建见上文“当前目录”）、`exit [退出码]`、`time 命令…`（运行完在标准错误上打印 `real 1.00 user 0.00 sys 0.00`）和 `help`。命令名加上 `/bin/` 超过 127 个字节就报 `name too long`，不截短（截短了可能是另一个程序）。数字参数（`sleep`、`chmod`、`kill`、`exit`）超出范围时报错，不回绕。
 
@@ -761,7 +773,8 @@ shell 运行 `ls /bin | grep e | wc` 时，先建第一个管道，fork 出 ls�
 | `tools/mkbig.py` | 生成测试用的 600 KB 大文件 `/big` | 无 |
 | `tools/tour_data.py` | 把最新构建出的地址、i 节点号、块号和文件系统的内容回填进 `docs/tour.html` | 无 |
 | `keyboard.c` | 键盘扫描码转字符，支持 Shift 和 Caps Lock，交给终端 | `kernel/chr_drv/keyboard.S` |
-| `tty.c` | 终端：一行的编辑、回显（可以关掉）、退格、Ctrl+D、Ctrl+C，读一行，写控制台，`ioctl` | `kernel/chr_drv/tty_io.c`、`tty_ioctl.c` |
+| `tty.c` | 终端：控制台和串口各一个，一行的编辑、回显（可以关掉）、退格、Ctrl+D、Ctrl+C，读一行，写，`ioctl` | `kernel/chr_drv/tty_io.c`、`tty_ioctl.c` |
+| `serial.c` | 串口 COM1：8250/16550 UART 的初始化、收字符的中断、发字符 | `kernel/chr_drv/serial.c`、`rs_io.s` |
 | `pipe.c` | 管道：一页的环形缓冲区，读写两头 | `fs/pipe.c` |
 | `vga.c` | 直接写 VGA 显存、移动硬件光标、整数转字符串 | `kernel/chr_drv/console.c` |
 | `string.c` | `memset`、`memcpy`：编译器会把大结构体的赋值和清零编译成对它们的调用 | `include/string.h` |

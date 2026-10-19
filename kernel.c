@@ -36,6 +36,7 @@ void kmain(void)
     time_init();                    /* 读 CMOS 里的时钟，记下开机时间；Linux 0.11 的 main() 也在这时调用 time_init() */
     sched_init();                   /* 建好两个任务的 TSS，把 kmain 登记为任务 0 */
     hd_init();                      /* 问出硬盘的大小，第 1 行显示；打开 IRQ14 */
+    serial_init();                  /* 有 COM1 就设成 9600 波特、8N1，打开 IRQ4；Linux 0.11 的 tty_init() 调用 rs_init() */
 
     vga_write_at(4, 0, "ticks: 0", VGA_GRAY);
     vga_write_at(6, 0, "tasks: ", VGA_GRAY);

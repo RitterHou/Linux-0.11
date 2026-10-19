@@ -140,7 +140,7 @@ int sched_signal(int sig, uint32_t handler, uint32_t restorer);
 int sched_setsid(void);
 int sched_pgrp(void);
 int sched_is_leader(void);
-int sched_claim_tty(void);
+int sched_claim_tty(int tty);
 int sched_take_signal(uint32_t *handler, uint32_t *restorer);
 void sched_set_brk(uint32_t end);
 uint32_t sched_alarm(uint32_t seconds);
@@ -184,13 +184,22 @@ int hd_read(uint32_t lba, void *buf);
 int hd_write(uint32_t lba, const void *buf);
 
 /* tty.c：终端 */
-void tty_input(char ch);
-void tty_set_pgrp(int pgrp);
-void tty_release_pgrp(int pgrp);
-int32_t tty_read(void *dst, uint32_t n);
-int32_t tty_write(const void *src, uint32_t n);
+#define NR_TTYS     2
+#define TTY_CONSOLE 0               /* 键盘和第 8～18 行的窗口：/dev/tty0 */
+#define TTY_SERIAL  1               /* 串口 COM1：/dev/ttyS0 */
+void tty_input(int tty, char ch);
+void tty_set_pgrp(int tty, int pgrp);
+void tty_release_pgrp(int tty, int pgrp);
+int32_t tty_read(int tty, void *dst, uint32_t n);
+int32_t tty_write(int tty, const void *src, uint32_t n);
 struct termios;
-int tty_ioctl(uint32_t cmd, struct termios *t);
+int tty_ioctl(int tty, uint32_t cmd, struct termios *t);
+
+/* serial.c：串口 */
+void serial_init(void);
+int serial_present(void);
+void serial_handle(void);
+void serial_putc(char ch);
 
 /* keyboard.c：键盘 */
 void keyboard_init(void);

@@ -104,5 +104,5 @@ void keyboard_process(uint8_t scancode)
     char ch = translate(key);
     if (ctrl_held && ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')))
         ch &= 0x1F;                 /* Ctrl+字母：A 是 1，D 是 4 */
-    tty_input(ch);
+    tty_input(TTY_CONSOLE, ch);
 }

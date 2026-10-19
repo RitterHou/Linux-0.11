@@ -47,7 +47,7 @@ struct file *file_open(const char *path, int flags)
     uint32_t ino;
     struct minix_inode d;
     struct m_inode *ip = 0;
-    int access = flags & O_ACCMODE, type = FILE_INODE;
+    int access = flags & O_ACCMODE, type = FILE_INODE, tty = 0;
 
     fs_lock();
     if (namei(path, &ino, &d) == 0) {
@@ -56,14 +56,15 @@ struct file *file_open(const char *path, int flags)
         if (((flags & O_CREAT) && (flags & O_EXCL)) || !permission(&d, want))
             goto fail;
         if ((d.mode & S_IFMT) == S_IFCHR) {
-            if (d.zone[0] == (TTY_MAJOR << 8 | 0)) {
-                type = FILE_CONSOLE;
-                if (sched_claim_tty())
-                    tty_set_pgrp(sched_pgrp());     /* 进程组的头第一次打开控制台：它这一组成了前台进程组 */
+            if (d.zone[0] == (TTY_MAJOR << 8 | 0) || (d.zone[0] == (TTY_MAJOR << 8 | 64) && serial_present())) {
+                type = FILE_TTY;
+                tty = d.zone[0] == (TTY_MAJOR << 8 | 0) ? TTY_CONSOLE : TTY_SERIAL;
+                if (sched_claim_tty(tty))
+                    tty_set_pgrp(tty, sched_pgrp());    /* 进程组的头第一次打开终端：它这一组成了这个终端的前台进程组 */
             } else if (d.zone[0] == (TTY_MAJOR << 8 | 1)) {
                 type = FILE_TASKS;
             } else {
-                goto fail;          /* 没有这个设备 */
+                goto fail;          /* 没有这个设备（没有串口时的 /dev/ttyS0 也是） */
             }
         } else {
             if ((d.mode & S_IFMT) == S_IFDIR && access != O_RDONLY)
@@ -82,6 +83,7 @@ struct file *file_open(const char *path, int flags)
         goto fail;
     }
     f->ip = ip;
+    f->tty = tty;
     f->mode = flags & (O_ACCMODE | O_APPEND);
     fs_unlock();
     return f;
@@ -144,8 +146,8 @@ int32_t file_read(struct file *f, void *dst, uint32_t n)
 {
     if (n == 0)
         return 0;
-    if (f->type == FILE_CONSOLE)
-        return tty_read(dst, n);
+    if (f->type == FILE_TTY)
+        return tty_read(f->tty, dst, n);
     if (f->type == FILE_PIPE_READ)
         return pipe_read(f->pipe, dst, n);
     if (f->type != FILE_INODE || (f->mode & O_ACCMODE) == O_WRONLY)
@@ -169,8 +171,8 @@ int32_t file_write(struct file *f, const void *src, uint32_t n)
 {
     const char *p = src;
 
-    if (f->type == FILE_CONSOLE)
-        return tty_write(src, n);
+    if (f->type == FILE_TTY)
+        return tty_write(f->tty, src, n);
     if (f->type == FILE_PIPE_WRITE)
         return pipe_write(f->pipe, src, n);
     if (f->type == FILE_INODE) {

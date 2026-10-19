@@ -40,8 +40,10 @@ class Machine:
     def __init__(self, image, snapshot=True):
         tmp = tempfile.mkdtemp(prefix="kernel-test-")
         self.sock_path = os.path.join(tmp, "monitor.sock")
+        self.serial_path = os.path.join(tmp, "serial.sock")
         self.log_path = os.path.join(tmp, "qemu.log")
-        self.sock = None
+        self.sock = self.serial = None
+        self.serial_buf, self.serial_pos = b"", 0
         # QEMU 的错误输出写进文件：用管道却不读，输出多了会把 QEMU 卡住
         # 同一目录下的 hd.img 接在主 IDE 通道上；snapshot=on 让写入只留在临时文件里，镜像本身不变。
         # snapshot=False 时写进镜像本身：只用在复制出来的镜像上，事后读它核对
@@ -51,7 +53,7 @@ class Machine:
             self.proc = subprocess.Popen(
                 [QEMU, "-machine", "pc", "-accel", "tcg", "-m", "16M",
                  "-drive", f"file={image},format=raw,if=floppy,index=0", *disk, "-boot", "order=a",
-                 "-display", "none", "-nic", "none", "-serial", "none",
+                 "-display", "none", "-nic", "none", "-serial", f"unix:{self.serial_path},server,nowait",
                  "-monitor", f"unix:{self.sock_path},server,nowait", "-no-reboot"],
                 stdout=subprocess.DEVNULL, stderr=log)
         try:
@@ -64,6 +66,11 @@ class Machine:
             self.sock.connect(self.sock_path)
             self.sock.settimeout(0.2)
             self._read_until_prompt()
+            # 串口接在另一个 socket 上：QEMU 是服务端，没人连的时候发出来的字符就丢了，所以开机前就连上。
+            # 客户机打印的东西攒在 serial_buf 里，serial_wait() 从上次读到的地方往后找
+            self.serial = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.serial.connect(self.serial_path)
+            self.serial.settimeout(0.05)
         except BaseException:
             self.close()            # 启动到一半失败，也不能把 QEMU 留在后台
             raise
@@ -175,12 +182,43 @@ class Machine:
             time.sleep(0.1)
         raise TestFailure(f"{timeout:.0f} 秒内没有等到{what}{last}")
 
+    def serial_read(self):
+        """把串口上已经到了的字符都收进 serial_buf。"""
+        try:
+            while True:
+                chunk = self.serial.recv(4096)
+                if not chunk:
+                    break
+                self.serial_buf += chunk
+        except (socket.timeout, BlockingIOError):
+            pass
+
+    def serial_wait(self, text, timeout=5, what=None):
+        """等串口上出现 text，返回从上次读到的地方到 text 末尾的这一段（解码成字符串），下次从 text 后面接着找。"""
+        deadline = time.time() + timeout
+        while True:
+            self.serial_read()
+            i = self.serial_buf.find(text.encode(), self.serial_pos)
+            if i >= 0:
+                out = self.serial_buf[self.serial_pos:i + len(text)].decode(errors="replace")
+                self.serial_pos = i + len(text)
+                return out
+            if time.time() > deadline:
+                rest = self.serial_buf[self.serial_pos:].decode(errors="replace")
+                raise TestFailure(f"{timeout:.0f} 秒内串口上没有等到{what or repr(text)}，收到的是：{rest!r}")
+            time.sleep(0.02)
+
+    def serial_send(self, text):
+        self.serial.sendall(text.encode())
+
     def close(self):
         try:
             if self.sock:
                 self.sock.sendall(b"quit\n")
         except OSError:
             pass
+        if self.serial:
+            self.serial.close()
         try:
             self.proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -350,10 +388,10 @@ def test_boot_screen(m, elf):
     check(rows[1] == "disk: 8192 sectors (4096 KB), QEMU HARDDISK   minix fs: 128 inodes, 4096 blocks",
           f"第 1 行应显示硬盘的扇区数和型号，以及挂载的文件系统：{rows[1]!r}")
     check(rows[2] == "Hello from kmain() in C!", f"第 2 行不对：{rows[2]!r}")
-    # 写时复制的次数取决于 fork 之后谁先写栈，不卡死；用掉的页数是 A 的内核栈，init、letter、sh 各自的
-    # 内核栈、页目录、页表、栈页，letter 的代码页，sh 的代码页和数据页，约 15 页
+    # 写时复制的次数取决于 fork 之后谁先写栈，不卡死；用掉的页数是 A 的内核栈，init、letter、sh、串口上的 login 各自的
+    # 内核栈、页目录、页表、栈页，letter 的代码页，sh 和 login 的代码页和数据页，约 27 页
     match = re.fullmatch(r"memory: (\d+)/3840 pages free  page faults: 1  copy-on-write: (\d+)", rows[3])
-    check(match and 3815 <= int(match.group(1)) <= 3830 and int(match.group(2)) >= 2, f"第 3 行不对：{rows[3]!r}")
+    check(match and 3800 <= int(match.group(1)) <= 3825 and int(match.group(2)) >= 2, f"第 3 行不对：{rows[3]!r}")
     check(re.fullmatch(r"ticks: \d+( +idle: +\d+%)? +\d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC", rows[4]) is not None, f"第 4 行不对：{rows[4]!r}")
     check(rows[5] == "paging: on, 0xC0000000 -> 0xB8000", f"第 5 行不对：{rows[5]!r}")
     check(rows[6].startswith("tasks: "), f"第 6 行不对：{rows[6]!r}")
@@ -1819,7 +1857,8 @@ def test_nice_shell(m, elf):
     rows = [r.split() for r in out]
     check(any(r[0] == pid and r[2:6] == ["S", "0", "15", "5"] and r[-1] == "sleep" for r in rows),
           f"ps -l：root 运行的 nice 5 的 sleep 每轮 15 个 tick（UID 0、PRI 15、NI 5），在睡（S）：{out!r}")
-    out = run_command(m, "ps -l")
+    # ps -l 的输出比窗口还长，分几次 grep 出来看
+    out = run_command(m, "ps -l | grep PID") + run_command(m, "ps -l | grep i") + run_command(m, "ps -l | grep sh")
     check(out[0] == "PID PPID S   UID PRI  NI    TIME NAME", f"ps -l 的表头：{out[0]!r}")
     for r in out[1:]:
         check(re.fullmatch(r" ?\d+ +\d+ [RSZWB] +\d+ +\d+ +-?\d+ +\d+\.\d\d \S+", r),
@@ -1956,10 +1995,67 @@ def test_login(m, elf):
     run_all([("su nosuch", ["su: nosuch: no such user"]), ("id", ["uid=0(root) gid=0(root)"]), (f"kill {sleeper}", [])])
 
 
+def test_serial(m, elf):
+    """串口终端：开机后串口上是 login；登录以后的 shell 和控制台的互不相干：各自的输出、各自的 Ctrl+C；回车、退格、回显；exit 后 init 再拉起 login"""
+    def serial_run(command):
+        m.serial_send(command + "\r")
+        lines = m.serial_wait("$ ", what=f"{command!r} 运行完、shell 再打出提示符").split("\r\n")
+        check(lines[0] == command and lines[-1] == "$ ", f"串口上的回显和提示符：{lines!r}")
+        return lines[1:-1]
+
+    m.serial_wait("login: ", timeout=10, what="串口上 init 拉起的 login")
+    m.serial_send("user\r")
+    out = m.serial_wait("password: ")
+    check(out == "user\r\npassword: ", f"终端敲的回车是 \\r，当成换行；回显的换行是 \\r\\n：{out!r}")
+    m.serial_send("user\r")
+    out = m.serial_wait("$ ")
+    check(out == "\r\nshell on hda: try help, ls /bin, cat /hello.txt, ps\r\n$ ", f"密码不回显，登录后运行 user 的 shell：{out!r}")
+    for command, expected in [("id", ["uid=100(user) gid=100(users)"]), ("pwd", ["/home/user"]), ("echo only-serial", ["only-serial"])]:
+        out = serial_run(command)
+        check(out == expected, f"串口上 {command} 应输出 {expected!r}，实际是 {out!r}")
+    check(not any("only-serial" in r for r in console(m)), f"串口上的输出不出现在控制台：{console(m)!r}")
+    check(run_command(m, "echo only-console") == ["only-console"], "控制台照常")
+    m.serial_read()
+    check(b"only-console" not in m.serial_buf, "控制台的输出不出现在串口上")
+    m.serial_send("ecx\x7fho hi\r")
+    out = m.serial_wait("$ ")
+    check(out == "ecx\b \bho hi\r\nhi\r\n$ ", f"终端的退格键送来 DEL：删掉 x，回显“退格、空格、退格”把它擦掉：{out!r}")
+
+    m.serial_send("sleep 10\r")
+    time.sleep(0.5)
+    m.serial_send("\x03")
+    out = m.serial_wait("$ ", timeout=2, what="串口上按 Ctrl+C 结束 sleep 10")
+    check(out == "sleep 10\r\n^C\r\n$ ", f"串口上的 Ctrl+C 结束串口的前台程序：{out!r}")
+    m.serial_send("sleep 2\r")
+    start = time.time()
+    m.serial_wait("sleep 2\r\n")
+    wait_prompt(m)
+    m.sendkeys(["ctrl-c"])
+    m.serial_wait("$ ", timeout=4)
+    check(time.time() - start >= 1.8, f"控制台上的 Ctrl+C 不影响串口上的 sleep 2：{time.time() - start:.1f} 秒就结束了")
+    wait_prompt(m)
+    rows = [r.split() for r in run_command(m, "ps -l | grep sh")]
+    check(any(r[1] == "2" and r[3] == "100" and r[-1] == "sh" for r in rows), f"ps 里有 init 拉起、user 运行的那个 shell：{rows!r}")
+
+    m.serial_send("su\r")
+    m.serial_wait("password: ")
+    m.serial_send("root\r")
+    out = m.serial_wait("$ ")
+    check("root" not in out, f"在串口上输密码也不回显：{out!r}")
+    check(serial_run("id") == ["uid=0(root) gid=0(root)"] and serial_run("exit") == [], "su 变成 root，再 exit 回来")
+    m.serial_send("exit\r")
+    m.serial_wait("login: ", timeout=5, what="user 的 shell 退出以后，init 再拉起一个 login")
+    m.serial_send("user\r")
+    m.serial_wait("password: ")
+    m.serial_send("bad\r")
+    out = m.serial_wait("login: ")
+    check(out == "\r\nlogin incorrect\r\nlogin: ", f"密码不对：{out!r}")
+
+
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_console_scroll,
                 test_idle_in_hlt, test_demand_paging, test_fork_address_spaces, test_syscall_gate, test_user_setup, test_user_task,
-                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep, test_cache, test_ln_mv, test_script, test_shell_input, test_script_edge_cases, test_clock, test_stderr, test_nice_shell, test_users, test_login]
+                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep, test_cache, test_ln_mv, test_script, test_shell_input, test_script_edge_cases, test_clock, test_stderr, test_nice_shell, test_users, test_login, test_serial]
 SEPARATE_TESTS = [test_syscalls, test_page_alloc, test_double_free, test_hd_rw, test_early_key, test_keyboard_edge_cases, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,
                   test_big_kernel, test_user_write_kernel, test_user_privileged,
