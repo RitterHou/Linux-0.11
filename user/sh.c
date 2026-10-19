@@ -8,7 +8,9 @@
  *   - 最后一个参数是 & 的，在后台运行，不等它；每次读命令之前收走已经结束的后台程序；
  *   - Ctrl+C：终端给前台进程组发 SIGINT。shell 自己接住它（on_intr），被打断的 read 返回 -EINTR，
  *     重新打出提示符；被打断的 waitpid 也返回 -EINTR，接着等。前台的子进程在 exec 之前改回默认，就被结束；
- *     后台的子进程改成忽略，exec 之后也不变，所以 Ctrl+C 停不了后台程序，要用 kill。
+ *     后台的子进程改成忽略，exec 之后也不变，所以 Ctrl+C 停不了后台程序，要用 kill。后台运行的脚本也是这样：
+ *     运行它的 sh 一开始就忽略 SIGINT，它运行的每条命令也跟着忽略，不然这些命令和前台的 shell 在同一个进程组里，
+ *     会被 Ctrl+C 结束。
  *   - 内建命令：cd 换当前目录（不带参数回到根目录），exit 退出 shell（init 会再拉起一个），help 显示能用的命令。
  *     cd 必须是内建的：子进程换了目录，父进程的当前目录不会跟着变。
  *   - sh 脚本：从文件里一行行读命令，不打提示符，# 开头的行是注释；读完就退出。#! 开头、有执行权限的脚本
@@ -20,6 +22,8 @@
 
 #define LINE_LEN 128
 #define MAX_ARGS 16
+
+static int intr_ignored;            /* 启动时 SIGINT 就是忽略的（在后台运行的脚本）：它运行的命令也忽略 */
 
 /* 原地把 line 按空格切开，argv 指向每一段，返回段数。 */
 static int split(char *line, char **argv)
@@ -154,7 +158,7 @@ static void run_line(char **argv, int argc, int background)
              * 从 fork 到这里，子进程用的还是 shell 的 on_intr：这时按 Ctrl+C 只会打断一下，命令照样开始。
              * 没有 sigprocmask 这种先挡住信号的办法，这一小段避免不了。
              */
-            signal(SIGINT, background ? SIG_IGN : SIG_DFL);
+            signal(SIGINT, background || intr_ignored ? SIG_IGN : SIG_DFL);
             signal(SIGTERM, SIG_DFL);
             if (prev >= 0) {        /* 前一段管道读的一头接到标准输入 */
                 dup2(prev, 0);
@@ -207,9 +211,11 @@ static void on_intr(int sig)
 }
 
 /*
- * 从 fd 读一行，去掉换行放进 line，返回长度；读完了返回 -1；被信号打断返回 -EINTR。
+ * 从 fd 读一行，去掉换行放进 line，返回长度；读完了返回 -1；被信号打断返回 -EINTR，已经读到的半行丢掉。
  * 终端一次 read 正好是一行；文件一次读进来好几行，多出来的留在 buf 里给下一次。
- * 最后一行没有换行（文件末尾，或者在一行字后面按了 Ctrl+D）也算一行，下一次再返回 -1。
+ * 文件的最后一行没有换行也算一行，下一次再返回 -1。终端上在一行字后面按 Ctrl+D，read 交来的是不带换行的半行：
+ * 先留着，接上后面敲的字，回车时一起算一行；接着再按一次 Ctrl+D（read 返回 0），这半行算一行，然后结束。
+ * dash 这些不带行编辑的 shell 也是这样。
  */
 static char buf[512];
 static uint32_t buf_len, buf_pos;
@@ -233,8 +239,8 @@ static int32_t read_line(int32_t fd, char *line)
             return n ? (int32_t)n : -1;
         }
         int32_t got = read(fd, buf, sizeof(buf));
-        if (got == -EINTR && n == 0)
-            return -EINTR;
+        if (got == -EINTR)
+            return -EINTR;          /* Ctrl+C：攒着的半行也不要了，不能当成读完了去执行它 */
         if (got <= 0)
             at_end = 1;
         else
@@ -255,8 +261,11 @@ int main(int sh_argc, char **sh_argv)
         eprint(": cannot open\n");
         return 1;
     }
+    /* 先问一下 SIGINT 原来怎么处理：signal 返回原来的处理方式，问的时候设成忽略，下面马上改回来 */
+    sighandler_t old_intr = signal(SIGINT, SIG_IGN);
+    intr_ignored = old_intr == SIG_IGN;
+    signal(SIGINT, interactive && !intr_ignored ? on_intr : old_intr);  /* Ctrl+C 结束的是前台程序，不是 shell 自己 */
     if (interactive) {
-        signal(SIGINT, on_intr);    /* Ctrl+C 结束的是前台程序，不是 shell 自己 */
         signal(SIGTERM, SIG_IGN);   /* kill 0 发给这一组，也不该把 shell 自己结束；kill -9 才行 */
         print("shell on hda: try help, ls /bin, cat /hello.txt, ps\n");
     }
