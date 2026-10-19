@@ -47,7 +47,14 @@
 #define SYS_FCNTL  32               /* fcntl(fd, cmd, arg)：复制描述符、close-on-exec、打开方式 */
 #define SYS_NICE   33               /* nice(inc)：nice 值加上 inc（-20～19），返回新的 nice 值；越大越谦让 */
 #define SYS_TIMES  34               /* times(&tms)：自己和等到的子进程用了多少 CPU 时间，返回开机以来的 tick 数 */
-#define SYS_CALLS  35
+#define SYS_GETUID 35               /* getuid()：实际用户号：是谁运行的 */
+#define SYS_GETEUID 36              /* geteuid()：有效用户号：检查权限时用它，运行 setuid 程序时是程序主人的 */
+#define SYS_GETGID 37               /* getgid()：实际组号 */
+#define SYS_GETEGID 38              /* getegid()：有效组号 */
+#define SYS_SETUID 39               /* setuid(uid)：root 把三个用户号都换成 uid；别人只能把有效用户号换回实际的或保存的 */
+#define SYS_SETGID 40               /* setgid(gid)：同上，组号 */
+#define SYS_CHOWN  41               /* chown(path, uid, gid)：改文件的主人和组，只有 root 能改 */
+#define SYS_CALLS  42
 
 /* fsinfo 写回的内容 */
 struct fsinfo {
@@ -58,6 +65,11 @@ struct fsinfo {
 };
 
 /* stat 写回的内容：取自磁盘上的 i 节点 */
+/* 权限位之上的三位，取值与 Linux 0.11 的 include/sys/stat.h 相同 */
+#define S_ISUID    04000            /* exec 时有效用户号换成文件的主人（setuid 程序） */
+#define S_ISGID    02000            /* exec 时有效组号换成文件的组 */
+#define S_ISVTX    01000            /* 目录的粘滞位：里面的文件只有主人（和目录的主人、root）能删，/tmp 就是这样 */
+
 struct stat {
     uint16_t mode;                  /* 类型和权限：0040000 目录，0100000 普通文件，0020000 字符设备 */
     uint16_t nlinks;
@@ -119,6 +131,7 @@ static inline void unix_to_date(uint32_t t, struct date *d)
 struct taskinfo {
     int32_t state;                  /* 1 能运行，2 在 sleep 里，3 僵尸，4 在 waitpid 里，5 在等待队列上 */
     int32_t parent;
+    int32_t uid;                    /* 实际用户号 */
     int32_t nice;                   /* -20～19 */
     int32_t priority;               /* 每一轮能运行几个 tick：20 - nice */
     uint32_t ticks;                 /* 用了多少 CPU 时间（用户态加内核态的 tick 数） */
@@ -330,6 +343,41 @@ static inline int32_t nice(int32_t inc)
 static inline uint32_t times(struct tms *buf)
 {
     return (uint32_t)syscall3(SYS_TIMES, (uint32_t)buf, 0, 0);
+}
+
+static inline int32_t getuid(void)
+{
+    return syscall3(SYS_GETUID, 0, 0, 0);
+}
+
+static inline int32_t geteuid(void)
+{
+    return syscall3(SYS_GETEUID, 0, 0, 0);
+}
+
+static inline int32_t getgid(void)
+{
+    return syscall3(SYS_GETGID, 0, 0, 0);
+}
+
+static inline int32_t getegid(void)
+{
+    return syscall3(SYS_GETEGID, 0, 0, 0);
+}
+
+static inline int32_t setuid(uint32_t uid)
+{
+    return syscall3(SYS_SETUID, uid, 0, 0);
+}
+
+static inline int32_t setgid(uint32_t gid)
+{
+    return syscall3(SYS_SETGID, gid, 0, 0);
+}
+
+static inline int32_t chown(const char *path, uint32_t uid, uint32_t gid)
+{
+    return syscall3(SYS_CHOWN, (uint32_t)path, uid, gid);
 }
 
 static inline int32_t chmod(const char *path, uint32_t mode)

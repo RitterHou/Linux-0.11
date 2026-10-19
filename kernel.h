@@ -156,6 +156,16 @@ void sched_set_name(const char *path);
 struct taskinfo;
 int sched_taskinfo(int pid, struct taskinfo *info);
 int sched_nice(int inc);
+/* 用户号和组号：实际的（是谁）、有效的（检查权限用）、保存的（setuid 程序换掉有效的以后还能换回来） */
+#define ID_UID  0
+#define ID_EUID 1
+#define ID_GID  2
+#define ID_EGID 3
+uint32_t sched_id(int which);
+int suser(void);                    /* 有效用户号是 0（root） */
+int sched_setuid(uint32_t uid);
+int sched_setgid(uint32_t gid);
+void sched_exec_ids(int set_uid, uint32_t uid, int set_gid, uint32_t gid);
 struct tms;
 uint32_t sched_times(struct tms *buf);
 int do_exec(const char *path, uint32_t user_argv, struct interrupt_frame *frame);

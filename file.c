@@ -51,7 +51,9 @@ struct file *file_open(const char *path, int flags)
 
     fs_lock();
     if (namei(path, &ino, &d) == 0) {
-        if ((flags & O_CREAT) && (flags & O_EXCL))
+        /* 读要有读权限，写和清空要有写权限：权限只在打开时查一次，打开以后 chmod 也不影响已经打开的描述符 */
+        int want = (access != O_WRONLY ? MAY_READ : 0) | (access != O_RDONLY || (flags & O_TRUNC) ? MAY_WRITE : 0);
+        if (((flags & O_CREAT) && (flags & O_EXCL)) || !permission(&d, want))
             goto fail;
         if ((d.mode & S_IFMT) == S_IFCHR) {
             if (d.zone[0] == (TTY_MAJOR << 8 | 0)) {

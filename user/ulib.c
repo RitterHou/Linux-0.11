@@ -86,6 +86,97 @@ void print_num(uint32_t n)
     write(1, buf + i, sizeof(buf) - (uint32_t)i);
 }
 
+/*
+ * 在 path 这个冒号分隔的文件里找第 key 段等于 want 的那一行，把它切开，fields 指向每一段（最多 nf 段），返回 1。
+ * 文件整个读进一个静态的缓冲区，所以上一次找到的结果在下一次查找时会被盖掉。
+ */
+static int find_line(const char *path, int key, const char *want, char **fields, int nf)
+{
+    static char buf[2048];
+    int32_t fd = open(path, O_RDONLY), n = 0, got;
+    if (fd < 0)
+        return 0;
+    while (n < (int32_t)sizeof(buf) - 1 && (got = read(fd, buf + n, sizeof(buf) - 1 - (uint32_t)n)) > 0)
+        n += got;
+    close(fd);
+    buf[n] = '\0';
+    for (char *line = buf; *line;) {
+        char *end = line;
+        while (*end && *end != '\n')
+            end++;
+        char *next = *end ? end + 1 : end;
+        *end = '\0';
+        int k = 0;
+        for (char *p = line; k < nf;) {
+            fields[k++] = p;
+            while (*p && *p != ':')
+                p++;
+            if (!*p)
+                break;
+            *p++ = '\0';
+        }
+        while (k < nf)
+            fields[k++] = end;          /* 少了的段当成空的 */
+        if (strcmp(fields[key], want) == 0)
+            return 1;
+        line = next;
+    }
+    return 0;
+}
+
+static void copy_field(char *dst, const char *src, uint32_t size)
+{
+    uint32_t i = 0;
+    for (; src[i] && i < size - 1; i++)
+        dst[i] = src[i];
+    dst[i] = '\0';
+}
+
+static const char *decimal(uint32_t n, char *buf)
+{
+    int i = 11;
+    buf[i] = '\0';
+    do
+        buf[--i] = (char)('0' + n % 10);
+    while ((n /= 10) != 0);
+    return buf + i;
+}
+
+static int passwd_from(char **f, struct passwd *pw)
+{
+    copy_field(pw->name, f[0], sizeof(pw->name));
+    copy_field(pw->home, f[5], sizeof(pw->home));
+    copy_field(pw->shell, f[6], sizeof(pw->shell));
+    return parse_uint(f[2], 10, 0xFFFF, &pw->uid) && parse_uint(f[3], 10, 0xFF, &pw->gid);
+}
+
+int getpwnam(const char *name, struct passwd *pw)
+{
+    char *f[7];
+    return find_line("/etc/passwd", 0, name, f, 7) && passwd_from(f, pw);
+}
+
+int getpwuid(uint32_t uid, struct passwd *pw)
+{
+    char *f[7], num[12];
+    return find_line("/etc/passwd", 2, decimal(uid, num), f, 7) && passwd_from(f, pw);
+}
+
+int getgrnam(const char *name, uint32_t *gid)
+{
+    char *f[4];
+    return find_line("/etc/group", 0, name, f, 4) && parse_uint(f[2], 10, 0xFF, gid);
+}
+
+int getgrgid(uint32_t gid, char *name, uint32_t size)
+{
+    char *f[4], num[12];
+    if (!find_line("/etc/group", 2, decimal(gid, num), f, 4))
+        return 0;
+    copy_field(name, f[0], size);
+    return 1;
+}
+
 /* 堆：brk 往上推就行，用到的页缺页时内核才补上。 */
 void *sbrk(int32_t increment)
 {

@@ -144,6 +144,62 @@ static int32_t spinner(int k, int32_t inc, uint32_t from, uint32_t until, int in
 }
 #endif
 
+#if defined(SELFTEST) && SELFTEST == SELFTEST_USER_PERM
+/* 子进程（换成了用户 100）把每一项的结果记在这里：内核映像里的全局变量，所有任务共用，fork 时不复制 */
+static volatile char perm_res[16];
+static volatile int perm_n;
+
+static void perm_put(int ok, char letter)
+{
+    perm_res[perm_n++] = ok ? letter : (char)(letter - 'a' + 'A');
+}
+
+/* 把 from 整个复制成 to：没有 cp 命令，也不能 link（chmod 会连原来的一起改） */
+static int copy_file(const char *from, const char *to)
+{
+    char buf[512];
+    int32_t in = open(from, O_RDONLY), out = open(to, O_WRONLY | O_CREAT | O_TRUNC), n, ok = in >= 0 && out >= 0;
+    while (ok && (n = read(in, buf, sizeof(buf))) > 0)
+        ok = write(out, buf, (uint32_t)n) == n;
+    close(in);
+    close(out);
+    return ok;
+}
+
+/* fork 一个子进程 exec path（标准输出接到管道上，读回 out），返回它的退出状态；exec 失败的是 42 */
+static int32_t run_capture(const char *path, char *out, uint32_t cap, uint32_t *got)
+{
+    int32_t p[2], st = -1;
+    pipe(p);
+    int32_t c = fork();
+    if (c == 0) {
+        dup2(p[1], 1);
+        close(p[0]);
+        close(p[1]);
+        char *argv[] = { (char *)path, 0 };
+        execv(path, argv);
+        exit(42);
+    }
+    close(p[1]);
+    int32_t n;
+    *got = 0;
+    while (*got < cap && (n = read(p[0], out + *got, cap - *got)) > 0)
+        *got += (uint32_t)n;
+    close(p[0]);
+    waitpid(c, &st, 0);
+    return st;
+}
+
+static int same_text(const char *a, uint32_t n, const char *b)
+{
+    uint32_t i = 0;
+    for (; i < n && b[i]; i++)
+        if (a[i] != b[i])
+            return 0;
+    return i == n && b[i] == '\0';
+}
+#endif
+
 #if defined(SELFTEST) && SELFTEST == SELFTEST_USER_WRITE_KERNEL
 extern volatile uint32_t timer_ticks;   /* 内核的变量，所在的页没有用户位 */
 #endif
@@ -1389,6 +1445,105 @@ void user_main(void)
     ok = got >= sum && got <= sum + 10 && after.tms_cutime - before.tms_cutime >= spent_user[0];
     res[nres++] = ok ? 's' : 'S';
     write(1, res, (uint32_t)nres);
+    exit(0);
+#elif SELFTEST == SELFTEST_USER_PERM
+    /*
+     * init 是 root：先准备好几个 root 的文件，再 fork 一个子进程换成用户 100（组 100），由它逐项检查，结果记在 perm_res。
+     * 每一项通过记一个小写字母，期望第 6 行（去掉任务 A 的 A）是 urcsxmke：
+     *   u：init 的四个号都是 0；子进程 setgid(100)、setuid(100) 以后四个号都是 100，再也 setuid(0)、setgid(0) 不回去。
+     *   r：别人能读的能读，不能写的写不了（/etc/passwd、root 的 0644 文件），O_TRUNC 也算写；0700 的目录读不了。
+     *   c：/ 和 /etc 是 root 的 0755：在里面建不了文件、目录、链接；在 /tmp 能建，主人和组是 100，root 能删掉它。
+     *   s：/tmp 有粘滞位：删不掉 root 放在里面的文件，自己的能删。
+     *   x：没有执行权限的程序（0644）执行不了，root 也不行；0755 的能执行；0700 的目录里的文件 stat 不到、进不去，root 可以。
+     *   m：别人的文件 chmod 不了，自己的能；谁都不能 chown，只有 root 能，改了主人 setuid 位就清掉；
+     *      utime 设成现在要有写权限，设成别的时间要是主人。
+     *   k：kill 不了 root 的进程，能 kill 自己的；nice 调低不了（返回 -1，不变），调高可以。
+     *   e：setuid 程序：/bin/id 设上 setuid 位（主人是 root），用户 100 运行它，打印 euid=0(root)。
+     */
+    struct stat st;
+    int32_t fd, status = -1;
+    int ok = getuid() == 0 && geteuid() == 0 && getgid() == 0 && getegid() == 0;
+    fd = open("/tmp/rootfile", O_WRONLY | O_CREAT);
+    write(fd, "root data", 9);
+    close(fd);
+    fd = open("/tmp/rootw", O_WRONLY | O_CREAT);
+    close(fd);
+    chmod("/tmp/rootw", 0666);
+    mkdir("/tmp/priv");
+    chmod("/tmp/priv", 0700);
+    close(open("/tmp/priv/f", O_WRONLY | O_CREAT));
+    ok &= copy_file("/bin/hello", "/tmp/hx") && chmod("/tmp/hx", 0644) == 0;
+    int32_t sleeper = fork();
+    if (sleeper == 0) {
+        sleep(1000);
+        exit(0);
+    }
+    chmod("/bin/id", 04755);
+    char out[64];
+    uint32_t got;
+
+    int32_t c = fork();
+    if (c == 0) {
+        ok &= setgid(100) == 0 && setuid(100) == 0;
+        ok &= getuid() == 100 && geteuid() == 100 && getgid() == 100 && getegid() == 100;
+        ok &= setuid(0) == -1 && setgid(0) == -1 && geteuid() == 100 && getegid() == 100 && setuid(100) == 0;
+        perm_put(ok, 'u');
+
+        fd = open("/etc/passwd", O_RDONLY);
+        ok = fd >= 0;
+        close(fd);
+        ok &= open("/etc/passwd", O_WRONLY) < 0 && open("/hello.txt", O_RDWR) < 0 && open("/tmp/rootfile", O_WRONLY) < 0;
+        ok &= open("/tmp/rootfile", O_RDONLY | O_TRUNC) < 0 && stat("/tmp/rootfile", &st) == 0 && st.size == 9;
+        ok &= open("/tmp/priv", O_RDONLY) < 0;
+        perm_put(ok, 'r');
+
+        ok = open("/new", O_WRONLY | O_CREAT) < 0 && mkdir("/newdir") < 0 && stat("/new", &st) < 0;
+        fd = open("/tmp/mine", O_WRONLY | O_CREAT);
+        ok &= fd >= 0 && write(fd, "mine", 4) == 4;
+        close(fd);
+        ok &= stat("/tmp/mine", &st) == 0 && st.uid == 100 && st.gid == 100 && st.mode == 0100644;
+        ok &= mkdir("/tmp/mydir") == 0 && stat("/tmp/mydir", &st) == 0 && st.uid == 100 && rmdir("/tmp/mydir") == 0;
+        ok &= link("/tmp/mine", "/etc/stolen") < 0 && link("/tmp/mine", "/tmp/mine2") == 0;
+        perm_put(ok, 'c');
+
+        ok = unlink("/tmp/rootfile") < 0 && stat("/tmp/rootfile", &st) == 0 && unlink("/tmp/mine2") == 0;
+        perm_put(ok, 's');
+
+        ok = run_capture("/tmp/hx", out, sizeof(out), &got) == 42;     /* 输出接到管道上：hello 万一运行了也不写第 6 行 */
+        ok &= stat("/tmp/priv/f", &st) < 0 && chdir("/tmp/priv") < 0;
+        perm_put(ok, 'x');
+
+        ok = chmod("/tmp/rootfile", 0666) < 0 && chmod("/tmp/mine", 0600) == 0 && stat("/tmp/mine", &st) == 0;
+        ok &= st.mode == 0100600 && chown("/tmp/mine", 0, 0) < 0 && chown("/tmp/mine", 100, 100) < 0;
+        ok &= utime("/tmp/rootfile", 12345) < 0 && utime("/tmp/rootfile", 0) < 0;
+        ok &= utime("/tmp/rootw", 0) == 0 && utime("/tmp/rootw", 12345) < 0 && utime("/tmp/mine", 12345) == 0;
+        perm_put(ok, 'm');
+
+        int32_t mine = fork();
+        if (mine == 0) {
+            sleep(1000);
+            exit(0);
+        }
+        ok = kill(sleeper, SIGTERM) < 0 && kill(mine, SIGTERM) == 0 && waitpid(mine, &status, 0) == mine;
+        ok &= nice(-1) == -1 && nice(0) == 0 && nice(1) == 1;
+        perm_put(ok, 'k');
+
+        int32_t r = run_capture("/bin/id", out, sizeof(out), &got);
+        perm_put(r == 0 && same_text(out, got, "uid=100(user) gid=100(users) euid=0(root)\n"), 'e');
+        exit(0);
+    }
+    waitpid(c, &status, 0);
+    /* 回到 root：root 能删用户的文件；root 也执行不了一个执行位都没有的程序，有了就能；0700 的目录 root 照样进 */
+    ok = perm_n == 8 && unlink("/tmp/mine") == 0;
+    ok &= run_capture("/tmp/hx", out, sizeof(out), &got) == 42 && chmod("/tmp/hx", 0755) == 0;
+    ok &= run_capture("/tmp/hx", out, sizeof(out), &got) == 0 && got > 0;
+    ok &= stat("/tmp/priv/f", &st) == 0;
+    ok &= chmod("/tmp/hx", 04755) == 0 && chown("/tmp/hx", 100, 100) == 0 && stat("/tmp/hx", &st) == 0;
+    ok &= st.uid == 100 && st.gid == 100 && st.mode == 0100755;  /* setuid 位清掉了 */
+    kill(sleeper, SIGKILL);
+    waitpid(sleeper, &status, 0);
+    write(1, (const char *)perm_res, (uint32_t)perm_n);
+    write(1, ok ? "!" : "?", 1);
     exit(0);
 #elif SELFTEST == SELFTEST_ALL_EXIT
     write(1, "bye", 3);

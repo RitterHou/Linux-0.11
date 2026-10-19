@@ -92,6 +92,7 @@ make test
 - waitpid（自检 `USER_WAIT`）：返回子进程号，把退出码 42 写回父进程的变量；那个变量所在的页 fork 之后由三个进程共用，内核写它时也会先复制，另一个进程看到的仍是原值；16 个任务槽去掉任务 0、A、B 正好能 fork 13 次，第 14 次返回 -1；`waitpid(-1)` 把它们一个个收走；`WNOHANG` 在子进程还没结束时立刻返回 0，等别人的子进程返回 -1；被缺页异常结束的子进程，状态是 `0x10E`。所有子进程收走后内存回到只剩任务 A 的内核栈。
 - fork：任务 3 有自己的页目录和内核栈；父子都写过栈之后，栈顶映射到不同的物理页，页表项都已改回可写；用户代码那一页父子共用。自检 `USER_FORK`：子进程把栈上的变量改成 99，父进程看到的仍是 7；`fork()` 在父进程返回 3、在子进程返回 0；父进程不等子进程就结束时，已经结束的子进程也被收走，内存全部收回。
 - 抢占（自检 `USER_SPIN`，用户程序一直空转、从不睡眠）：任务 A 只能等任务 B 这一轮的 20 个 tick 用完才运行，约每 20 个 tick 写一个字母；空闲比例降到 10% 以下。
+- 用户和权限（自检 `USER_PERM`）：init 是 root，先建好 root 的文件，再 fork 一个子进程换成用户 100 逐项检查：`setgid`、`setuid` 以后四个号都是 100，再也换不回 0；别人能读的能读，`/etc/passwd`、root 的 0644 文件写不了，`O_TRUNC` 也算写，0700 的目录读不了；`/` 和 `/etc` 里建不了文件、目录、链接，`/tmp` 里能建，主人和组是 100；`/tmp` 有粘滞位，删不掉 root 放在里面的文件，自己的能删；0644 的程序执行不了，0700 的目录里的文件 stat 不到、进不去；别人的文件 chmod 不了，谁都不能 chown；`utime` 设成现在要有写权限，设成别的时间要是主人；kill 不了 root 的进程，能 kill 自己的；nice 调低不了；setuid root 的 `/bin/id` 打印 `euid=0(root)`。回到 root：能删用户的文件，能进 0700 的目录，一个执行位都没有的程序 root 也执行不了，chown 以后 setuid 位清掉了。在 shell 里（`test_users`）：`id` 是 root；`/tmp` 是 `drwxrwxrwt`，`/home/user` 是 100 的；`chown user`、`chown user:users`、`chown 0:0` 都对，没有的用户和组报错；`chmod 4755`、`2755`、`4644`、`1777`、`1776` 之后 ls -l 显示 `s`、`S`、`t`、`T`。
 - nice 和 CPU 时间（自检 `USER_NICE`）：`nice` 返回新的 nice 值，停在 -20～19，`taskinfo` 读到的 priority 是 20 - nice；fork 出的子进程继承 nice 值，exec 成 sleep 以后也不变；一个 nice 0、一个 nice 19 的子进程一起空转 2 秒，nice 0 的至少分到 8 倍（量出来是 190:10，算法是 20:1），nice 19 的也没饿死；两个 nice 0 的分得差不多（100:100）；用户态空转的时间记在 utime，一直调用 stat 的记在 stime；收走的子进程用的时间正好加进父进程的 cutime、cstime。在 shell 里（`test_nice_shell`）：`nice` 打印 0，`nice -n 3 nice` 打印 3，`nice nice` 打印 10，超出范围的停在 -20 和 19，参数不对报用法；后台的 `nice -n 5 sleep 3` 在 `ps -l` 里是 PRI 15、NI 5；`ps -l` 每行的格式对，空闲任务的 TIME 是 0.00；`time sleep 1` 过了 1 秒左右、CPU 几乎没用，`time check spin` 半秒几乎都记在 user。
 - 寄存器设为已知值后执行 `ud2`：异常面板显示 `#UD`，EAX～EBP、EIP（`ud2` 的地址）、各段寄存器、CR3 都与预期一致，ESP 落在内核栈内，EFLAGS 的 IF 为 1。
 - 除以零显示 `#DE`，EIP 正好指向 `div` 指令；触发未填写的 IDT 表项显示 `#GP`，错误码为 `0x182`。
@@ -264,6 +265,10 @@ DS=0x0010 ES=0x0010 FS=0x0010 GS=0x0010 CR2=0x00000000 CR3=0x00018000
 | 32 | `fcntl(fd, cmd, arg)` | `F_DUPFD` 复制到不小于 `arg` 的最小空闲描述符；`F_GETFD`、`F_SETFD` 取、设 close-on-exec（exec 时关掉这个描述符）；`F_GETFL`、`F_SETFL` 取打开方式、改 `O_APPEND`。取值与 Linux 0.11 相同 | 看命令；描述符没打开或命令不认识时 -1 |
 | 33 | `nice(inc)` | nice 值加上 `inc`，停在 -20～19；nice 越大，调度时每轮补的 tick 越少，见上文“任务切换” | 新的 nice 值 |
 | 34 | `times(&tms)` | 写回自己和收走的子进程在用户态、内核态用了多少个 tick；`tms` 可以是 0 | 开机以来的 tick 数；`tms` 不在用户可写的内存里时 -1 |
+| 35～38 | `getuid()`、`geteuid()`、`getgid()`、`getegid()` | 实际、有效用户号，实际、有效组号，见下文“用户和权限” | 那个号 |
+| 39 | `setuid(uid)` | root 把实际、有效、保存的用户号都换成 `uid`；别人只能把有效用户号换成实际的或保存的 | 0；不允许时 -1 |
+| 40 | `setgid(gid)` | 同上，组号 | 0；不允许、`gid` 大于 255 时 -1 |
+| 41 | `chown(path, uid, gid)` | 改文件的主人和组，`-1` 表示不改；普通文件的 setuid、setgid 位清掉 | 0；不是 root、文件不存在时 -1 |
 | 其他 | | | -1 |
 
 调用的过程：
@@ -544,6 +549,8 @@ loader 进入保护模式时用的是写在 `loader.bin` 里的 GDT。进入内�
 块 8 起    数据块：文件内容、目录内容、间接块
 ```
 
+`/etc/passwd`、`/etc/group` 记着用户和组，`/home/user` 是用户 user 的家目录，见下文“用户和权限”。
+
 每块 1024 字节，是 2 个扇区。i 节点从 1 开始编号，1 号是根目录。i 节点里有文件类型和权限、大小、9 个块号：前 7 个直接指向数据块；第 8 个指向一个间接块，里面是 512 个块号；第 9 个指向二级间接块，里面是 512 个间接块的块号。所以 7 KB 以内的文件只用直接块，519 KB 以内再加一个间接块，`/big` 有 600 KB，要用到二级间接块。目录也是文件，内容是一条条 16 字节的目录项：2 字节的 i 节点号加 14 字节的文件名，每个目录的头两项是 `.` 和 `..`。
 
 - **缓冲区缓存**（`buffer.c`）：`bread(block)` 返回一个装着那一块的缓冲区，用完调用 `brelse()`。缓冲区里已经有这一块就直接给出去；没有就挑一个没人在用、最久没用过的缓冲区，从硬盘读进来。别的任务正在读同一块，或者 16 个缓冲区全都有人在用，就睡下等。目录、i 节点表这些反复要查的块因此只读一次。新分配的块用 `bget()` 拿缓冲区，内容清零，不必先读。Linux 0.11 的 `fs/buffer.c` 用散列表和空闲链表管理几百个缓冲区，这里只有 16 个，按块号挨个找。
@@ -602,7 +609,7 @@ init（任务 B，内核映像里的 `user_main()`）先 fork 出写 C 的 `/bin
 
 | 命令 | 作用 |
 | --- | --- |
-| `ls [-l] [目录]` | 直接 `read` 目录文件（不给就是当前目录），一条条解析 16 字节的目录项，再用 `stat` 问出每一项的类型和大小；`-l` 换成长格式：类型和权限（rwx 各三位）、链接数、主人、组、大小、修改时间（UTC） |
+| `ls [-l] [目录]` | 直接 `read` 目录文件（不给就是当前目录），一条条解析 16 字节的目录项，再用 `stat` 问出每一项的类型和大小；`-l` 换成长格式：类型和权限（rwx 各三位，setuid、setgid、粘滞位写成 `s`、`t`）、链接数、主人、组（号码）、大小、修改时间（UTC） |
 | `pwd` | 用 `getcwd` 取当前目录，打印出来 |
 | `date` | 打印现在的时间（UTC） |
 | `touch 文件…` | 文件不存在就新建一个空的，存在就把修改时间改成现在 |
@@ -610,7 +617,9 @@ init（任务 B，内核映像里的 `user_main()`）先 fork 出写 C 的 `/bin
 | `rm 文件…`、`mkdir 目录…`、`rmdir 目录…` | 删文件、建目录、删空目录 |
 | `ln 文件 新名字` | 给文件再起一个名字，两个名字的 i 节点号一样 |
 | `mv 文件 新名字`、`mv 文件 目录` | 改名或搬进目录：link 新名字再 unlink 旧名字；新名字是个文件就先删掉它；目录搬不了 |
-| `chmod 权限 文件…` | 用八进制改权限，比如 `chmod 755 脚本` |
+| `chmod 权限 文件…` | 用八进制改权限，比如 `chmod 755 脚本`、`chmod 4755 程序`（setuid） |
+| `chown 主人[:组] 文件…` | 改主人和组，名字（查 `/etc/passwd`、`/etc/group`）或号码都行；只有 root 能改 |
+| `id` | 打印用户号和组号，例如 `uid=100(user) gid=100(users)`；运行 setuid 程序时还有 `euid=` |
 | `sh [脚本]` | 不给参数是交互的 shell；给了脚本就从文件里读命令 |
 | `df` | 用 `fsinfo` 问出数据块和 i 节点各用了多少，以及缓冲区缓存里有几块是脏的 |
 | `sync` | 把脏块都写回硬盘 |
@@ -659,6 +668,19 @@ shell 运行 `ls /bin | grep e | wc` 时，先建第一个管道，fork 出 ls�
 - **文件时间**：Minix v1 的 i 节点里有一个修改时间。新建文件时是现在；`inode_write()` 写进东西时改成现在，目录里增删一项也是往目录文件里写，所以目录的修改时间跟着变；清空文件也算修改。`utime` 可以直接设，`touch` 用它。`mkfs.py` 打包时，普通文件取源文件的修改时间，目录和设备文件取打包的时刻。`stat` 返回修改时间和 i 节点里的主人、组。
 - 第 4 行右边每秒刷新一次现在的时间。
 - Linux 0.11 的 `time_init()` 也是读到秒数前后一致为止，`kernel_mktime()` 换算，`CURRENT_TIME` 是 `startup_time + jiffies / HZ`。不过它只认“每 4 年一个闰年”，年份也只用两位、一律当成 19xx：到了 2000 年就算错了，这就是千年虫。它写 CMOS 时用的是 `0x80 | 寄存器号`，顺便屏蔽了 NMI，这里不屏蔽。
+
+## 用户和权限
+
+每个任务有三个用户号：实际的（`uid`，是谁运行的）、有效的（`euid`，检查权限时看它）、保存的（`suid`），组号也一样三个。内核建的任务都是 0，也就是 root；fork 出的子进程继承。`/etc/passwd` 里有两个用户：`root`（0）和 `user`（100，组 `users` 100，家目录 `/home/user`），`/etc/group` 里是组的名字，谁都能读。
+
+- **文件的主人**：Minix v1 的 i 节点里有主人（16 位）和组（8 位）。新建的文件、目录，主人和组是当前任务的有效用户号和有效组号。`mkfs.py` 打包时都是 0，`--own 路径=主人,组,权限` 单独设：`/tmp` 是 `1777`（谁都能写，有粘滞位），`/home/user` 是 user 的。
+- **权限**（`fs.c` 的 `permission()`）：有效用户号是文件的主人，看主人那三位 rwx；不是主人、有效组号是文件的组，看组那三位；都不是，看其他人那三位。只看一组：主人去掉了自己的写权限，就算其他人能写，主人也不能写。root 什么都可以，只有执行例外：一个执行位都没有的程序 root 也不能执行。
+- **哪里查**：查路径时，路过的每一个目录都要有执行权限（在里面查找），所以 0700 的目录里的文件别人连 stat 都不行；打开时，读要读权限，写和 `O_TRUNC` 要写权限，只在打开时查一次；新建、删除、链接要有所在目录的写和执行权限，不用有文件本身的权限：删的是目录里的一项；exec 要执行权限；`chdir` 要目录的执行权限。目录有粘滞位（`/tmp`）时，里面的文件只有它的主人、目录的主人和 root 能删，不然谁都能删别人放在 `/tmp` 里的文件。
+- **chmod、chown、utime**：只有主人和 root 能 chmod；不是 root、自己又不在文件的组里，setgid 位设不上。只有 root 能 chown：谁都能把文件送给别人的话，配额和 setuid 程序都没法管；普通文件换了主人，setuid、setgid 位都清掉。`utime` 设成现在要有写权限，设成任意时间要是主人。
+- **setuid 程序**：exec 的程序文件有 setuid 位（`chmod 4755`，`ls -l` 里是 `-rwsr-xr-x`），有效用户号就换成文件的主人；setgid 位换有效组号。然后有效的记成保存的。所以 root 的 setuid 程序以 root 的身份运行，却知道是谁运行的（实际用户号）。`#!` 脚本自己的 setuid 位不管用，只看解释器的，和 Linux 一样：脚本在 exec 和解释器打开它之间可能被换掉。
+- **setuid、setgid**：有效用户号是 root 的，把三个用户号都换掉，从此再也变不回 root，`su` 和 `login` 就是这样变成别人的；别人只能把有效用户号换成实际的或保存的。
+- **信号和 nice**：root 能给谁都发信号；别人要自己的实际或有效用户号，等于对方的实际或保存的用户号，所以结束不了 root 的程序。只有 root 能调低 nice 值（多要 CPU），别人这样调返回 -1、什么也不改。
+- Linux 0.11 的 `permission()`、`sys_chmod()`、`sys_chown()`、exec 时的 setuid 和这里相同。不同的是：它没有保存的用户号，`sys_setuid()` 是 `setreuid(uid, uid)`，而且只在 `uid > 0` 时才改，`setuid(0)` 什么也不做；它的 `send_sig()` 只比两边的有效用户号；`utime` 和 `nice` 不查权限；没有粘滞位。
 
 ## 堆：brk 和 malloc
 
@@ -721,7 +743,7 @@ shell 运行 `ls /bin | grep e | wc` 时，先建第一个管道，fork 出 ls�
 | `sched.c` | 任务表、TSS、硬件任务切换、按 counter 和 priority 挑任务、nice、CPU 时间、睡眠与唤醒、等待队列、fork、exit、waitpid、信号和进程组、当前目录 | `kernel/sched.c` 中的 `schedule()`、`sleep_on()`，`kernel/fork.c` 中的 `copy_process()`，`kernel/exit.c` 中的 `do_exit()`、`sys_waitpid()`、`sys_kill()`，`kernel/signal.c`，`include/linux/sched.h` 中的 `switch_to` |
 | `hd.c` | ATA 硬盘驱动：IDENTIFY、按 LBA 读写扇区、IRQ14 | `kernel/blk_drv/hd.c`、`ll_rw_blk.c` |
 | `buffer.c` | 缓冲区缓存：`bread()`、`bget()`、`bdirty()`、`brelse()`，延迟写回和 `sync` | `fs/buffer.c` |
-| `fs.c`、`fs.h` | Minix v1 文件系统：超级块、i 节点表、位图、`bmap()`、`namei()`、写文件、目录的增删、文件系统锁 | `fs/super.c`、`fs/inode.c`、`fs/namei.c`、`fs/bitmap.c`、`fs/truncate.c`、`include/linux/fs.h` |
+| `fs.c`、`fs.h` | Minix v1 文件系统：超级块、i 节点表、位图、`bmap()`、`namei()`、权限检查、写文件、目录的增删、chmod、chown、文件系统锁 | `fs/super.c`、`fs/inode.c`、`fs/namei.c`、`fs/bitmap.c`、`fs/truncate.c`、`fs/open.c`、`include/linux/fs.h` |
 | `file.c` | 打开的文件、文件表 | `fs/open.c`、`fs/read_write.c`、`fs/file_dev.c`、`fs/file_table.c` |
 | `exec.c` | exec：读 ELF 文件，建新的地址空间，摆好参数 | `fs/exec.c` |
 | `user/` | 用户程序和它们的小函数库（系统调用、malloc、信号处理函数的返回）、链接脚本 | 无（Linux 0.11 的程序用 libc 编译） |

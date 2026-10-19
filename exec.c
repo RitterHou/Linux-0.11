@@ -3,7 +3,8 @@
  *
  * 程序是 ELF 格式（用 clang 和 ld.lld 编出来的就是），链接在用户空间的底部 0x40000000。步骤：
  *   1. 把参数从用户内存复制进内核：马上要扔掉旧的地址空间，它们会跟着消失。路径已由 sys_exec() 复制好。
- *   2. 读 ELF 头和程序头，检查是 32 位 x86 的可执行文件、要装入的段都落在用户空间里。
+ *   2. 检查有执行权限（root 也要至少有一个执行位），读 ELF 头和程序头，检查是 32 位 x86 的可执行文件、
+ *      要装入的段都落在用户空间里。文件有 setuid 位的，第 5 步成功以后有效用户号换成文件的主人（setgid 位换组）。
  *   3. 建一份新的页目录，把每个要装入的段（PT_LOAD）一页页放进去：分一页，按物理地址把文件内容读进来，
  *      多出来的部分（.bss）保持为 0。代码段只读，数据段可写。
  *   4. 在栈顶摆好参数：字符串、argv 指针数组、argv、argc，最下面再放一个假的返回地址，
@@ -19,6 +20,7 @@
  */
 #include "kernel.h"
 #include "fs.h"
+#include "syscall.h"
 
 #define MAX_ARGS      16
 #define ARG_BYTES     1024          /* 参数字符串加起来最多这么长，放得进栈顶的一页 */
@@ -181,13 +183,13 @@ int do_exec(const char *path, uint32_t user_argv, struct interrupt_frame *frame)
     struct elf_phdr ph[MAX_PHDRS];
     char interp[PATH_MAX];
     const char *name = path;        /* ps 里显示的名字：脚本显示脚本自己的名字 */
-    if (namei(path, &ino, &ip) < 0 || (ip.mode & S_IFMT) != S_IFREG || !(ip.mode & 0111))
+    if (namei(path, &ino, &ip) < 0 || (ip.mode & S_IFMT) != S_IFREG || !permission(&ip, MAY_EXEC))
         return -1;
     if (script(path, &ip, interp, args, &used, offsets, &argc) < 0)
         return -1;
-    if (interp[0]) {
+    if (interp[0]) {                /* 脚本：从此 ip 是解释器的。脚本自己的 setuid 位不管用，只看解释器的，和 Linux 一样 */
         path = interp;
-        if (namei(path, &ino, &ip) < 0 || (ip.mode & S_IFMT) != S_IFREG || !(ip.mode & 0111))
+        if (namei(path, &ino, &ip) < 0 || (ip.mode & S_IFMT) != S_IFREG || !permission(&ip, MAY_EXEC))
             return -1;
     }
     if (inode_read(&ip, 0, &eh, sizeof(eh)) != sizeof(eh) || !elf_ok(&eh) ||
@@ -241,6 +243,7 @@ int do_exec(const char *path, uint32_t user_argv, struct interrupt_frame *frame)
     frame->eflags = 0x202;          /* IF=1，其余标志清零 */
     frame->ebx = frame->ecx = frame->edx = frame->esi = frame->edi = frame->ebp = 0;
     sched_set_name(name);
+    sched_exec_ids(ip.mode & S_ISUID, ip.uid, ip.mode & S_ISGID, ip.gid);   /* setuid 程序：以文件主人的身份运行 */
     sched_exec_signals();           /* 原来的处理函数在新程序里没有意义 */
     sched_set_brk(end);             /* 新程序的堆是空的，从它的 .bss 末尾开始 */
     if (first) {

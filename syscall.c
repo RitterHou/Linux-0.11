@@ -357,6 +357,56 @@ static int32_t path_op(uint32_t path, struct interrupt_frame *frame, int (*op)(c
     return ret;
 }
 
+/* getuid() 等：见 sched.c 的 sched_id()。Linux 0.11 每个都是一个系统调用，这里也一样。 */
+static int32_t sys_getuid(uint32_t a, uint32_t b, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)a, (void)b, (void)c, (void)frame;
+    return (int32_t)sched_id(ID_UID);
+}
+
+static int32_t sys_geteuid(uint32_t a, uint32_t b, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)a, (void)b, (void)c, (void)frame;
+    return (int32_t)sched_id(ID_EUID);
+}
+
+static int32_t sys_getgid(uint32_t a, uint32_t b, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)a, (void)b, (void)c, (void)frame;
+    return (int32_t)sched_id(ID_GID);
+}
+
+static int32_t sys_getegid(uint32_t a, uint32_t b, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)a, (void)b, (void)c, (void)frame;
+    return (int32_t)sched_id(ID_EGID);
+}
+
+static int32_t sys_setuid(uint32_t uid, uint32_t b, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)b, (void)c, (void)frame;
+    return sched_setuid(uid);
+}
+
+static int32_t sys_setgid(uint32_t gid, uint32_t b, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)b, (void)c, (void)frame;
+    return sched_setgid(gid);
+}
+
+/* chown(path, uid, gid)：见 fs.c 的 fs_chown()。 */
+static int32_t sys_chown(uint32_t path, uint32_t uid, uint32_t gid, struct interrupt_frame *frame)
+{
+    char name[PATH_MAX];
+
+    if (get_path(name, path, from_user_mode(frame)) < 0)
+        return -1;
+    fs_lock();
+    int ret = fs_chown(name, uid, gid);
+    fs_unlock();
+    return ret;
+}
+
 /* nice(inc)：见 sched_nice()。 */
 static int32_t sys_nice(uint32_t inc, uint32_t b, uint32_t c, struct interrupt_frame *frame)
 {
@@ -517,8 +567,8 @@ static int32_t sys_chdir(uint32_t path, uint32_t b, uint32_t c, struct interrupt
     fs_lock();
     int found = namei(name, &ino, &d);
     fs_unlock();
-    if (found < 0 || (d.mode & S_IFMT) != S_IFDIR)
-        return -1;
+    if (found < 0 || (d.mode & S_IFMT) != S_IFDIR || !permission(&d, MAY_EXEC))
+        return -1;                  /* 要能在里面查找才能进去 */
     normalize(name);
     char *cwd = current_cwd();
     for (int i = 0; i < PATH_MAX; i++)
@@ -630,6 +680,13 @@ static const syscall_fn syscall_table[SYS_CALLS] = {
     [SYS_FCNTL]  = sys_fcntl,
     [SYS_NICE]   = sys_nice,
     [SYS_TIMES]  = sys_times,
+    [SYS_GETUID] = sys_getuid,
+    [SYS_GETEUID] = sys_geteuid,
+    [SYS_GETGID] = sys_getgid,
+    [SYS_GETEGID] = sys_getegid,
+    [SYS_SETUID] = sys_setuid,
+    [SYS_SETGID] = sys_setgid,
+    [SYS_CHOWN]  = sys_chown,
 };
 
 void syscall_dispatch(struct interrupt_frame *frame)

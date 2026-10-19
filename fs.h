@@ -61,6 +61,12 @@ struct m_inode {
     struct minix_inode d;           /* 磁盘上那 32 字节的拷贝，改了就写回去 */
 };
 
+/* permission() 的 mask：要读、写、执行（目录是查找）哪几样 */
+#define MAY_READ  4
+#define MAY_WRITE 2
+#define MAY_EXEC  1
+int permission(const struct minix_inode *ip, int mask);
+
 int fs_mount(void);
 int read_inode(uint32_t ino, struct minix_inode *out);
 int32_t inode_read(const struct minix_inode *ip, uint32_t pos, void *dst, uint32_t n);
@@ -76,6 +82,7 @@ int fs_mkdir(const char *path);
 int fs_unlink(const char *path);
 int fs_link(const char *oldpath, const char *newpath);
 int fs_chmod(const char *path, uint32_t mode);
+int fs_chown(const char *path, uint32_t uid, uint32_t gid);
 int fs_utime(const char *path, uint32_t t);
 int fs_rmdir(const char *path);
 struct fsinfo;
