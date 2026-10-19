@@ -419,6 +419,7 @@ svg.fig text.halo { paint-order: stroke; stroke: var(--surface); stroke-width: 5
 .fwr .box.wide { grid-column: span 2; }
 .fwr h3 { font-size: 14px; display: flex; justify-content: space-between; gap: 6px; flex-wrap: wrap; align-items: baseline; }
 .fwr h3 small { font-weight: 400; color: var(--ink-3); font-size: 12px; }
+.fwr h3 em.dirty { font-style: normal; font-size: 11px; font-weight: 600; color: var(--disk); background: var(--disk-bg); border: 1px solid var(--disk); border-radius: 999px; padding: 0 7px; margin-left: 6px; }
 .fwr .note { font-size: 12.5px; color: var(--ink-2); line-height: 1.55; }
 .bits { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 4px; }
 .bits.z { grid-template-columns: repeat(10, minmax(0, 1fr)); }
@@ -514,10 +515,10 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
     <ol class="milestones" id="milestones" aria-label="第一行每个字母代表的里程碑"></ol>
   </div>
   <div class="stats">
-    <span><b data-fact="loc">7,411</b>行汇编与 C</span>
+    <span><b data-fact="loc">7,791</b>行汇编与 C</span>
     <span><b data-fact="kernelKB">40 KB</b>内核</span>
-    <span><b data-fact="commits">54</b>个提交</span>
-    <span><b data-fact="tests">52</b>项自动化测试</span>
+    <span><b data-fact="commits">57</b>个提交</span>
+    <span><b data-fact="tests">56</b>项自动化测试</span>
   </div>
 </header>
 
@@ -925,7 +926,7 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
   <div class="chapter-head">
     <span class="chapter-no">12</span>
     <h2 id="c12">写文件：echo hi &gt; /tmp/a 改了硬盘上的哪几块</h2>
-    <p>读文件只是查表，写文件要改表。新建一个文件，要在 i 节点位图里找一个空位，再在目录里加一项；写进内容，要在区块位图里再找一个空位。每改一块，马上写回硬盘。下面的块号和 i 节点号都是真机上的。</p>
+    <p>读文件只是查表，写文件要改表。新建一个文件，要在 i 节点位图里找一个空位，再在目录里加一项；写进内容，要在区块位图里再找一个空位。改过的块先在缓冲区里标成“脏”的，攒到 sync 时一起写回硬盘。下面的块号和 i 节点号都是真机上的。</p>
   </div>
   <div class="stage" id="fwr">
     <div class="scroll-x"><div class="fwr" id="fwr-grid"></div></div>
@@ -937,6 +938,7 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
       <li><code>cd</code> 先确认目标是一个目录，再按字面去掉多余的 <code>/</code>、<code>.</code> 和 <code>..</code> 存起来，所以 <code>cd /bin/../etc/./</code> 之后 <code>pwd</code> 打印 <code>/etc</code>。<code>cd</code> 必须是 shell 的内建命令：fork 出子进程去换目录，换的只是子进程自己的，子进程一结束就没了。</li>
       <li>Linux 0.11 的 <code>current-&gt;pwd</code> 记的是当前目录的 i 节点，没有 getcwd 系统调用，pwd 要沿着 <code>..</code> 一级级往上，在上一级目录里找自己的名字。这里记的是路径，getcwd 直接复制出来就行。</li>
       <li><b>文件系统锁</b>：读写硬盘会睡，两个任务同时改文件系统，可能分到同一块。所以改文件系统的操作、读文件、查路径、exec 装入程序，都要先拿到一把锁。Linux 0.11 给每个 i 节点、每个缓冲区各加一把锁，并发更好，道理相同。</li>
+      <li><b>延迟写回</b>：同一块（位图、i 节点表、目录）连着改好几次，最后只写一次。脏块在缓冲区要换成别的块时先写回，或者等 sync：init 每隔大约 5 秒调用一次。突然关机，最多丢掉最近几秒的修改。Linux 0.11 也是标脏（b_dirt），用户态的 update 进程每 30 秒 sync 一次。</li>
       <li><b>删掉开着的文件</b>：目录里那一项清掉了，打开它的程序还能接着读写；最后一个描述符关掉时，链接数是 0，才真正放掉它的块和 i 节点。</li>
     </ul></details>
   </div>
@@ -963,6 +965,7 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
       <li>每个任务属于一个进程组，fork 时继承。init 拉起 shell 时，子进程先 <code>setsid()</code> 自成一组，再打开 <code>/dev/tty0</code>：进程组的头打开终端，这一组就成了前台进程组。所以 Ctrl+C 发给 shell 和它 fork 出的程序，init 和写 C 的 letter 收不到。Linux 0.11 的 <code>init()</code> 也是先 <code>setsid()</code> 再打开终端。</li>
       <li>后台程序（<code>&amp;</code>）在 exec 之前把 SIGINT 改成忽略，忽略的信号 exec 之后还是忽略，Ctrl+C 停不了它，要用 <code>kill 任务号</code>（SIGTERM）或 <code>kill -9</code>（SIGKILL，不能忽略）。Linux 0.11 的 exec 把所有信号都改回默认，连忽略的也改回来；这里照 POSIX 的规定。</li>
       <li>往读的一头全关了的管道里写，写的进程收到 SIGPIPE，默认就被结束，和 Linux 0.11 的 <code>write_pipe()</code> 一样。</li>
+      <li>闹钟：<code>alarm(秒数)</code> 记下到期的时刻，定时器中断查到闹钟到了，就发 SIGALRM；<code>pause()</code> 睡到来了一个信号为止。<code>/bin/sleep</code> 就是给 SIGALRM 设个处理函数、定好闹钟、pause 等它，早年 Unix 的 C 库里的 sleep() 也是这样写的。睡着的时候按 Ctrl+C，SIGINT 照样结束它。</li>
       <li>处理函数是普通的 C 函数，只会改 eax、ecx、edx 和标志，所以内核只保存这几个；sig_restore 就是 Linux 0.11 的 libc 里的 <code>__sig_restore</code>。Linux 0.11 的 <code>signal()</code> 设的处理函数只管一次（SA_ONESHOT），这里一直有效。</li>
       <li>任务 0、A 和 init 收不到信号：前两个是内核任务，从不回到用户态，信号永远处理不了；init 要收养孤儿、拉起 shell，不能结束。</li>
     </ul></details>
@@ -1002,9 +1005,9 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
     <p><code>make test</code> 在后台启动没有窗口的 QEMU，通过它的监视器读显存、读寄存器、翻译地址、模拟按键，逐项核对。需要故意出错的场景，就另外编一个自检内核。</p>
   </div>
   <div class="big3">
-    <div><b data-fact="tests">52</b><span>项测试，一条 <code>make test</code> 全部跑完</span></div>
-    <div><b data-fact="selftests">31</b><span>个自检内核：除零、越权、坏指针、重复释放、fork、waitpid、读写文件、exec、管道、信号、堆……</span></div>
-    <div><b data-fact="commits">54</b><span>个提交：每加一个机制，测试通过后单独提交</span></div>
+    <div><b data-fact="tests">56</b><span>项测试，一条 <code>make test</code> 全部跑完</span></div>
+    <div><b data-fact="selftests">33</b><span>个自检内核：除零、越权、坏指针、重复释放、fork、waitpid、读写文件、exec、管道、信号、堆……</span></div>
+    <div><b data-fact="commits">57</b><span>个提交：每加一个机制，测试通过后单独提交</span></div>
   </div>
   <p style="color: var(--ink-2); max-width: 70ch">新加的测试都先在临时副本里把代码故意改坏，确认测试真的会失败，再改回来。</p>
   <h3 style="margin-top: 8px">代码审查发现的问题（节选）</h3>
@@ -1017,20 +1020,20 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
   <details><summary>全部提交</summary><ol class="commits" id="commits"></ol></details>
 </section>
 
-<footer>源码在仓库的 <code>learning</code> 分支，<code>main</code> 分支是 Linux 0.11 原始源码。页面里的地址取自提交 <span class="mono" data-fact="head">551bc82</span> 构建出的 kernel.elf。在仓库里运行 <code>make run</code> 可以在 QEMU 中看到真实的屏幕。</footer>
+<footer>源码在仓库的 <code>learning</code> 分支，<code>main</code> 分支是 Linux 0.11 原始源码。页面里的地址取自提交 <span class="mono" data-fact="head">f6ffabc</span> 构建出的 kernel.elf。在仓库里运行 <code>make run</code> 可以在 QEMU 中看到真实的屏幕。</footer>
 </main>
 
 <script>
 /* ===================== 构建事实：来自 objdump -h / -t build/kernel.elf ===================== */
 const FACTS = {
-  head: "551bc82", loc: "7,411", kernelKB: "40 KB", kernelSectors: 80, commits: 54, tests: 52,
-  text: 0x10000, rodata: 0x17a50, data: 0x180b8, user: 0x19000, userData: 0x1a000, userEnd: 0x1a000,
-  bss: 0x1a000, bssEnd: 0x298ac, stackTop: 0x1b000, gdt: 0x1b010, idt: 0x1b0e0,
-  identity: 0x1c000, pageDir: 0x20000, alias: 0x21000, ticks: 0x27b78, tss: 0x29204,
-  userMain: 0x19010, kmain: 0x101c0, selftests: 31,
+  head: "f6ffabc", loc: "7,791", kernelKB: "40 KB", kernelSectors: 80, commits: 57, tests: 56,
+  text: 0x10000, rodata: 0x18060, data: 0x18714, user: 0x19000, userData: 0x1a000, userEnd: 0x1a000,
+  bss: 0x1a000, bssEnd: 0x2996c, stackTop: 0x1b000, gdt: 0x1b010, idt: 0x1b0e0,
+  identity: 0x1c000, pageDir: 0x20000, alias: 0x21000, ticks: 0x27bb8, tss: 0x292c4,
+  userMain: 0x19010, kmain: 0x101c0, selftests: 33,
 };
 /* 硬盘镜像里的 i 节点号、块号，sh 和 check 里的地址：也由 tools/tour_data.py 回填，各章只引用它 */
-const DISK = {"firstData":8,"itable":[4,7],"imap":2,"zmap":3,"ino":{"bin":3,"dev":21,"etc":24,"issue":25,"hello":26,"tmp":27,"big":2},"blk":{"root":8,"bin":612,"etc":784,"issue":785,"tmp":787,"big":[9,611]},"root":[[".",1],["..",1],["big",2],["bin",3],["dev",21],["etc",24],["hello.txt",26],["tmp",27]],"etc":[[".",24],["..",1],["issue",25]],"issueSize":27,"tmpSize":32,"newIno":28,"newInoBlock":4,"newBit":781,"newBlock":788,"owners":[[783,"/dev"],[784,"/etc"],[785,"/etc/issue"],[786,"/hello.txt"],[787,"/tmp"]],"df":{"blocks":4088,"used":780,"inodes":128,"inodesUsed":27},"lsBin":["d     304   3  .","d     128   1  ..","-    8912   4  cat","-    9108   5  check","-    8908   6  df","-    8912   7  echo","-    8956   8  grep","-    8912   9  hello","-    8912  10  kill","-    8912  11  letter","-    8908  12  ls","-    8912  13  mkdir","-    8936  14  ps","-    8912  15  pwd","-    8908  16  rm","-    8912  17  rmdir","-    8932  18  sh","-    9104  19  sort","-    8976  20  wc"],"sortEnd":"0x40001024","onIntr":"0x40000780","sigRestore":"0x40000790","waitRet":"0x40000439","crashEip":"0x40000282"};
+const DISK = {"firstData":8,"itable":[4,7],"imap":2,"zmap":3,"ino":{"bin":3,"dev":23,"etc":26,"issue":27,"hello":28,"tmp":29,"big":2},"blk":{"root":8,"bin":612,"etc":804,"issue":805,"tmp":807,"big":[9,611]},"root":[[".",1],["..",1],["big",2],["bin",3],["dev",23],["etc",26],["hello.txt",28],["tmp",29]],"etc":[[".",26],["..",1],["issue",27]],"issueSize":27,"tmpSize":32,"newIno":30,"newInoBlock":4,"newBit":801,"newBlock":808,"owners":[[803,"/dev"],[804,"/etc"],[805,"/etc/issue"],[806,"/hello.txt"],[807,"/tmp"]],"df":{"blocks":4088,"used":800,"inodes":128,"inodesUsed":29},"lsBin":["d     336   3  .","d     128   1  ..","-    8912   4  cat","-    9108   5  check","-    8908   6  df","-    8912   7  echo","-    8956   8  grep","-    8912   9  hello","-    8912  10  kill","-    8912  11  letter","-    8908  12  ls","-    8912  13  mkdir","-    8936  14  ps","-    8912  15  pwd","-    8908  16  rm","-    8912  17  rmdir","-    8932  18  sh","-    8960  19  sleep","-    9104  20  sort","-    8912  21  sync","-    8976  22  wc"],"sortEnd":"0x40001024","onIntr":"0x40000790","sigRestore":"0x400007A0","waitRet":"0x40000449","crashEip":"0x40000282"};
 const $ = id => document.getElementById(id);
 const hex = (n, w = 5) => "0x" + (n >>> 0).toString(16).toUpperCase().padStart(w, "0");
 const hex8 = n => hex(n, 8);
@@ -1144,7 +1147,7 @@ const MILESTONES = [
   ];
 
   /* ---------- 模拟的 shell：文件系统取自 make 生成的 build/hd.img，各个命令照着 /bin 里的程序写 ---------- */
-  const FS0 = {"ninodes":128,"blocks":4088,"nFreeBlocks":3308,"inodes":{"1":["d",128],"2":["-",614400],"3":["d",304],"4":["-",8912],"5":["-",9108],"6":["-",8908],"7":["-",8912],"8":["-",8956],"9":["-",8912],"10":["-",8912],"11":["-",8912],"12":["-",8908],"13":["-",8912],"14":["-",8936],"15":["-",8912],"16":["-",8908],"17":["-",8912],"18":["-",8932],"19":["-",9104],"20":["-",8976],"21":["d",64],"22":["c",0],"23":["c",0],"24":["d",48],"25":["-",27],"26":["-",41],"27":["d",32]},"dirs":{"1":[[".",1],["..",1],["big",2],["bin",3],["dev",21],["etc",24],["hello.txt",26],["tmp",27]],"3":[[".",3],["..",1],["cat",4],["check",5],["df",6],["echo",7],["grep",8],["hello",9],["kill",10],["letter",11],["ls",12],["mkdir",13],["ps",14],["pwd",15],["rm",16],["rmdir",17],["sh",18],["sort",19],["wc",20]],"21":[[".",21],["..",1],["tty0",22],["tty1",23]],"24":[[".",24],["..",1],["issue",25]],"27":[[".",27],["..",1]]},"texts":{"25":"Linux 0.11 learning kernel\n","26":"Hello from the Minix file system on hda!\n"}};
+  const FS0 = {"ninodes":128,"blocks":4088,"nFreeBlocks":3288,"inodes":{"1":["d",128],"2":["-",614400],"3":["d",336],"4":["-",8912],"5":["-",9108],"6":["-",8908],"7":["-",8912],"8":["-",8956],"9":["-",8912],"10":["-",8912],"11":["-",8912],"12":["-",8908],"13":["-",8912],"14":["-",8936],"15":["-",8912],"16":["-",8908],"17":["-",8912],"18":["-",8932],"19":["-",8960],"20":["-",9104],"21":["-",8912],"22":["-",8976],"23":["d",64],"24":["c",0],"25":["c",0],"26":["d",48],"27":["-",27],"28":["-",41],"29":["d",32]},"dirs":{"1":[[".",1],["..",1],["big",2],["bin",3],["dev",23],["etc",26],["hello.txt",28],["tmp",29]],"3":[[".",3],["..",1],["cat",4],["check",5],["df",6],["echo",7],["grep",8],["hello",9],["kill",10],["letter",11],["ls",12],["mkdir",13],["ps",14],["pwd",15],["rm",16],["rmdir",17],["sh",18],["sleep",19],["sort",20],["sync",21],["wc",22]],"23":[[".",23],["..",1],["tty0",24],["tty1",25]],"26":[[".",26],["..",1],["issue",27]],"29":[[".",29],["..",1]]},"texts":{"27":"Linux 0.11 learning kernel\n","28":"Hello from the Minix file system on hda!\n"}};
   const ROOT_INO = name => FS0.dirs[1].find(e => e[0] === name)[1];   /* 根目录里各项的 i 节点号：/bin 多一个程序，后面的号都会变 */
   const BIN = FS0.dirs[ROOT_INO("bin")], DEV = FS0.dirs[ROOT_INO("dev")];
   const PROGS = BIN.map(e => e[0]).filter(n => n !== "." && n !== "..");
@@ -1195,6 +1198,18 @@ const MILESTONES = [
     const dir = path.length <= 127 && lookup("/", path.slice(0, i + 1));
     return name && name.length <= 14 && dir && fs.inodes[dir].type === "d" ? [dir, name] : null;
   }
+  /*
+   * 缓冲区缓存的模型：照着内核在哪里调用 bdirty()，记下哪几个块脏了（i 节点位图、区块位图、i 节点表的某一块、
+   * 目录的某一块、文件的某一块）。超过 16 个就把最久没碰的写回一块（换块）；sync 和 init 每 5 秒的 sync 全部写回。
+   * 大文件的间接块没有记，复制大文件时数字和真机会差几块。
+   */
+  const ITABLE = ino => "it" + (DISK.itable[0] + Math.floor((ino - 1) / 32));
+  function dirty(...keys) {
+    for (const k of keys) { st.dirty.delete(k); st.dirty.add(k); }
+    while (st.dirty.size > 16) { st.dirty.delete(st.dirty.values().next().value); st.written++; }
+  }
+  function syncAll() { st.written += st.dirty.size; st.dirty.clear(); }
+
   function create(cwd, p, type) {
     const d = dirOf(cwd, p);
     if (!d || fs.dirs[d[0]].some(e => e && e[0] === d[1])) return 0;
@@ -1202,10 +1217,11 @@ const MILESTONES = [
     while (fs.inodes[ino]) ino++;              /* i 节点位图里第一个 0 */
     if (ino > FS0.ninodes) return 0;
     fs.inodes[ino] = { type, size: 0 };
-    const ents = fs.dirs[d[0]], hole = ents.indexOf(null);
+    const ents = fs.dirs[d[0]], hole = ents.indexOf(null), slot = hole >= 0 ? hole : ents.length;
     if (hole >= 0) ents[hole] = [d[1], ino];   /* 先找删掉后空出来的目录项，没有就接在目录末尾 */
-    else { ents.push([d[1], ino]); fs.inodes[d[0]].size += 16; }
-    if (type === "d") { fs.dirs[ino] = [[".", ino], ["..", d[0]]]; fs.inodes[ino].size = 32; }
+    else { ents.push([d[1], ino]); fs.inodes[d[0]].size += 16; dirty(ITABLE(d[0])); }
+    dirty("imap", ITABLE(ino), "d" + d[0] + ":" + Math.floor(slot * 16 / 1024));
+    if (type === "d") { fs.dirs[ino] = [[".", ino], ["..", d[0]]]; fs.inodes[ino].size = 32; dirty("zmap", "f" + ino + ":0", ITABLE(d[0])); }
     else fs.data[ino] = "";
     return ino;
   }
@@ -1217,6 +1233,9 @@ const MILESTONES = [
     const ino = ents[k][1], isDir = fs.inodes[ino].type === "d";
     if (isDir !== wantDir || (isDir && fs.dirs[ino].some((e, j) => j > 1 && e))) return false;
     ents[k] = null;                            /* 目录项的 i 节点号清 0，目录本身不变短 */
+    dirty("d" + d[0] + ":" + Math.floor(k * 16 / 1024), ITABLE(ino), "imap");
+    if (fs.inodes[ino].size > 0) dirty("zmap");
+    if (isDir) dirty(ITABLE(d[0]));
     delete fs.inodes[ino]; delete fs.dirs[ino]; delete fs.data[ino];
     return true;
   }
@@ -1233,7 +1252,13 @@ const MILESTONES = [
     if (target.kind === "pipe") { target.buf = append(target.buf, data); return; }
     if (target.kind === "tty1") { for (const ch of isElf(data) ? "" : data) if (ch !== "\n") { scr.put(6, OUT + st.pos, CP437[ch.charCodeAt(0) & 255]); st.pos = (st.pos + 1) % W; } return; }
     fs.data[target.ino] = append(contentOf(target.ino), data);
+    const old = fs.inodes[target.ino].size;
     fs.inodes[target.ino].size += isElf(data) ? FS0.inodes[PROG_INO[data.elf]][1] : data.length;
+    const now = fs.inodes[target.ino].size;
+    if (now === old) return;
+    for (let k = Math.floor(old / 1024); k <= Math.floor((now - 1) / 1024); k++) dirty("f" + target.ino + ":" + k);
+    if (Math.ceil(now / 1024) > Math.ceil(old / 1024)) dirty("zmap");
+    dirty(ITABLE(target.ino));
   }
   const PROG_INO = Object.fromEntries(BIN);
   /* 接在后面写：程序文件后面多出几个字节，ELF 头还在，照样能运行；文字后面接上程序的字节，就不是程序了 */
@@ -1266,6 +1291,7 @@ const MILESTONES = [
     st.line = "";
     printBytes("^C\n");
     st.tasks.filter(t => t.pgrp === sh.pgrp && t.pid > 2).forEach(t => deliver(t, 2, null));
+    st.sleepers = st.sleepers.filter(z => st.tasks.includes(z.task));
     flushDeaths();
     st.reader = null;
     sh.state = "B";
@@ -1389,7 +1415,16 @@ const MILESTONES = [
     if (prog === "df") {
       const used = usedBlocks(), inodes = Object.keys(fs.inodes).length;
       print(`blocks: ${used} used, ${FS0.blocks - used} free; inodes: ${inodes} used, ${FS0.ninodes - inodes} free\n`);
+      print(`cache: ${st.dirty.size} of 16 buffers dirty; ${st.written} blocks written since boot\n`);
       return 0;
+    }
+    if (prog === "sync") { syncAll(); return 0; }
+    if (prog === "sleep") {
+      /* alarm 定闹钟，pause 等 SIGALRM：这里记下什么时候醒，tick() 里到时间就让它退出 */
+      const n = args.length === 1 && /^\d+$/.test(args[0]) ? Number(args[0]) : -1;
+      if (n < 0) { print("usage: sleep seconds\n"); return 2; }
+      if (n === 0) return 0;
+      return { sleep: n };
     }
     if (prog === "check") {
       if (args.length === 1 && args[0] === "crash") return "crash";
@@ -1446,7 +1481,7 @@ const MILESTONES = [
       const node = ino && fs.inodes[ino];
       if (!node || node.type === "d") return fail(file || op);  /* 目录不能打开来写 */
       if (node.type === "c") { io.output = { kind: FS_TTY[ino] }; continue; }
-      if (op === ">") { fs.data[ino] = ""; node.size = 0; }      /* O_TRUNC */
+      if (op === ">") { if (node.size) dirty("zmap"); dirty(ITABLE(ino)); fs.data[ino] = ""; node.size = 0; }      /* O_TRUNC */
       io.output = { kind: "file", ino };
     }
     return rest;
@@ -1486,6 +1521,12 @@ const MILESTONES = [
           if (prog === "letter") { me.state = "S"; me.ch = (args[1] || "?")[0]; st.letters += me.ch; forever = true; return; }
           if (prog === "sh") { forever = true; return; }
           code = runProgram(prog, args.slice(1), io.input, io.output, sh, me);
+          if (code && code.sleep) {             /* sleep：睡着，到时间才结束；前台的话 shell 一直等它 */
+            me.state = "S";
+            st.sleepers.push({ task: me, until: st.ticks + code.sleep * 100, fg: !background });
+            if (!background) forever = true;
+            return;
+          }
         }
       }
       if (io.output.kind === "pipe") pipeData = io.output.buf;
@@ -1572,7 +1613,7 @@ const MILESTONES = [
     runLine(r.segs, false, r.text);
   }
   const normalize = p => "/" + p.split("/").reduce((out, part) => (part === ".." ? out.pop() : part && part !== "." && out.push(part), out), []).join("/");
-  const HELP = ["/bin: ls cat echo wc grep sort ps kill rm mkdir rmdir df pwd letter hello check", "built in: cd [dir], exit, help",
+  const HELP = ["files: ls cat echo wc grep sort rm mkdir rmdir df sync pwd", "tasks: ps kill sleep letter hello check", "built in: cd [dir], exit, help",
                 "try: ls /bin | wc, echo hi > /tmp/a, cat < /tmp/a, cd /etc, letter D &"];
 
   function reset() {
@@ -1581,7 +1622,7 @@ const MILESTONES = [
     st = { ticks: 0, running: false, acc: 0, last: 0, cur: null, window: 0, pos: 0, wake: 0, letters: "",
            tasks: [{ pid: 1, ppid: 0, state: "S", name: "task_a", pgrp: 1 }, { pid: 2, ppid: 0, state: "S", name: "init", pgrp: 2 },
                    { pid: 3, ppid: 2, state: "S", name: "letter", pgrp: 2, ch: "C" }],
-           shells: [], line: "", ready: false, reader: null, deaths: [] };
+           shells: [], line: "", ready: false, reader: null, deaths: [], dirty: new Set(), written: 0, sleepers: [] };
     scr.clear(); mark(0); draw();
     if (reduce) { steps.forEach(([, f]) => f(scr)); for (let i = 0; i < 300; i++) tick(); st.last = performance.now(); mark(12); draw(); }
     else steps.forEach(([n, f], i) => timers.push(setTimeout(() => { f(scr); mark(n); draw(); }, 400 + i * 650)));
@@ -1590,6 +1631,14 @@ const MILESTONES = [
   /* 和真机一样：每个写字母的任务写一个就睡 2 个 tick，CPU 几乎一直空闲。 */
   function tick() {
     st.ticks++; scr.write(4, 7, String(st.ticks));
+    if (st.ticks % 500 === 0) syncAll();          /* init 每 250 圈（约 5 秒）sync 一次 */
+    for (const z of st.sleepers.filter(z => st.ticks >= z.until)) {   /* 闹钟响了：sleep 正常退出 */
+      st.sleepers = st.sleepers.filter(x => x !== z);
+      if (!st.tasks.includes(z.task)) continue;   /* 已经被 kill 或 Ctrl+C 结束了 */
+      st.tasks = st.tasks.filter(t => t !== z.task);
+      message(`task ${z.task.pid} exited with code 0`);
+      if (z.fg) { st.shells.at(-1).state = "B"; prompt(); }
+    }
     if (++st.window === 100) { scr.write(4, 20, "idle: 100%"); st.window = 0; }
     if (st.ticks >= st.wake && st.letters) {
       for (const ch of st.letters) { scr.put(6, OUT + st.pos, ch); st.pos = (st.pos + 1) % W; }
@@ -2301,27 +2350,31 @@ const MILESTONES = [
   const INODES = Array.from({ length: 12 }, (_, k) => N - 7 + k);
   const BLOCKS = Array.from({ length: 10 }, (_, k) => BLK - 5 + k);
   const OWNERS = [...new Set(D.owners.map(([, path]) => path))];   /* 一个文件可能占好几块 */
-  const DF = (b, n) => `$ df\nblocks: ${b} used, ${D.df.blocks - b} free; inodes: ${n} used, ${D.df.inodes - n} free`;
+  /* 刚开机还没写过盘：写回的块数从 0 开始 */
+  const DF = (b, n, dirty, written) => `$ df\nblocks: ${b} used, ${D.df.blocks - b} free; inodes: ${n} used, ${D.df.inodes - n} free\ncache: ${dirty} of 16 buffers dirty; ${written} blocks written since boot`;
   const S = [
     { t: "open(\"/tmp/a\", O_WRONLY | O_CREAT | O_TRUNC)", d: `shell fork 出的子进程在 exec echo 之前处理 > /tmp/a。namei() 查到 /tmp 是 ${TMP} 号 i 节点，内容在第 ${TB} 块；在它的目录项里找 a：没有，要新建。`,
-      ino: 0, entry: 0, inode: 0, blk: 0, hot: ["dir"], df: 0 },
-    { t: "分一个 i 节点：位图里第一个 0", d: `i 节点位图在第 ${D.imap} 块。1～${N - 1} 位都是 1，第 ${N} 位是 0：改成 1，马上把这一块写回硬盘。i 节点表里的 ${N} 号填上：普通文件，权限 0644，链接数 1，长度 0。`,
-      ino: 1, entry: 0, inode: 1, blk: 0, hot: ["ibit", "inode"], df: 0 },
-    { t: "在 /tmp 里加一项", d: `先找 i 节点号为 0 的空项，没有，就接在目录末尾：偏移 ${SZ} 处写下 ${N} 和 a。/tmp 的长度从 ${SZ} 变成 ${SZ + 16}，第 ${TB} 块写回硬盘，i 节点 ${TMP} 的长度也写回。`,
-      ino: 1, entry: 1, inode: 1, blk: 0, hot: ["dir", "entry"], df: 0 },
+      ino: 0, entry: 0, inode: 0, blk: 0, hot: ["dir"], df: 0, dirty: [] },
+    { t: "分一个 i 节点：位图里第一个 0", d: `i 节点位图在第 ${D.imap} 块。1～${N - 1} 位都是 1，第 ${N} 位是 0：改成 1，把这个缓冲区标成脏的，先不写盘。i 节点表里的 ${N} 号填上：普通文件，权限 0644，链接数 1，长度 0，所在的缓冲区也是脏的。`,
+      ino: 1, entry: 0, inode: 1, blk: 0, hot: ["ibit", "inode"], df: 0, dirty: ["ibit", "inode"] },
+    { t: "在 /tmp 里加一项", d: `先找 i 节点号为 0 的空项，没有，就接在目录末尾：偏移 ${SZ} 处写下 ${N} 和 a。/tmp 的长度从 ${SZ} 变成 ${SZ + 16}：第 ${TB} 块标脏，i 节点 ${TMP} 的长度改在 i 节点表的缓冲区里。`,
+      ino: 1, entry: 1, inode: 1, blk: 0, hot: ["dir", "entry"], df: 0, dirty: ["ibit", "inode", "dir"] },
     { t: "接到 1 号描述符上，exec echo", d: "open 返回描述符 3。close(1)，dup(3)，1 号就指向 /tmp/a，再关掉 3。exec /bin/echo hi 之后，echo 照常 write(1, \"hi\\n\", 3)，不知道自己在写文件。",
-      ino: 1, entry: 1, inode: 2, blk: 0, hot: ["inode"], df: 0 },
-    { t: "写的时候才分数据块", d: `文件的第 0 块还没有（区块号是 0）。bmap_create() 去区块位图（第 ${D.zmap} 块）里找第一个 0：第 ${BIT} 位，对应第 ${BLK} 块。清零，写进 3 个字节，i 节点的第一个区块号填 ${BLK}，长度变成 3，位图、数据块、i 节点都写回硬盘。`,
-      ino: 1, entry: 1, inode: 3, blk: 1, hot: ["zbit", "inode", "block"], df: 0 },
-    { t: "完成：df 多了 1 块、1 个 i 节点", d: `echo 退出，关掉描述符，iput() 放下 i 节点。df 数两张位图里的 0：数据块 ${D.df.used} → ${D.df.used + 1} 用了，i 节点 ${D.df.inodesUsed} → ${D.df.inodesUsed + 1} 用了。cat /tmp/a 按同样的路读回 hi。`,
-      ino: 1, entry: 1, inode: 4, blk: 1, hot: ["df"], df: 1 },
-    { t: "rm /tmp/a：倒过来做一遍", d: `unlink 把目录项的 i 节点号清 0（/tmp 不变短，下次新建文件先用这个空项），链接数减到 0。没有人开着它，就放掉第 ${BLK} 块，两张位图里的位改回 0。块里的字节还在，只是没人用了。`,
-      ino: 0, entry: 2, inode: 5, blk: 2, hot: ["ibit", "zbit", "entry"], df: 0 },
+      ino: 1, entry: 1, inode: 2, blk: 0, hot: ["inode"], df: 0, dirty: ["ibit", "inode", "dir"] },
+    { t: "写的时候才分数据块", d: `文件的第 0 块还没有（区块号是 0）。bmap_create() 去区块位图（第 ${D.zmap} 块）里找第一个 0：第 ${BIT} 位，对应第 ${BLK} 块。清零，写进 3 个字节，i 节点的第一个区块号填 ${BLK}，长度变成 3：区块位图、数据块、i 节点表这几个缓冲区都标脏。`,
+      ino: 1, entry: 1, inode: 3, blk: 1, hot: ["zbit", "inode", "block"], df: 0, dirty: ["ibit", "inode", "dir", "zbit", "block"] },
+    { t: "完成：df 多了 1 块、1 个 i 节点", d: `echo 退出，关掉描述符，iput() 放下 i 节点。df 数两张位图里的 0：数据块 ${D.df.used} → ${D.df.used + 1} 用了，i 节点 ${D.df.inodesUsed} → ${D.df.inodesUsed + 1} 用了。第二行：5 个缓冲区是脏的，硬盘上一块还没写。cat /tmp/a 从缓冲区里就读回了 hi。`,
+      ino: 1, entry: 1, inode: 4, blk: 1, hot: ["df"], df: 1, dirty: ["ibit", "inode", "dir", "zbit", "block"] },
+    { t: "sync：5 块一起写回硬盘", d: `init 每隔大约 5 秒调用一次 sync（也可以自己运行 sync）：i 节点位图、区块位图、i 节点表、/tmp 的目录块、第 ${BLK} 块，5 个脏缓冲区一起写回。要是在这之前就断了电，硬盘上还没有 /tmp/a。`,
+      ino: 1, entry: 1, inode: 4, blk: 1, hot: ["df"], df: 2, dirty: [] },
+    { t: "rm /tmp/a：倒过来做一遍", d: `unlink 把目录项的 i 节点号清 0（/tmp 不变短，下次新建文件先用这个空项），链接数减到 0。没有人开着它，就放掉第 ${BLK} 块，两张位图里的位改回 0。块里的字节还在，只是没人用了。这几处修改又是脏的，等下一次 sync。`,
+      ino: 0, entry: 2, inode: 5, blk: 2, hot: ["ibit", "zbit", "entry"], df: 3, dirty: ["ibit", "inode", "dir", "zbit"] },
   ];
   /* 新分出去的那一位：分了是 on，这一步刚改过的加 hot */
   const cell = (isNew, used, changed) => isNew ? (used ? "on" : "") + (changed ? " hot" : "") : "";
   function run(i) {
     const s = S[i], hot = k => s.hot.includes(k) ? " hot" : "";
+    const dirty = k => s.dirty.includes(k) ? '<em class="dirty">脏</em>' : "";
     const ibits = INODES.map(n => `<i class="${n === N ? cell(1, s.ino, s.hot.includes("ibit")) : n < N ? "on" : ""}">${n}</i>`).join("");
     const zbits = BLOCKS.map(n => `<i class="${n === BLK ? cell(1, s.blk === 1, s.hot.includes("zbit")) : n < BLK ? "on" : ""}">${n}</i>`).join("");
     const rows = [[String(TMP), "."], ["1", ".."]];
@@ -2334,13 +2387,14 @@ const MILESTONES = [
       `<span>区块号</span><span class="${s.inode === 3 ? "hot" : ""}">${s.inode >= 3 ? BLK : 0}, 0, 0, …</span></div>` +
       (s.inode === 2 || s.inode === 3 ? `<p class="note">echo 的 1 号描述符指向它</p>` : "");
     $("fwr-grid").innerHTML =
-      `<div class="box${hot("ibit")}"><h3>i 节点位图<small>第 ${D.imap} 块</small></h3><div class="bits">${ibits}</div><p class="note">第 n 位是 1：第 n 号 i 节点用了</p></div>` +
-      `<div class="box${hot("dir") || hot("entry")}"><h3>/tmp 的目录项<small>第 ${TB} 块，长度 ${s.entry ? SZ + 16 : SZ}</small></h3>${dir}</div>` +
-      `<div class="box${hot("inode")}"><h3>i 节点 ${N}<small>i 节点表，第 ${D.newInoBlock} 块</small></h3>${inode}</div>` +
-      `<div class="box wide${hot("zbit")}"><h3>区块位图<small>第 ${D.zmap} 块，第 k 位对应第 ${D.firstData} + k − 1 块</small></h3><div class="bits z">${zbits}</div><p class="note">块 ${BLK - 5}～${BLK - 1} 是 ${OWNERS.join("、")} 的内容</p></div>` +
-      `<div class="box${hot("block")}"><h3>第 ${BLK} 块<small>${s.blk === 1 ? "/tmp/a 的内容" : "空闲"}</small></h3><pre class="blockbytes">${s.blk ? "hi↵" : ""}</pre><p class="note">${s.blk === 2 ? "字节还在，只是没人用了" : s.blk ? "h、i 和换行，3 个字节" : "还没分出去"}</p></div>`;
+      `<div class="box${hot("ibit")}"><h3>i 节点位图${dirty("ibit")}<small>第 ${D.imap} 块</small></h3><div class="bits">${ibits}</div><p class="note">第 n 位是 1：第 n 号 i 节点用了</p></div>` +
+      `<div class="box${hot("dir") || hot("entry")}"><h3>/tmp 的目录项${dirty("dir")}<small>第 ${TB} 块，长度 ${s.entry ? SZ + 16 : SZ}</small></h3>${dir}</div>` +
+      `<div class="box${hot("inode")}"><h3>i 节点 ${N}${dirty("inode")}<small>i 节点表，第 ${D.newInoBlock} 块</small></h3>${inode}</div>` +
+      `<div class="box wide${hot("zbit")}"><h3>区块位图${dirty("zbit")}<small>第 ${D.zmap} 块，第 k 位对应第 ${D.firstData} + k − 1 块</small></h3><div class="bits z">${zbits}</div><p class="note">块 ${BLK - 5}～${BLK - 1} 是 ${OWNERS.join("、")} 的内容</p></div>` +
+      `<div class="box${hot("block")}"><h3>第 ${BLK} 块${dirty("block")}<small>${s.blk === 1 ? "/tmp/a 的内容" : "空闲"}</small></h3><pre class="blockbytes">${s.blk ? "hi↵" : ""}</pre><p class="note">${s.blk === 2 ? "字节还在，只是没人用了" : s.blk ? "h、i 和换行，3 个字节" : "还没分出去"}</p></div>`;
     const df = $("fwr-df");
-    df.textContent = s.df ? DF(D.df.used + 1, D.df.inodesUsed + 1) : DF(D.df.used, D.df.inodesUsed);
+    df.textContent = [DF(D.df.used, D.df.inodesUsed, 0, 0), DF(D.df.used + 1, D.df.inodesUsed + 1, 5, 0),
+                      DF(D.df.used + 1, D.df.inodesUsed + 1, 0, 5), DF(D.df.used, D.df.inodesUsed, 4, 5)][s.df];
     df.className = "dfline" + (s.hot.includes("df") ? " hot" : "");
     $("fwr-cap").innerHTML = `<b>${s.t}</b><span>${s.d}</span>`;
   }
@@ -2463,13 +2517,13 @@ const FILES = [
   ["paging.c", "页表、每个进程的页目录、缺页时补页（程序、堆、栈区）、写时复制", "boot/head.s、mm/memory.c、mm/page.s"],
   ["mem.c", "物理页分配和引用计数：mem_map、get_free_page()、free_page()", "mm/memory.c"],
   ["hd.c", "ATA 硬盘驱动：IDENTIFY、按 LBA 读写扇区、IRQ14", "kernel/blk_drv/hd.c"],
-  ["buffer.c", "缓冲区缓存：bread()、bget()、bwrite()（马上写回）、brelse()", "fs/buffer.c"],
+  ["buffer.c", "缓冲区缓存：bread()、bget()、bdirty()、brelse()，延迟写回和 sync", "fs/buffer.c"],
   ["fs.c · fs.h", "Minix 文件系统：超级块、i 节点表、位图、bmap()、namei()、写文件、目录的增删、文件系统锁", "fs/super.c、fs/inode.c、fs/namei.c、fs/bitmap.c、fs/truncate.c"],
   ["file.c", "打开的文件、文件表、设备文件", "fs/open.c、fs/read_write.c、fs/file_table.c"],
   ["pipe.c", "管道：一页的环形缓冲区，读写两头", "fs/pipe.c"],
   ["exec.c", "exec：读 ELF，建新的地址空间，摆好参数", "fs/exec.c"],
   ["tty.c", "终端：一行的编辑、回显、退格、Ctrl+D、Ctrl+C", "kernel/chr_drv/tty_io.c"],
-  ["user/*.c", "硬盘上的程序：sh、ls、cat、wc、grep、sort、rm、mkdir、df、pwd、kill、ps……，小函数库里的 malloc", "（Linux 0.11 的 /bin 下是用 libc 编的程序）"],
+  ["user/*.c", "硬盘上的程序：sh、ls、cat、wc、grep、sort、rm、mkdir、df、sync、pwd、kill、sleep、ps……，小函数库里的 malloc", "（Linux 0.11 的 /bin 下是用 libc 编的程序）"],
   ["tools/mkfs.py", "把 rootfs/ 打包成 Minix 镜像，建设备文件", "Minix 的 mkfs"],
   ["sched.c", "任务表、TSS、任务切换、睡眠与唤醒、等待队列、fork、exit、waitpid、信号和进程组、当前目录", "kernel/sched.c、kernel/fork.c、kernel/exit.c、kernel/signal.c"],
   ["syscall.c / syscall.h", "系统调用表与调用方式", "kernel/system_call.s、include/unistd.h"],
@@ -2498,6 +2552,7 @@ const COMMITS = [
   ["f6ceb33", "测试：ps 可能看到刚醒的任务"], ["7b669cd", "help 每行都放得下"], ["7a4ad50", "网页：管道、写文件、当前目录"],
   ["3bda4b5", "信号：kill、Ctrl+C、进程组"], ["04113e4", "信号处理函数"], ["3c699d1", "审查：信号的测试缺口和小问题"],
   ["497f028", "brk、malloc 和 sort"], ["551bc82", "审查：堆和栈之间的保护区、realloc、sort"],
+  ["2aea8ae", "网页：堆的审查修复"], ["a81f507", "alarm、pause 和 sleep"], ["f6ffabc", "缓冲区延迟写回和 sync"],
 ];
 $("commits").innerHTML = COMMITS.map(([h, s]) => `<li><span class="h">${h}</span><span>${s}</span></li>`).join("");
 </script>
