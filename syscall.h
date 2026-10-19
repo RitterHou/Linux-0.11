@@ -394,8 +394,8 @@ static inline int32_t chown(const char *path, uint32_t uid, uint32_t gid)
 
 /*
  * 终端的工作方式：ioctl(fd, TCGETS, &t) 取，ioctl(fd, TCSETS, &t) 设。命令和标志的取值与 Linux 0.11 的
- * include/termios.h 相同，不过 struct termios 只有这四个字段（它还有控制字符表 c_cc 等），现在只用 c_lflag 的 ECHO：
- * 关掉以后敲的字不显示，输密码时用。ICANON（一行一行地交给程序）一直开着，还不能关。
+ * include/termios.h 相同，不过 struct termios 只有这四个字段（它还有控制字符表 c_cc 等），只用 c_lflag 的两个标志：
+ * ECHO 关掉以后敲的字不显示，输密码时用；ICANON 关掉是原始模式，每个字符马上交给程序，shell 读命令时用。
  * 对不是终端的描述符 TCGETS 返回 -1，所以它也能用来问“这是不是终端”（isatty）。
  */
 #define TCGETS     0x5401

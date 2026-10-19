@@ -66,19 +66,73 @@ void vga_set_cursor(int row, int col)
     update_hardware_cursor();
 }
 
+/*
+ * 几个 VT100 的转义序列，shell 的行编辑要用：ESC [ n A/B/C/D 光标往上、下、右、左挪 n 格（不写 n 就是 1 格），
+ * ESC [ K 擦掉光标到这一行末尾。往左挪到行首时退到上一行行尾，往右挪到行尾时进到下一行行首：一行字长到折行也能来回挪。
+ * 不认识的序列整个丢掉。Linux 0.11 的 con_write() 也用一个状态机认这些序列（还认得更多）。
+ */
+static int esc_state, esc_param;    /* 0：普通字符；1：刚收到 ESC；2：在 ESC [ 后面读数字 */
+
+static void cursor_left(void)
+{
+    if (cursor_col > 0) {
+        cursor_col--;
+    } else if (cursor_row > window_top) {
+        cursor_row--;
+        cursor_col = VGA_COLS - 1;
+    }
+}
+
+static void escape(char ch)
+{
+    if (esc_state == 1) {
+        esc_state = ch == '[' ? 2 : 0;
+        esc_param = 0;
+        return;
+    }
+    if (ch >= '0' && ch <= '9') {
+        esc_param = esc_param * 10 + (ch - '0');
+        return;
+    }
+    esc_state = 0;
+    int n = esc_param ? esc_param : 1;
+    for (int i = 0; i < n && i < VGA_COLS * VGA_ROWS; i++) {
+        if (ch == 'A' && cursor_row > window_top)
+            cursor_row--;
+        else if (ch == 'B' && cursor_row < window_bottom)
+            cursor_row++;
+        else if (ch == 'C' && cursor_col < VGA_COLS - 1)
+            cursor_col++;
+        else if (ch == 'C' && cursor_row < window_bottom) {
+            cursor_col = 0;
+            cursor_row++;
+        } else if (ch == 'D')
+            cursor_left();
+    }
+    if (ch == 'K')
+        for (int col = cursor_col; col < VGA_COLS; col++)
+            put_cell(cursor_row, col, ' ', VGA_GRAY);
+    update_hardware_cursor();
+}
+
 void vga_putc(char ch)
 {
-    if (ch == '\n') {
+    if (esc_state) {
+        escape(ch);
+        return;
+    }
+    if (ch == 0x1B) {               /* ESC */
+        esc_state = 1;
+        return;
+    }
+    if (ch == '\r') {
+        cursor_col = 0;
+    } else if (ch == '\n') {
         cursor_row++;
         cursor_col = 0;
     } else if (ch == '\b') {
-        /* 退到前一格；在行首时退到上一行行尾，这样自动换行的长输入也能逐字删回去 */
-        if (cursor_col > 0) {
-            cursor_col--;
-        } else if (cursor_row > window_top) {
-            cursor_row--;
-            cursor_col = VGA_COLS - 1;
-        }
+        /* 退到前一格并擦掉；在行首时退到上一行行尾，这样自动换行的长输入也能逐字删回去 */
+        cursor_left();
         put_cell(cursor_row, cursor_col, ' ', VGA_GRAY);
     } else {
         put_cell(cursor_row, cursor_col, ch, VGA_GRAY);

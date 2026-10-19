@@ -14,7 +14,7 @@
 #define SC_LSHIFT    0x2A
 #define SC_RSHIFT    0x36
 #define SC_CAPS_LOCK 0x3A
-#define SC_CTRL      0x1D           /* 左 Ctrl；右 Ctrl 带 0xE0 前缀，和其他扩展键一起忽略 */
+#define SC_CTRL      0x1D           /* 左 Ctrl；右 Ctrl 是 0xE0 0x1D */
 
 static const char normal_map[0x3A] = {
     [0x02] = '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b',
@@ -72,8 +72,25 @@ void keyboard_process(uint8_t scancode)
         skip_next = 1;
         return;
     }
-    if (skip_next) {                    /* 方向键、右 Ctrl 等扩展键，暂不处理 */
+    if (skip_next) {
+        /*
+         * 扩展键：方向键送出 VT100 终端的转义序列 ESC [ A（上）、B（下）、C（右）、D（左），Home、End 是 ESC [ H、F，
+         * 和串口那头的终端一样，程序不用管按键是从哪来的。右 Ctrl 和左 Ctrl 一样。别的扩展键不处理。
+         * Linux 0.11 的 keyboard.s 里的 cursor 和 cur_table 也是送出 ESC [ 加一个字母。
+         */
         skip_next = 0;
+        if ((scancode & ~KEY_RELEASED) == SC_CTRL) {
+            ctrl_held = !(scancode & KEY_RELEASED);
+            return;
+        }
+        static const char arrows[][2] = { { 0x48, 'A' }, { 0x50, 'B' }, { 0x4D, 'C' }, { 0x4B, 'D' }, { 0x47, 'H' }, { 0x4F, 'F' } };
+        for (uint32_t i = 0; i < sizeof(arrows) / sizeof(arrows[0]); i++) {
+            if (scancode == (uint8_t)arrows[i][0]) {
+                tty_input(TTY_CONSOLE, 0x1B);
+                tty_input(TTY_CONSOLE, '[');
+                tty_input(TTY_CONSOLE, arrows[i][1]);
+            }
+        }
         return;
     }
 

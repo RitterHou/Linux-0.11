@@ -468,7 +468,9 @@ def test_timer_rate(m, elf):
 
 KEY_NAMES = {" ": "spc", "/": "slash", ".": "dot", "-": "minus", "&": "shift-7", "_": "shift-minus",
              "!": "shift-1", "@": "shift-2", "#": "shift-3", "|": "shift-backslash", ">": "shift-dot", "<": "shift-comma",
-             ":": "shift-semicolon", ";": "semicolon", "\\": "backslash", "\n": "ret"}
+             ":": "shift-semicolon", ";": "semicolon", "\\": "backslash", "[": "bracket_left", "]": "bracket_right",
+             "'": "apostrophe", '"': "shift-apostrophe", "$": "shift-4", "=": "equal", "+": "shift-equal", "*": "shift-8",
+             "(": "shift-9", ")": "shift-0", "%": "shift-5", "\n": "ret"}
 
 
 def type_text(m, text):
@@ -2172,10 +2174,46 @@ def test_demand_loading(m, elf):
         run_command(m, f"rm /tmp/{f}")
 
 
+def test_raw_tty(m, elf):
+    """终端的原始模式和方向键：关掉 ICANON 以后一个字节一个字节交给程序，方向键是 ESC [ A；规范模式丢掉方向键；控制台认得 ESC [ n D 和 ESC [ K"""
+    rows = lambda: [r for r in console(m) if r]
+    wait_prompt(m)
+    type_text(m, "check raw\n")
+    m.wait_for(lambda mm: rows()[-1:] == ["$ check raw"], timeout=3, what="check raw 开始读")
+    type_text(m, "a")
+    m.sendkeys(["up"])
+    m.wait_for(lambda mm: rows()[-2:] == ["97 27 91 65", "$"], timeout=3,
+               what="不用敲回车就读到 a 和上箭头的三个字节 ESC [ A，回显关着（屏幕上没有 a）")
+    wait_prompt(m)
+    type_text(m, "cat\n")
+    m.wait_for(lambda mm: rows()[-1:] == ["$ cat"], timeout=3, what="cat 开始读")
+    type_text(m, "x")
+    m.sendkeys(["left", "right", "up", "down"])
+    type_text(m, "y\n")
+    m.wait_for(lambda mm: rows()[-2:] == ["xy", "xy"], timeout=3, what="规范模式把方向键的转义序列整个丢掉：这一行是 xy")
+    m.sendkeys(["ctrl-d"])
+    wait_prompt(m)
+    for command, expected in [("echo -e abc\\e[2Dx", ["axc"]), ("echo -e abcdef\\e[3D\\e[K", ["abc"]), ("echo -e ab\\e[Zcd", ["abcd"])]:
+        out = run_command(m, command)
+        check(out == expected, f"控制台的转义序列：{command} 应显示 {expected!r}，实际是 {out!r}")
+    m.serial_send("user\r")              # 串口那头停在 login: 上，先登录
+    m.serial_wait("password: ")
+    m.serial_send("user\r")
+    m.serial_wait("$ ")
+    m.serial_send("cat\r")
+    m.serial_wait("cat\r\n")
+    m.serial_send("p\x1b[Dq\r")
+    m.serial_wait("pq\r\n" * 2, what="串口上的规范模式也丢掉方向键：回显和 cat 打印的都是 pq")
+    m.serial_send("\x04")
+    m.serial_wait("$ ")
+    m.serial_send("exit\r")
+    m.serial_wait("login: ")
+
+
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_console_scroll,
                 test_idle_in_hlt, test_demand_paging, test_fork_address_spaces, test_syscall_gate, test_user_setup, test_user_task,
-                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep, test_cache, test_ln_mv, test_script, test_shell_input, test_script_edge_cases, test_clock, test_stderr, test_nice_shell, test_users, test_login, test_serial, test_mount, test_demand_loading]
+                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep, test_cache, test_ln_mv, test_script, test_shell_input, test_script_edge_cases, test_clock, test_stderr, test_nice_shell, test_users, test_login, test_serial, test_mount, test_demand_loading, test_raw_tty]
 SEPARATE_TESTS = [test_syscalls, test_page_alloc, test_double_free, test_hd_rw, test_early_key, test_keyboard_edge_cases, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,
                   test_big_kernel, test_user_write_kernel, test_user_privileged,

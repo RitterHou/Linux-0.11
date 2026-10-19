@@ -7,6 +7,7 @@
  * 最后打印 badptr ok。内核要是等到写的时候才发现那一页是只读的，就只能停机了。
  * check fds：打印开着的描述符，例如 fds: 0 1 2。看 exec 之后还留着哪些描述符（close-on-exec 关掉了哪些）。
  * check spin：在用户态空转半秒（50 个 tick），给 time 和 nice 一个一直要 CPU 的程序。
+ * check raw：把终端换成原始模式、关掉回显，读 4 个字节（一个一个地交来，不用敲回车），打印它们的值，再换回来。
  * check lazy [all|late]：程序里有一张 64 KB（16 页）的只读表，每页开头记着页号。不带参数只读第一页，all 读遍 16 页，
  * 读完都睡 3 秒（好让别人看第 3 行的空闲页数）；late 先睡 1 秒再读遍 16 页。每页的记号都对，以 0 退出，打印 lazy ok。
  * 睡之前还往 .data 里的 mine 写下自己的任务号，睡醒再看：可写的页每个进程一份，别的 check 写不到这里。
@@ -142,6 +143,28 @@ int main(int argc, char **argv)
             for (volatile int i = 0; i < 100000; i++)   /* 隔一阵才问一次：系统调用在 QEMU 里很慢，问得勤了时间都记在内核态 */
                 ;
         return 0;
+    }
+    if (argc == 2 && strcmp(argv[1], "raw") == 0) {
+        struct termios t, saved;
+        if (ioctl(0, TCGETS, &saved) < 0)
+            return 1;
+        t = saved;
+        t.c_lflag &= ~(uint32_t)(ICANON | ECHO);
+        ioctl(0, TCSETS, &t);
+        unsigned char got[4];
+        int n = 0;
+        while (n < 4) {
+            int32_t r = read(0, got + n, (uint32_t)(4 - n));
+            if (r <= 0)
+                break;
+            n += r;
+        }
+        ioctl(0, TCSETS, &saved);
+        for (int i = 0; i < n; i++) {
+            print_num(got[i]);
+            print(i + 1 < n ? " " : "\n");
+        }
+        return n == 4 ? 0 : 1;
     }
     if (argc >= 2 && strcmp(argv[1], "lazy") == 0) {
         int late = argc == 3 && strcmp(argv[2], "late") == 0, all = argc == 3 && strcmp(argv[2], "all") == 0;
