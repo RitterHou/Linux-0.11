@@ -60,6 +60,7 @@ static inline int from_user_mode(const struct interrupt_frame *frame)
 void idt_init(void);
 void pic_init(void);
 void interrupt_dispatch(struct interrupt_frame *frame);
+extern char isr_return[];           /* isr.asm：弹出 interrupt_frame、iretd 回去的那一段 */
 void panic(const char *msg) __attribute__((noreturn));
 void pic_unmask(int irq);
 

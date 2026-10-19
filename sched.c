@@ -405,10 +405,34 @@ static void init_task(int n, void (*entry)(void))
 }
 
 /*
- * 用户任务：有自己的页目录；CS 等填用户段选择子（RPL 为 3），硬件任务切换装入这个 TSS 时就直接进入特权级 3。
- * ss0:esp0 是它的内核栈：在用户态发生中断或系统调用时，CPU 从这里取出内核栈，
- * 再把用户态的 SS、ESP、EFLAGS、CS、EIP 压上去。EFLAGS 的 IOPL 为 0，用户态不能执行 cli、in、out。
- * Linux 0.11 的 copy_process() 也把 esp0 设为该进程内核栈的顶端。
+ * 新的用户任务怎么开始：TSS 里填的是特权级 0 的现场，EIP 是 isr_return，ESP 指着内核栈顶上摆好的 frame。
+ * 第一次被调度时，它像刚处理完一次中断那样弹出 frame 里的段寄存器和通用寄存器，iretd 进入用户态。
+ * frame 里是用户态的 CS、EIP、EFLAGS、SS、ESP：init 的入口，或者 fork 时父进程进入系统调用的那个现场。
+ * 于是每一次硬件任务切换都是从特权级 0 切到特权级 0，用户态只靠 iretd 进入。
+ * Linux 0.11 的 copy_process() 把用户态的寄存器直接填进 TSS，任务切换时 CPU 直接进入特权级 3。真 CPU 这样没问题；
+ * 可 v86（make web 用的浏览器里的模拟器）在任务切换的中途就把特权级换成 3，再去读 TSS 和 GDT，这两处都只有内核能访问，
+ * 读的时候缺页，它处理不了，就停了。Linux 0.11 把前 16 MB 都映射成用户可访问，碰不到这个问题；这里只有 .user 段对用户可见。
+ * 后来的 Linux 也是这样起步的新进程：ret_from_fork。
+ * ss0:esp0 是它的内核栈：在用户态发生中断或系统调用时，CPU 从这里取出内核栈，再把用户态的 SS、ESP、EFLAGS、CS、EIP 压上去。
+ */
+static void start_in_kernel(int n, const struct interrupt_frame *frame)
+{
+    struct interrupt_frame *top = (struct interrupt_frame *)(tasks[n].kstack + PAGE_SIZE) - 1;
+    for (uint32_t i = 0; i < sizeof(*top) / 4; i++)     /* 逐字复制：结构体赋值会被编译成调用 memmove，内核里没有它 */
+        ((uint32_t *)top)[i] = ((const uint32_t *)frame)[i];
+    struct tss *t = &tss[n];
+    t->eip = (uint32_t)isr_return;
+    t->eflags = 0x002;              /* 弹 frame 时关着中断：iretd 换上 frame 里的 EFLAGS（IF=1） */
+    t->esp = (uint32_t)top;
+    t->cs = KERNEL_CODE_SEL;
+    t->ds = t->es = t->fs = t->gs = t->ss = KERNEL_DATA_SEL;
+    t->ss0 = KERNEL_DATA_SEL;
+    t->esp0 = tasks[n].kstack + PAGE_SIZE;
+}
+
+/*
+ * 用户任务：有自己的页目录。frame 里的 CS 等是用户段选择子（RPL 为 3），EFLAGS 的 IOPL 为 0，用户态不能执行 cli、in、out。
+ * Linux 0.11 的 move_to_user_mode() 也是在栈上摆一个返回现场，用 iret 落到特权级 3。
  */
 static void init_user_task(int n, void (*entry)(void), uint32_t user_esp)
 {
@@ -417,12 +441,10 @@ static void init_user_task(int n, void (*entry)(void), uint32_t user_esp)
     if (dir == 0 || !setup_task(n, entry, dir))
         panic("no memory for a user task");
     tasks[n].start_brk = tasks[n].brk = USER_LOW;   /* init 的代码在内核映像里，用户空间里还什么都没有 */
-    struct tss *t = &tss[n];
-    t->esp = user_esp;
-    t->cs = USER_CODE_SEL;
-    t->ds = t->es = t->fs = t->gs = t->ss = USER_DATA_SEL;
-    t->ss0 = KERNEL_DATA_SEL;
-    t->esp0 = tasks[n].kstack + PAGE_SIZE;
+    struct interrupt_frame f = { .gs = USER_DATA_SEL, .fs = USER_DATA_SEL, .es = USER_DATA_SEL, .ds = USER_DATA_SEL,
+                                 .eip = (uint32_t)entry, .cs = USER_CODE_SEL, .eflags = 0x202,
+                                 .user_esp = user_esp, .user_ss = USER_DATA_SEL };
+    start_in_kernel(n, &f);
 }
 
 void sched_init(void)
@@ -454,9 +476,14 @@ void sched_start(void)
     scheduling = 1;                 /* 此刻运行的是任务 0，下一个 tick 就切走：A、B 的 counter 一样多，先挑任务号大的 B */
 }
 
-/* 远跳转到 TSS 选择子：偏移被忽略，CPU 执行任务切换。 */
+/*
+ * 远跳转到 TSS 选择子：偏移被忽略，CPU 执行任务切换。要切到的任务一定停在特权级 0（见 start_in_kernel()）：
+ * 切换只在内核里发生，CPU 存进 TSS 的就是内核态的现场。
+ */
 static void switch_to(int next)
 {
+    if (tss[next].cs & 3)
+        panic("task switch straight into user mode");
     struct {
         uint32_t offset;
         uint16_t selector;
@@ -979,11 +1006,10 @@ void sched_sleep(uint32_t ticks)
 
 /*
  * fork 系统调用：复制当前的用户任务，返回新任务号；任务槽或内存不够时返回 -1。
- * 新任务的 TSS 直接用父进程进入系统调用时 CPU 和 isr_common 压在栈上的寄存器：
- * EIP 是 int 0x80 的下一条指令，CS、SS、ESP 是用户态的，只把 EAX 改成 0。
- * 于是新任务第一次被调度时，硬件任务切换直接把它放回用户态，好像 fork 刚返回 0。
- * 它的内核栈是新的一页，此刻是空的：它从没在内核里运行过。
- * Linux 0.11 的 copy_process() 也是用栈上的寄存器填新进程的 TSS，再把 eax 设为 0。
+ * 父进程进入系统调用时 CPU 和 isr_common 压在栈上的寄存器（frame）原样复制到新任务的内核栈顶，只把 EAX 改成 0：
+ * EIP 是 int 0x80 的下一条指令，CS、SS、ESP 是用户态的。新任务第一次被调度时从 isr_return 弹出它、iretd 回到用户态，
+ * 好像 fork 刚返回 0（见 start_in_kernel()）。
+ * Linux 0.11 的 copy_process() 也是用栈上的寄存器、把 eax 设为 0，只是直接填进新进程的 TSS。
  * 整个过程关着中断：找空槽和占用它之间不能被别的任务插进来抢走同一个槽。
  */
 int sched_fork(const struct interrupt_frame *frame)
@@ -1001,14 +1027,7 @@ int sched_fork(const struct interrupt_frame *frame)
         irq_restore(flags);
         return -1;
     }
-    tss[n] = (struct tss){
-        .esp0 = kstack + PAGE_SIZE, .ss0 = KERNEL_DATA_SEL, .cr3 = dir,
-        .eip = frame->eip, .eflags = frame->eflags,
-        .eax = 0, .ecx = frame->ecx, .edx = frame->edx, .ebx = frame->ebx,
-        .esp = frame->user_esp, .ebp = frame->ebp, .esi = frame->esi, .edi = frame->edi,
-        .es = frame->es, .cs = frame->cs, .ss = frame->user_ss, .ds = frame->ds, .fs = frame->fs, .gs = frame->gs,
-        .iomap_base = sizeof(struct tss),
-    };
+    tss[n] = (struct tss){ .cr3 = dir, .iomap_base = sizeof(struct tss) };
     tasks[n] = (struct task){ .state = TASK_RUNNING, .page_dir = dir, .kstack = kstack, .parent = current_task,
                               .restorer = tasks[current_task].restorer, .pgrp = tasks[current_task].pgrp,   /* 收到的信号不继承 */
                               .sid = tasks[current_task].sid,
@@ -1020,6 +1039,9 @@ int sched_fork(const struct interrupt_frame *frame)
                               .exec_ip = tasks[current_task].exec_ip, .nsegs = tasks[current_task].nsegs };
     for (int i = 0; i < MAX_SEGS; i++)
         tasks[n].segs[i] = tasks[current_task].segs[i];
+    struct interrupt_frame child = *frame;
+    child.eax = 0;                  /* 子进程里 fork 返回 0 */
+    start_in_kernel(n, &child);
     if (tasks[n].exec_ip) {         /* 子进程运行的是同一个程序：多一个引用。调用者拿着文件系统锁（见 sys_fork） */
         tasks[n].exec_ip->count++;
         tasks[n].exec_ip->execs++;
