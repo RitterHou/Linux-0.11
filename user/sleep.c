@@ -20,12 +20,12 @@ int main(int argc, char **argv)
     const char *p = argc == 2 ? argv[1] : "";
 
     if (*p == '\0') {
-        print("usage: sleep seconds\n");
+        eprint("usage: sleep seconds\n");
         return 2;
     }
     for (; *p; p++) {
         if (*p < '0' || *p > '9') {
-            print("usage: sleep seconds\n");
+            eprint("usage: sleep seconds\n");
             return 2;
         }
         n = n * 10 + (uint32_t)(*p - '0');

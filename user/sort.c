@@ -87,9 +87,9 @@ int main(int argc, char **argv)
     for (int i = first; i < argc && ok > 0; i++) {
         int32_t fd = open(argv[i], 0);
         if (fd < 0) {
-            print("sort: ");
-            print(argv[i]);
-            print(": cannot open\n");
+            eprint("sort: ");
+            eprint(argv[i]);
+            eprint(": cannot open\n");
             return 1;
         }
         ok = read_all(fd);
@@ -105,7 +105,7 @@ int main(int argc, char **argv)
     }
     struct line *tmp = ok > 0 ? malloc(nlines * sizeof(struct line)) : 0;
     if (!tmp) {
-        print(ok < 0 ? "sort: read error\n" : "sort: out of memory\n");
+        eprint(ok < 0 ? "sort: read error\n" : "sort: out of memory\n");
         return 1;
     }
     merge_sort(lines, tmp, 0, nlines);

@@ -4,13 +4,13 @@
 int main(int argc, char **argv)
 {
     if (argc != 3) {
-        print("usage: ln file newname\n");
+        eprint("usage: ln file newname\n");
         return 2;
     }
     if (link(argv[1], argv[2]) < 0) {
-        print("ln: ");
-        print(argv[2]);
-        print(": cannot link\n");
+        eprint("ln: ");
+        eprint(argv[2]);
+        eprint(": cannot link\n");
         return 1;
     }
     return 0;

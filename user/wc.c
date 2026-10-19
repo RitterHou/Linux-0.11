@@ -30,9 +30,9 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; i++) {
         int32_t fd = open(argv[i], 0);
         if (fd < 0) {
-            print("wc: ");
-            print(argv[i]);
-            print(": cannot open\n");
+            eprint("wc: ");
+            eprint(argv[i]);
+            eprint(": cannot open\n");
             return 1;
         }
         count(fd);

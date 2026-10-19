@@ -1114,6 +1114,86 @@ void user_main(void)
     res[nres++] = ok ? 'u' : 'U';
     write(1, res, (uint32_t)nres);
     exit(0);
+#elif SELFTEST == SELFTEST_USER_FCNTL
+    /*
+     * 每一项通过就写一个字母，期望第 6 行（去掉任务 A 的 A）是 dfcke：
+     *   d：dup2 让新描述符指向同一个打开的文件、共用读写位置；dup2(fd, fd) 什么也不做；
+     *      新描述符原来开着的先关掉：它是管道写的一头的话，读的一头就读到末尾了。
+     *   f：F_DUPFD 找不小于 arg 的最小空闲描述符；F_GETFL 取打开方式；F_SETFL 加上 O_APPEND，以后写的都接在末尾。
+     *   c：close-on-exec：F_SETFD 设上，F_GETFD 读得回来，dup 出来的没有；子进程给管道写的一头设上再 exec sleep，
+     *      exec 就把它关了：父进程马上读到末尾，那时 sleep 还在睡。
+     *   k：fork 出的子进程继承 close-on-exec。
+     *   e：不存在的描述符、不认识的命令都返回 -1。
+     */
+    char buf[16];
+    int32_t st = 0;
+    int32_t fd = open("/hello.txt", O_RDONLY);
+    int ok = dup2(fd, 5) == 5 && read(fd, buf, 6) == 6 && read(5, buf, 4) == 4 && buf[0] == 'f' && buf[3] == 'm';
+    ok &= dup2(fd, fd) == fd && dup2(fd, 8) == -1 && dup2(7, 6) == -1;
+    close(5);
+    int32_t p[2];
+    pipe(p);
+    ok &= dup2(fd, p[1]) == p[1] && read(p[0], buf, 1) == 0;    /* 写的一头被换成了 hello.txt：没人写了 */
+    close(p[0]);
+    close(p[1]);
+    close(fd);
+    write(1, ok ? "d" : "D", 1);
+
+    fd = open("/hello.txt", O_RDONLY);
+    ok = fcntl(fd, F_DUPFD, 4) == 4 && fcntl(fd, F_DUPFD, 4) == 5 && fcntl(fd, F_GETFL, 0) == O_RDONLY;
+    close(4);
+    close(5);
+    close(fd);
+    int32_t w = open("/tmp/f", O_WRONLY | O_CREAT | O_TRUNC);
+    write(w, "abc", 3);
+    int32_t again = open("/tmp/f", O_WRONLY);
+    ok &= fcntl(again, F_GETFL, 0) == O_WRONLY && fcntl(again, F_SETFL, O_APPEND) == 0 && fcntl(again, F_GETFL, 0) == (O_WRONLY | O_APPEND);
+    write(again, "d", 1);                   /* 接在末尾，不是盖掉第一个字节 */
+    close(again);
+    close(w);
+    fd = open("/tmp/f", O_RDONLY);
+    ok &= read(fd, buf, sizeof(buf)) == 4 && buf[0] == 'a' && buf[3] == 'd';
+    close(fd);
+    unlink("/tmp/f");
+    write(1, ok ? "f" : "F", 1);
+
+    fd = open("/hello.txt", O_RDONLY);
+    ok = fcntl(fd, F_GETFD, 0) == 0 && fcntl(fd, F_SETFD, FD_CLOEXEC) == 0 && fcntl(fd, F_GETFD, 0) == 1;
+    int32_t copy = dup(fd);
+    ok &= fcntl(copy, F_GETFD, 0) == 0;
+    close(copy);
+    close(fd);
+    pipe(p);
+    int32_t c = fork();
+    if (c == 0) {
+        close(p[0]);
+        fcntl(p[1], F_SETFD, FD_CLOEXEC);
+        char *argv[] = { "sleep", "2", 0 };
+        execv("/bin/sleep", argv);
+        exit(9);
+    }
+    close(p[1]);
+    ok &= read(p[0], buf, 1) == 0 && waitpid(c, &st, WNOHANG) == 0;    /* 读到末尾时 sleep 还在睡 */
+    close(p[0]);
+    kill(c, SIGKILL);
+    waitpid(c, &st, 0);
+    write(1, ok ? "c" : "C", 1);
+
+    fd = open("/hello.txt", O_RDONLY);
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+    c = fork();
+    if (c == 0)
+        exit(fcntl(fd, F_GETFD, 0) == 1 ? 0 : 1);
+    ok = waitpid(c, &st, 0) == c && st == 0;
+    close(fd);
+    write(1, ok ? "k" : "K", 1);
+
+    ok = fcntl(7, F_GETFD, 0) == -1 && fcntl(99, F_GETFL, 0) == -1;
+    fd = open("/hello.txt", O_RDONLY);
+    ok &= fcntl(fd, 99, 0) == -1 && fcntl(fd, F_DUPFD, 8) == -1;
+    close(fd);
+    write(1, ok ? "e" : "E", 1);
+    exit(0);
 #elif SELFTEST == SELFTEST_ALL_EXIT
     write(1, "bye", 3);
     exit(2);

@@ -30,23 +30,23 @@ int main(int argc, char **argv)
 
     if (argc > 2 && argv[1][0] == '-') {     /* 第一个参数是 -信号：后面至少还要有一个任务号 */
         if (!parse(argv[1] + 1, &sig) || sig < 1 || sig > 32) {
-            print("kill: ");
-            print(argv[1]);
-            print(": bad signal\n");
+            eprint("kill: ");
+            eprint(argv[1]);
+            eprint(": bad signal\n");
             return 2;
         }
         i = 2;
     }
     if (i >= argc) {
-        print("usage: kill [-signal] pid...\n");
+        eprint("usage: kill [-signal] pid...\n");
         return 2;
     }
     for (; i < argc; i++) {
         int32_t pid;
         if (!parse(argv[i], &pid) || kill(pid, sig) < 0) {
-            print("kill: ");
-            print(argv[i]);
-            print(": cannot signal\n");
+            eprint("kill: ");
+            eprint(argv[i]);
+            eprint(": cannot signal\n");
             status = 1;
         }
     }
