@@ -47,6 +47,7 @@ static volatile int interrupted;    /* 这条命令运行时按过 Ctrl+C：循�
 static int last_status;             /* $? */
 static int job_control;             /* 交互、标准输入是终端：每个作业一个进程组 */
 static int32_t shell_pgid;          /* shell 自己的进程组：作业结束或停下以后，终端的前台换回它 */
+static int32_t shell_pid;           /* $$：shell 自己的任务号。命令的词在 fork 之后的子进程里展开，不能在那时才 getpid() */
 
 /* 作业表：后台运行的、Ctrl+Z 停下的作业 */
 #define MAX_JOBS 8
@@ -650,7 +651,7 @@ static int expand_dollar(const char **pp, char *out, uint32_t *n, uint32_t size)
     if (*p == '?') {
         value = decimal(last_status, num), p++;
     } else if (*p == '$') {
-        value = decimal(getpid(), num), p++;
+        value = decimal(shell_pid, num), p++;
     } else if (*p == '#') {
         value = decimal(pos_count, num), p++;
     } else if (*p >= '0' && *p <= '9') {
@@ -1677,6 +1678,8 @@ int main(int sh_argc, char **sh_argv)
     int32_t in = 0;
     int interactive = sh_argc < 2;
     struct stat script;
+
+    shell_pid = getpid();
 
     if (!interactive && sh_argv[1][0] == '-') {     /* 不认识任何选项：#!/bin/sh -x 不能把 -x 当成脚本去打开 */
         eprint("sh: ");
