@@ -17,11 +17,14 @@
  *   - 在终端上交互时，读命令用自己的行编辑（edit_line）：左右方向键挪光标，在光标处插入、退格，Home/End（Ctrl+A/E）
  *     到行首行尾，上下方向键翻出以前敲过的命令（最近 16 条）。为此读的时候把终端换成原始模式、关掉回显，
  *     每个键马上交来，回显由 shell 自己用转义序列画；读完换回规范模式再运行命令，程序看到的终端和原来一样。
- *   - Ctrl+C：终端给前台进程组发 SIGINT。shell 自己接住它（on_intr），被打断的 read 返回 -EINTR，
- *     重新打出提示符；被打断的 waitpid 也返回 -EINTR，接着等。前台的子进程在 exec 之前改回默认，就被结束；
- *     后台的子进程改成忽略，exec 之后也不变，所以 Ctrl+C 停不了后台程序，要用 kill。后台运行的脚本也是这样：
- *     运行它的 sh 一开始就忽略 SIGINT，它运行的每条命令也跟着忽略，不然这些命令和前台的 shell 在同一个进程组里，
- *     会被 Ctrl+C 结束。
+ *   - 作业控制（交互、标准输入是终端时）：每条管道是一个作业，有自己的进程组（第一个子进程的号）。前台作业运行时，
+ *     shell 把终端的前台进程组换成它（TIOCSPGRP），Ctrl+C、Ctrl+Z 就只发给它；作业结束或者停下了，再换回 shell 自己。
+ *     Ctrl+Z 让前台作业停下，shell 记下它；jobs 列出作业，fg [%n] 让它到前台接着运行，bg [%n] 在后台接着运行，
+ *     kill %n 发给作业的整个进程组。后台作业读终端会被停下（SIGTTIN），用 fg 才能读。shell 自己忽略 SIGTSTP 这几个信号。
+ *   - Ctrl+C：终端给前台进程组发 SIGINT。在提示符上按，shell 自己接住它（on_intr），被打断的 read 返回 -EINTR，
+ *     重新打出提示符。前台作业被 Ctrl+C 结束，正在运行的循环也不再往下转。
+ *     没有作业控制的时候（脚本），命令都在 shell 的进程组里：后台的子进程改成忽略 SIGINT，exec 之后也不变，
+ *     所以 Ctrl+C 停不了它们。后台运行的脚本也是这样：运行它的 sh 一开始就忽略 SIGINT，它运行的每条命令也跟着忽略。
  *   - 内建命令：cd 换当前目录（不带参数回到根目录），exit [退出码] 退出 shell（init 会再拉起一个），
  *     time 命令… 运行完报告用了多少时间，test 和 [ … ] 判断条件，true、false，help 显示能用的命令。
  *     cd 必须是内建的：子进程换了目录，父进程的当前目录不会跟着变。
@@ -42,6 +45,20 @@
 static int intr_ignored;            /* 启动时 SIGINT 就是忽略的（在后台运行的脚本）：它运行的命令也忽略 */
 static volatile int interrupted;    /* 这条命令运行时按过 Ctrl+C：循环不再往下转 */
 static int last_status;             /* $? */
+static int job_control;             /* 交互、标准输入是终端：每个作业一个进程组 */
+static int32_t shell_pgid;          /* shell 自己的进程组：作业结束或停下以后，终端的前台换回它 */
+
+/* 作业表：后台运行的、Ctrl+Z 停下的作业 */
+#define MAX_JOBS 8
+struct job {
+    int used;
+    int32_t pgid;                   /* 作业的进程组 */
+    int32_t pids[MAX_ARGS];         /* 还没收走的进程 */
+    int npids;
+    int stopped;
+    char cmd[64];                   /* jobs 里显示的命令 */
+};
+static struct job jobs[MAX_JOBS];
 static int pos_count;               /* $# */
 static char **pos_args;             /* $0、$1… */
 
@@ -864,21 +881,192 @@ static void exec_simple(struct node *n)
     exit(127);
 }
 
+/* ------------------------------------------------------------------ 作业 */
+
+static void add_text(char *out, uint32_t size, const char *text)
+{
+    uint32_t len = strlen(out);
+    for (; *text && len + 1 < size; text++)
+        out[len++] = *text;
+    out[len] = '\0';
+}
+
+/* 把命令写成一行字给 jobs 显示：简单命令是它的词，管道用 | 连起来，复合命令只写开头的保留字 */
+static void describe(struct node *n, char *out, uint32_t size)
+{
+    if (n->kind == N_PIPE) {
+        describe(n->a, out, size);
+        add_text(out, size, " | ");
+        describe(n->b, out, size);
+    } else if (n->kind == N_CMD) {
+        for (int i = 0; i < n->nwords; i++) {
+            if (i)
+                add_text(out, size, " ");
+            add_text(out, size, n->words[i]);
+        }
+    } else {
+        add_text(out, size, n->kind == N_IF ? "if ..." : n->kind == N_WHILE ? "while ..." : n->kind == N_FOR ? "for ..." : "...");
+    }
+}
+
+static void print_job(int k, const char *state)
+{
+    print("[");
+    print_num((uint32_t)k + 1);
+    print("] ");
+    print(state);
+    print(jobs[k].cmd);
+    print("\n");
+}
+
+/* 收走或者停下了的进程 pid：找到它属于的作业，更新它；作业里的进程都收走了，作业就没了 */
+static void job_update(int32_t pid, int32_t st)
+{
+    for (int k = 0; k < MAX_JOBS; k++) {
+        struct job *j = &jobs[k];
+        for (int i = 0; j->used && i < j->npids; i++) {
+            if (j->pids[i] != pid)
+                continue;
+            if (st & 0x400) {
+                j->stopped = 1;
+                return;
+            }
+            j->pids[i] = j->pids[--j->npids];
+            if (j->npids == 0)
+                j->used = 0;
+            return;
+        }
+    }
+}
+
+/*
+ * 收走结束了的后台程序；读命令之前和 jobs、fg、bg、kill 之前都收一遍。作业是停着还是在运行，问内核（taskinfo）：
+ * 有一个进程停着就算停着。别人用 kill -18 让它接着运行了，shell 也知道。
+ */
+static void reap_jobs(void)
+{
+    int32_t pid, st;
+    struct taskinfo info;
+    while ((pid = waitpid(-1, &st, WNOHANG | (job_control ? WUNTRACED : 0))) > 0)
+        job_update(pid, st);
+    for (int k = 0; k < MAX_JOBS; k++) {
+        if (!jobs[k].used)
+            continue;
+        jobs[k].stopped = 0;
+        for (int i = 0; i < jobs[k].npids; i++)
+            if (taskinfo(jobs[k].pids[i], &info) == 0 && info.state == 6)
+                jobs[k].stopped = 1;
+    }
+}
+
+/* 记下一个作业，返回它在表里的位置；满了返回 -1 */
+static int add_job(int32_t pgid, const int32_t *pids, int npids, int stopped, struct node *n)
+{
+    for (int k = 0; k < MAX_JOBS; k++) {
+        if (jobs[k].used)
+            continue;
+        struct job *j = &jobs[k];
+        j->used = 1;
+        j->pgid = pgid;
+        j->npids = npids;
+        for (int i = 0; i < npids; i++)
+            j->pids[i] = pids[i];
+        j->stopped = stopped;
+        j->cmd[0] = '\0';
+        describe(n, j->cmd, sizeof(j->cmd));
+        return k;
+    }
+    eprint("sh: too many jobs\n");
+    return -1;
+}
+
+/* 终端的前台换成进程组 pgid（tcsetpgrp）：标准输入就是 shell 的终端 */
+static void set_foreground(int32_t pgid)
+{
+    if (job_control)
+        ioctl(0, TIOCSPGRP, &pgid);
+}
+
+/*
+ * 等前台作业：等 pids 里的每一个进程结束或者停下（WUNTRACED）。有一个停下了，整个作业就算停下了：
+ * 还没收走的进程都记进作业表（slot 是它原来在表里的位置，新的作业是 -1），打印 [n] stopped …，
+ * 正在运行的循环也不再往下转；被 Ctrl+C 结束了也一样不再往下转。names 是报告时用的名字（可以是 0）。
+ * 等完把终端的前台换回 shell 自己。返回退出码：最后一个进程的，停下的是 128 加信号编号。
+ */
+static int wait_job(int32_t pgid, int32_t *pids, const char **names, int npids, struct node *n, int slot)
+{
+    int32_t st = 0;
+    for (int k = 0; k < npids; k++) {
+        st = 0;
+        while (waitpid(pids[k], &st, job_control ? WUNTRACED : 0) == -EINTR)
+            ;                       /* 按了 Ctrl+C：shell 的 on_intr 处理完，接着等子进程 */
+        if (st & 0x400) {           /* 停下了：这一个和后面还没等的都留在作业里 */
+            if (slot < 0) {
+                slot = add_job(pgid, pids + k, npids - k, 1, n);
+            } else {
+                jobs[slot].npids = npids - k;
+                for (int i = 0; i < npids - k; i++)
+                    jobs[slot].pids[i] = pids[k + i];
+                jobs[slot].stopped = 1;
+            }
+            set_foreground(shell_pgid);
+            if (slot >= 0)
+                print_job(slot, "stopped ");
+            interrupted = 1;
+            return status_code(st);
+        }
+        if ((st & 0x200) && (st & 0xFF) == SIGINT)
+            interrupted = 1;        /* 被 Ctrl+C 结束：作业有自己的进程组，shell 没收到 SIGINT，从这里知道 */
+        report(names ? names[k] : slot >= 0 ? jobs[slot].cmd : "sh", st);
+    }
+    if (slot >= 0)
+        jobs[slot].used = 0;
+    set_foreground(shell_pgid);
+    return status_code(st);
+}
+
+/* fg、bg 的参数：%n 或者 n 是第 n 个作业，不给就是最后一个 */
+static int find_job(int argc, char **argv)
+{
+    int k = -1;
+    if (argc > 1) {
+        uint32_t num;
+        const char *s = argv[1][0] == '%' ? argv[1] + 1 : argv[1];
+        if (parse_uint(s, 10, MAX_JOBS, &num) && num >= 1 && jobs[num - 1].used)
+            k = (int)num - 1;
+    } else {
+        for (int i = 0; i < MAX_JOBS; i++)
+            if (jobs[i].used)
+                k = i;
+    }
+    if (k < 0) {
+        eprint("sh: ");
+        eprint(argv[0]);
+        eprint(": no such job\n");
+    }
+    return k;
+}
+
 /*
  * 运行一条管道（只有一段也算）：每一段 fork 一个子进程。第 k 段的子进程：要是前面有管道，把它读的一头接到 0 号描述符；
  * 要是后面有管道，把写的一头接到 1 号描述符，都用 dup2。管道多余的描述符都要关掉：只要还有人拿着写的一头，
  * 读的一方就永远等不到结束。简单命令在子进程里 exec，if、while 这些复合命令由子进程里的 shell 自己执行完再退出。
+ * 有作业控制时，这些子进程放进一个新的进程组（第一个子进程的号），前台的作业运行时终端的前台就是这一组。
+ * shell 和子进程都调用 setpgid、都设前台：谁先运行都一样，子进程不会在进组之前就去读终端。
  * 后台运行的不等，打印最后一段的任务号；前台的等每一段结束，退出码是最后一段的。
  */
 static int run_pipeline(struct node *n, int background)
 {
     struct node *seg[MAX_ARGS];
+    struct node *whole = n;         /* 整条管道，jobs 里显示它；下面拆完以后 n 是第一段 */
     int nseg = 0;
     for (; n->kind == N_PIPE && nseg < MAX_ARGS - 1; n = n->a)
         seg[nseg++] = n->b;
     seg[nseg++] = n;
     int32_t pids[MAX_ARGS];
+    const char *names[MAX_ARGS];
     int32_t prev = -1;              /* 上一段管道读的一头 */
+    int32_t pgid = 0;
     int started = 0;
     for (int k = nseg - 1; k >= 0; k--) {       /* 拆的时候是从后往前拆的 */
         int last = k == 0;
@@ -889,14 +1077,26 @@ static int run_pipeline(struct node *n, int background)
         }
         int32_t pid = fork();
         if (pid == 0) {
+            if (job_control) {
+                setpgid(0, pgid);   /* 第一个子进程 pgid 是 0：新开一组，组号是它自己 */
+                if (!background) {
+                    int32_t g = getpgrp();
+                    ioctl(0, TIOCSPGRP, &g);
+                }
+                signal(SIGTSTP, SIG_DFL);
+                signal(SIGTTIN, SIG_DFL);
+                signal(SIGTTOU, SIG_DFL);
+            }
             /*
              * 从 fork 到这里，子进程用的还是 shell 的 on_intr：这时按 Ctrl+C 只会打断一下，命令照样开始。
-             * 没有 sigprocmask 这种先挡住信号的办法，这一小段避免不了。
+             * 没有 sigprocmask 这种先挡住信号的办法，这一小段避免不了。有作业控制时后台作业不在前台的组里，
+             * Ctrl+C 本来就到不了它，所以不用忽略，fg 到前台以后 Ctrl+C 照样能结束它。
              */
-            signal(SIGINT, background || intr_ignored ? SIG_IGN : SIG_DFL);
+            signal(SIGINT, !job_control && (background || intr_ignored) ? SIG_IGN : SIG_DFL);
             signal(SIGTERM, SIG_DFL);
-            if (background)
+            if (background && !job_control)
                 intr_ignored = 1;   /* 后台的复合命令：它运行的命令也忽略 Ctrl+C */
+            job_control = 0;        /* 子进程里的 shell（复合命令）不再管作业 */
             if (prev >= 0) {        /* 前一段管道读的一头接到标准输入 */
                 dup2(prev, 0);
                 close(prev);
@@ -921,27 +1121,31 @@ static int run_pipeline(struct node *n, int background)
             eprint("sh: fork failed\n");
             break;
         }
+        if (job_control) {
+            setpgid(pid, pgid ? pgid : pid);
+            if (!pgid && !background)
+                set_foreground(pid);
+        }
+        if (!pgid)
+            pgid = pid;
+        names[started] = seg[k]->kind == N_CMD && seg[k]->nwords ? seg[k]->words[0] : "sh";
         pids[started++] = pid;
     }
     if (prev >= 0)
         close(prev);
-    if (started == 0)
+    if (started == 0) {
+        set_foreground(shell_pgid);
         return 1;
+    }
     if (background) {
+        if (job_control)
+            add_job(pgid, pids, started, 0, whole);
         print("[");
         print_num((uint32_t)pids[started - 1]);
         print("]\n");
         return 0;
     }
-    int32_t st = 0;
-    for (int k = 0; k < started; k++) {
-        st = 0;
-        while (waitpid(pids[k], &st, 0) == -EINTR)
-            ;                       /* 按了 Ctrl+C：shell 的 on_intr 处理完，接着等子进程 */
-        struct node *s = seg[nseg - 1 - k];
-        report(s->kind == N_CMD && s->nwords ? s->words[0] : "sh", st);
-    }
-    return status_code(st);
+    return wait_job(pgid, pids, names, started, whole, -1);
 }
 
 /* 词是不是 名字=值 */
@@ -1186,12 +1390,88 @@ static int builtin(struct argv_buf *b, int *status)
         *status = test(argc - 1, argv + 1);
         return 1;
     }
+    for (int i = 1; strcmp(name, "kill") == 0 && job_control && i < argc; i++) {
+        if (argv[i][0] != '%')
+            continue;
+        /*
+         * kill [-信号] %n…：发给作业的整个进程组。作业停着的话再发一个 SIGCONT，不然信号要等它接着运行才处理。
+         * bash 的 kill 也是内建的，也这样做。参数里没有 %n 的，照常运行 /bin/kill。
+         */
+        uint32_t sig = SIGTERM;
+        int first = 1;
+        if (argv[1][0] == '-' && !parse_uint(argv[1] + 1, 10, 32, &sig)) {
+            eprint("sh: kill: bad signal\n");
+            *status = 2;
+            return 1;
+        }
+        if (argv[1][0] == '-')
+            first = 2;
+        reap_jobs();
+        for (int a = first; a < argc; a++) {
+            uint32_t num;
+            if (argv[a][0] != '%' || !parse_uint(argv[a] + 1, 10, MAX_JOBS, &num) || num < 1 || !jobs[num - 1].used) {
+                eprint("sh: kill: ");
+                eprint(argv[a]);
+                eprint(": no such job\n");
+                *status = 1;
+                continue;
+            }
+            kill(-jobs[num - 1].pgid, (int32_t)sig);
+            if (jobs[num - 1].stopped && sig != SIGKILL && sig != SIGCONT)
+                kill(-jobs[num - 1].pgid, SIGCONT);
+        }
+        return 1;
+    }
+    if (strcmp(name, "jobs") == 0) {        /* 列出作业：[n] 状态 命令 */
+        reap_jobs();
+        for (int k = 0; k < MAX_JOBS; k++)
+            if (jobs[k].used)
+                print_job(k, jobs[k].stopped ? "stopped " : "running ");
+        return 1;
+    }
+    if (strcmp(name, "fg") == 0 || strcmp(name, "bg") == 0) {
+        /*
+         * fg：作业到前台：终端的前台换成它的组，发 SIGCONT 让停着的接着运行，再像前台命令一样等它。
+         * bg：发 SIGCONT，让它在后台接着运行，不等。
+         */
+        if (job_control)
+            reap_jobs();
+        int k = job_control ? find_job(argc, argv) : -1;
+        if (k < 0) {
+            if (!job_control)
+                eprint("sh: no job control\n");
+            *status = 1;
+            return 1;
+        }
+        struct job *j = &jobs[k];
+        if (name[0] == 'b') {
+            j->stopped = 0;
+            kill(-j->pgid, SIGCONT);
+            print("[");
+            print_num((uint32_t)k + 1);
+            print("] ");
+            print(j->cmd);
+            print(" &\n");
+            return 1;
+        }
+        print(j->cmd);
+        print("\n");
+        set_foreground(j->pgid);
+        j->stopped = 0;
+        kill(-j->pgid, SIGCONT);
+        int32_t pids[MAX_ARGS];
+        int npids = j->npids;
+        for (int i = 0; i < npids; i++)
+            pids[i] = j->pids[i];
+        *status = wait_job(j->pgid, pids, 0, npids, 0, k);
+        return 1;
+    }
     if (strcmp(name, "help") == 0) {
         print("files: ls cat echo wc grep sort rm ln mv mkdir rmdir chmod touch pwd\n");
         print("disks: df sync mount umount\n");
         print("tasks: ps kill sleep nice date letter hello check\n");
         print("users: id su login passwd chown\n");
-        print("built in: cd, exit, time, test or [ ], true, false, help; if while for\n");
+        print("built in: cd exit time test [ true false jobs fg bg help; if while for\n");
         print("try: ls /bin | wc, echo hi > /tmp/a, x=1; echo $((x+1)), letter D &\n");
         return 1;
     }
@@ -1394,7 +1674,7 @@ int main(int sh_argc, char **sh_argv)
 {
     char line[LINE_LEN];
     static char text[TEXT_MAX];     /* 正在攒的一条命令：没写完的 if、while、引号会跨好几行 */
-    int32_t st, in = 0;
+    int32_t in = 0;
     int interactive = sh_argc < 2;
     struct stat script;
 
@@ -1428,14 +1708,22 @@ int main(int sh_argc, char **sh_argv)
     /* 标准输入是终端（TCGETS 成功）才用行编辑；管道、文件照旧一行行读。终端开机时是规范模式、回显，记下来 */
     int editing = interactive && ioctl(0, TCGETS, &sane) == 0;
     sane.c_lflag |= ICANON | ECHO;
+    job_control = editing;
+    if (job_control) {
+        /* 作业控制：shell 自己不能被 Ctrl+Z 停下，也不该因为读写终端停下；终端的前台先是自己 */
+        signal(SIGTSTP, SIG_IGN);
+        signal(SIGTTIN, SIG_IGN);
+        signal(SIGTTOU, SIG_IGN);
+        shell_pgid = getpgrp();
+        set_foreground(shell_pgid);
+    }
     if (interactive) {
         signal(SIGTERM, SIG_IGN);   /* kill 0 发给这一组，也不该把 shell 自己结束；kill -9 才行 */
         print("shell on hda: try help, ls /bin, cat /hello.txt, ps\n");
     }
     uint32_t len = 0;               /* text 里已经攒了多少 */
     for (;;) {
-        while (waitpid(-1, &st, WNOHANG) > 0)
-            ;                       /* 收走结束了的后台程序 */
+        reap_jobs();
         if (interactive)
             print(len ? "> " : "$ ");     /* 没写完的命令：接着读的这一行打 > */
         int32_t n = editing ? edit_line(line) : read_line(in, line);

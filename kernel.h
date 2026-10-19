@@ -138,6 +138,12 @@ void wake_up(struct wait_queue *q);
 int sched_kill(int pid, int sig);
 int sched_signal(int sig, uint32_t handler, uint32_t restorer);
 int sched_setsid(void);
+int sched_setpgid(int pid, int pgid);
+int sched_sid(void);
+int sched_pgrp_in_session(int pgrp, int sid);
+void sched_stop(int sig);
+int sched_signal_pending(void);
+uint32_t sched_action(int sig);
 int sched_pgrp(void);
 int sched_is_leader(void);
 int sched_claim_tty(int tty);
@@ -184,6 +190,7 @@ void sched_drop_exec(void);
 int exec_fill_page(uint32_t va, uint32_t page, int *writable);
 #define EXIT_KILLED 0x100           /* 被异常结束时留给父进程的状态：0x100 加异常号 */
 #define EXIT_SIGNAL 0x200           /* 被信号结束时的状态：0x200 加信号编号 */
+#define EXIT_STOPPED 0x400          /* waitpid(WUNTRACED) 看到子进程停下了：0x400 加让它停下的信号 */
 #define TASK_MESSAGE_ROW 7          /* 任务结束的消息写在第 7 行 */
 
 /* syscall.c：int 0x80 系统调用 */
@@ -201,12 +208,11 @@ int hd_write(int drive, uint32_t lba, const void *buf);
 #define TTY_CONSOLE 0               /* 键盘和第 8～18 行的窗口：/dev/tty0 */
 #define TTY_SERIAL  1               /* 串口 COM1：/dev/ttyS0 */
 void tty_input(int tty, char ch);
-void tty_set_pgrp(int tty, int pgrp);
+void tty_set_pgrp(int tty, int pgrp, int sid);
 void tty_release_pgrp(int tty, int pgrp);
 int32_t tty_read(int tty, void *dst, uint32_t n);
 int32_t tty_write(int tty, const void *src, uint32_t n);
-struct termios;
-int tty_ioctl(int tty, uint32_t cmd, struct termios *t);
+int tty_ioctl(int tty, uint32_t cmd, void *arg);
 
 /* serial.c：串口 */
 void serial_init(void);

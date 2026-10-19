@@ -200,6 +200,16 @@ static int same_text(const char *a, uint32_t n, const char *b)
 }
 #endif
 
+#if defined(SELFTEST) && SELFTEST == SELFTEST_USER_STOP
+/* 内核映像里的全局变量，所有任务共用：子进程把结果、孙子进程的号写在这里 */
+static volatile int32_t caught_tstp, grandchild;
+
+static void on_tstp(int sig)
+{
+    caught_tstp = sig;
+}
+#endif
+
 #if defined(SELFTEST) && SELFTEST == SELFTEST_USER_WRITE_KERNEL
 extern volatile uint32_t timer_ticks;   /* 内核的变量，所在的页没有用户位 */
 #endif
@@ -1465,6 +1475,104 @@ void user_main(void)
     uint32_t got = (after.tms_cutime - before.tms_cutime) + (after.tms_cstime - before.tms_cstime);
     ok = got >= sum && got <= sum + 10 && after.tms_cutime - before.tms_cutime >= spent_user[0];
     res[nres++] = ok ? 's' : 'S';
+    write(1, res, (uint32_t)nres);
+    exit(0);
+#elif SELFTEST == SELFTEST_USER_STOP
+    /*
+     * 每一项通过就记一个字母，期望第 6 行（去掉任务 A 的 A）是 swcqkop：
+     *   s：子进程给自己发 SIGSTOP 停下：waitpid(WUNTRACED) 返回它，状态是 0x400 加 19；taskinfo 里是停着（6）；
+     *      再 waitpid(WUNTRACED | WNOHANG) 返回 0（一次停下只报告一次）；不带 WUNTRACED 的 waitpid 看不见它停下；
+     *      SIGCONT 让它接着运行，以 7 退出。
+     *   w：给正在睡的进程发 SIGCONT：默认不理，它照常睡醒、退出。
+     *   c：SIGSTOP 和 SIGKILL 拦不住（signal 返回 -1）；SIGTSTP 设了处理函数就调用它，不停下；忽略了就什么也不发生。
+     *   q：停下的信号让没处理的 SIGCONT 作废，SIGCONT 让没处理的停下的信号作废（停着时发 SIGCONT 不会再停下）。
+     *   k：停着的进程收到 SIGKILL 也会被结束，状态是 0x200 加 9。
+     *   o：孙子进程停着，它的父进程（子进程）退出了：没人会让它接着运行，内核给它 SIGHUP 和 SIGCONT，它就结束了。
+     *   p：setpgid(0, 0) 自己开一个进程组，getpgrp 就是自己的号；不能改别的会话的任务、同一个会话里不是自己孩子的任务（父进程），
+     *      也不能进不存在的组。
+     * 结果先攒着，最后一次写出去。
+     */
+    char res[8];
+    int nres = 0, ok;
+    int32_t st = -1, c;
+    struct taskinfo info;
+
+    c = fork();
+    if (c == 0) {
+        kill(getpid(), SIGSTOP);
+        exit(7);
+    }
+    ok = waitpid(c, &st, WUNTRACED) == c && st == (0x400 | SIGSTOP);
+    ok &= taskinfo(c, &info) == 0 && info.state == 6;
+    ok &= waitpid(c, &st, WUNTRACED | WNOHANG) == 0 && waitpid(c, &st, WNOHANG) == 0;
+    ok &= kill(c, SIGCONT) == 0 && waitpid(c, &st, 0) == c && st == 7;
+    res[nres++] = ok ? 's' : 'S';
+
+    c = fork();
+    if (c == 0) {
+        sleep(30);
+        exit(3);
+    }
+    sleep(5);
+    ok = kill(c, SIGCONT) == 0 && waitpid(c, &st, 0) == c && st == 3;
+    res[nres++] = ok ? 'w' : 'W';
+
+    ok = signal(SIGSTOP, on_tstp) == (sighandler_t)-1 && signal(SIGKILL, SIG_IGN) == (sighandler_t)-1;
+    caught_tstp = 0;
+    c = fork();
+    if (c == 0) {
+        signal(SIGTSTP, on_tstp);
+        kill(getpid(), SIGTSTP);
+        signal(SIGTSTP, SIG_IGN);
+        kill(getpid(), SIGTSTP);
+        exit(caught_tstp == SIGTSTP ? 4 : 5);
+    }
+    ok &= waitpid(c, &st, WUNTRACED) == c && st == 4;
+    res[nres++] = ok ? 'c' : 'C';
+
+    c = fork();
+    if (c == 0) {
+        kill(getpid(), SIGSTOP);
+        exit(8);
+    }
+    ok = waitpid(c, &st, WUNTRACED) == c && st == (0x400 | SIGSTOP);
+    ok &= kill(c, SIGTSTP) == 0 && kill(c, SIGCONT) == 0 && waitpid(c, &st, WUNTRACED) == c && st == 8;
+    res[nres++] = ok ? 'q' : 'Q';
+
+    c = fork();
+    if (c == 0) {
+        kill(getpid(), SIGSTOP);
+        exit(9);
+    }
+    ok = waitpid(c, &st, WUNTRACED) == c && kill(c, SIGKILL) == 0 && waitpid(c, &st, 0) == c && st == (0x200 | SIGKILL);
+    res[nres++] = ok ? 'k' : 'K';
+
+    grandchild = 0;
+    c = fork();
+    if (c == 0) {
+        int32_t g = fork();
+        if (g == 0) {
+            kill(getpid(), SIGSTOP);
+            exit(0);
+        }
+        grandchild = g;
+        int32_t gs;
+        waitpid(g, &gs, WUNTRACED);
+        exit(gs == (0x400 | SIGSTOP) ? 0 : 1);  /* 孙子停着，自己退出：它成了孤儿 */
+    }
+    ok = waitpid(c, &st, 0) == c && st == 0 && grandchild > 0;
+    sleep(10);
+    ok &= taskinfo(grandchild, &info) < 0;      /* 被 SIGHUP 结束，没有父进程，当场收走了 */
+    res[nres++] = ok ? 'o' : 'O';
+
+    c = fork();
+    if (c == 0) {
+        int good = getpgrp() != getpid() && setpgid(0, 0) == 0 && getpgrp() == getpid();
+        good &= setpgid(1, 1) < 0 && setpgid(2, 2) < 0 && setpgid(0, 15) < 0;   /* 2 号是父进程 init，同一个会话但不是孩子 */
+        exit(good ? 0 : 1);
+    }
+    ok = waitpid(c, &st, 0) == c && st == 0;
+    res[nres++] = ok ? 'p' : 'P';
     write(1, res, (uint32_t)nres);
     exit(0);
 #elif SELFTEST == SELFTEST_USER_PERM

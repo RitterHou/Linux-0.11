@@ -1228,6 +1228,20 @@ def test_permissions(_m, _elf):
             check(len(out) > i and out[i] == ch, f"第 {i + 1} 项（{meaning[ch]}）没有通过：第 6 行去掉 A 后是 {out!r}，应为 {expected!r}")
 
 
+def test_stop_signals(_m, _elf):
+    """停下和接着运行：WUNTRACED 只报告一次；SIGCONT；SIGSTOP 拦不住、SIGTSTP 能接住能忽略；停着也能被 SIGKILL；孤儿进程组里停着的收到 SIGHUP；setpgid"""
+    d = build_selftest("USER_STOP")
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        m.wait_for(lambda mm: message_row(mm) == "task 2 exited with code 0", timeout=15, what="init 的结束消息")
+        out = task_output(m).replace("A", "")
+        expected = "swcqkop"
+        meaning = {"s": "停下、WUNTRACED 拿到 0x413、只报告一次、SIGCONT 接着运行", "w": "SIGCONT 默认不理",
+                   "c": "SIGSTOP、SIGKILL 拦不住；SIGTSTP 能接住、能忽略", "q": "停下的信号和 SIGCONT 互相作废",
+                   "k": "停着的进程被 SIGKILL 结束", "o": "孤儿进程组里停着的进程收到 SIGHUP 结束", "p": "setpgid、getpgrp"}
+        for i, ch in enumerate(expected):
+            check(len(out) > i and out[i] == ch, f"第 {i + 1} 项（{meaning[ch]}）没有通过：第 6 行去掉 A 后是 {out!r}，应为 {expected!r}")
+
+
 def test_no_disk(_m, _elf):
     """不接硬盘开机：第 1 行显示 disk: none；exec 不了 /bin/letter，任务 3 用内核映像里的代码写 C；init 隔一会儿才重试 shell"""
     tmp = tempfile.mkdtemp(prefix="kernel-nodisk-")
@@ -2357,16 +2371,86 @@ def test_shell_language(m, elf):
     run_all([("echo $?", ["130"])])
 
 
+def test_job_control(m, elf):
+    """作业控制：Ctrl+Z 停下前台作业，jobs 列出，bg 在后台接着运行，fg 拿到前台；后台读终端被停下，fg 以后能读；
+    管道是一个作业；kill %n；kill -19/-18；提示符上按 Ctrl+Z 什么也不发生；shell 退出时停着的作业被 SIGHUP 结束"""
+    rows = lambda: [r for r in console(m) if r]
+
+    def stop(command, shown):
+        wait_prompt(m)
+        type_text(m, command + "\n")
+        time.sleep(0.5)
+        m.sendkeys(["ctrl-z"])
+        m.wait_for(lambda mm: rows()[-3:] == ["^Z", shown, "$"], timeout=3, what=f"Ctrl+Z 停下 {command}：打印 {shown!r}")
+
+    stop("sleep 100", "[1] stopped sleep 100")
+    check(run_command(m, "jobs") == ["[1] stopped sleep 100"], "jobs 列出停着的作业")
+    ps = [r.split() for r in run_command(m, "ps | grep sleep")]
+    check(len(ps) == 1 and ps[0][2] == "T", f"ps 里它是 T（停着）：{ps!r}")
+    check(run_command(m, "bg") == ["[1] sleep 100 &"] and run_command(m, "jobs") == ["[1] running sleep 100"], "bg 让它在后台接着运行")
+    ps = [r.split() for r in run_command(m, "ps | grep sleep")]
+    check(len(ps) == 1 and ps[0][2] == "S", f"接着运行了，在睡：{ps!r}")
+    wait_prompt(m)
+    type_text(m, "fg %1\n")
+    m.wait_for(lambda mm: rows()[-2:] == ["$ fg %1", "sleep 100"], timeout=3, what="fg 打印作业的命令，等它")
+    m.sendkeys(["ctrl-c"])
+    m.wait_for(lambda mm: rows()[-2:] == ["^C", "$"], timeout=3, what="到了前台，Ctrl+C 能结束它")
+    check(run_command(m, "jobs") == [], "结束了，作业表空了")
+
+    out = run_command(m, "cat &")
+    check(re.fullmatch(r"\[\d+\]", out[0]) is not None, f"后台运行 cat：{out!r}")
+    time.sleep(0.5)
+    check(run_command(m, "jobs") == ["[1] stopped cat"], "后台的 cat 读终端，被 SIGTTIN 停下")
+    wait_prompt(m)
+    type_text(m, "fg\n")
+    m.wait_for(lambda mm: rows()[-1:] == ["cat"], timeout=3, what="fg 把 cat 拿到前台")
+    type_text(m, "hi\n")
+    m.wait_for(lambda mm: rows()[-2:] == ["hi", "hi"], timeout=3, what="到了前台能读终端：回显 hi，cat 打印 hi")
+    m.sendkeys(["ctrl-d"])
+    wait_prompt(m)
+
+    stop("sleep 50 | sleep 60", "[1] stopped sleep 50 | sleep 60")
+    ps = [r.split() for r in run_command(m, "ps | grep sleep")]
+    check(len(ps) == 2 and all(r[2] == "T" for r in ps), f"管道是一个作业：两个 sleep 都停下了：{ps!r}")
+    check(run_command(m, "kill %1") == [], "kill %1 发给整个进程组，作业停着就再发 SIGCONT")
+    m.wait_for(lambda mm: run_command(mm, "jobs") == [] and run_command(mm, "ps | grep sleep") == [], timeout=5,
+               what="两个 sleep 都结束了，作业表空了")
+    check(run_command(m, "kill %3") == ["sh: kill: %3: no such job"], "没有的作业")
+
+    out = run_command(m, "sleep 100 &")
+    pid = out[0][1:-1]
+    check(run_command(m, f"kill -19 {pid}") == [] and run_command(m, "jobs") == ["[1] stopped sleep 100"], "kill -19（SIGSTOP）停下后台作业")
+    check(run_command(m, f"kill -18 {pid}") == [] and run_command(m, "jobs") == ["[1] running sleep 100"],
+          "kill -18（SIGCONT）让它接着运行，jobs 问过内核，显示 running")
+    check(run_command(m, "kill -9 %1") == [], "kill -9 %1")
+    m.wait_for(lambda mm: run_command(mm, "jobs") == [], timeout=5, what="作业被 SIGKILL 结束")
+    wait_prompt(m)
+    m.sendkeys(["ctrl-z"])
+    time.sleep(0.3)
+    check(rows()[-1] == "$", f"在提示符上按 Ctrl+Z：shell 自己不停下，什么也不发生：{rows()[-1:]!r}")
+    check(run_command(m, "echo alive") == ["alive"], "shell 照常")
+
+    # su 出一个新的 shell，在里面停下一个作业，再 exit：停着的 sleep 没人管了，收到 SIGHUP 结束
+    wait_prompt(m)
+    type_text(m, "su user\n")
+    m.wait_for(lambda mm: rows()[-2:] == ["shell on hda: try help, ls /bin, cat /hello.txt, ps", "$"], timeout=5, what="user 的 shell")
+    stop("sleep 77", "[1] stopped sleep 77")
+    check(run_command(m, "exit") == [], "带着停着的作业退出")
+    m.wait_for(lambda mm: "killed by signal 1 (SIGHUP)" in message_row(mm), timeout=3, what="停着的 sleep 收到 SIGHUP 结束")
+    check(run_command(m, "ps | grep sleep") == [], "sleep 77 没了")
+    check(run_command(m, "jobs") == [], "外面的 shell 没有作业")
+
+
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_console_scroll,
                 test_idle_in_hlt, test_demand_paging, test_fork_address_spaces, test_syscall_gate, test_user_setup, test_user_task,
-                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep, test_cache, test_ln_mv, test_script, test_shell_input, test_script_edge_cases, test_clock, test_stderr, test_nice_shell, test_users, test_login, test_serial, test_mount, test_demand_loading, test_raw_tty, test_line_edit, test_shell_language]
+                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep, test_cache, test_ln_mv, test_script, test_shell_input, test_script_edge_cases, test_clock, test_stderr, test_nice_shell, test_users, test_login, test_serial, test_mount, test_demand_loading, test_raw_tty, test_line_edit, test_shell_language, test_job_control]
 SEPARATE_TESTS = [test_syscalls, test_page_alloc, test_double_free, test_hd_rw, test_early_key, test_keyboard_edge_cases, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,
                   test_big_kernel, test_user_write_kernel, test_user_privileged,
                   test_user_bad_pointer, test_user_exit, test_all_tasks_exit,
                   test_nmi_in_user_mode, test_user_write_code, test_preemption,
-                  test_deep_stack, test_wild_read, test_fork_isolation, test_waitpid, test_file_system, test_exec, test_pipe, test_fs_write, test_signal_syscalls, test_brk, test_alarm, test_sync, test_sync_to_disk, test_link, test_time_syscalls, test_fcntl, test_nice, test_permissions, test_no_disk]
+                  test_deep_stack, test_wild_read, test_fork_isolation, test_waitpid, test_file_system, test_exec, test_pipe, test_fs_write, test_signal_syscalls, test_brk, test_alarm, test_sync, test_sync_to_disk, test_link, test_time_syscalls, test_fcntl, test_nice, test_permissions, test_stop_signals, test_no_disk]
 
 
 def main():
