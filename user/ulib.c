@@ -203,6 +203,27 @@ void *realloc(void *p, uint32_t n)
     return q;
 }
 
+void print_int(int32_t n)
+{
+    if (n < 0)
+        print("-");
+    print_num(n < 0 ? 0u - (uint32_t)n : (uint32_t)n);
+}
+
+void write_ticks(int32_t fd, uint32_t ticks)
+{
+    char buf[16];
+    int i = sizeof(buf);
+    buf[--i] = (char)('0' + ticks % 10);
+    buf[--i] = (char)('0' + ticks / 10 % 10);
+    buf[--i] = '.';
+    uint32_t s = ticks / 100;       /* 一秒 100 个 tick */
+    do
+        buf[--i] = (char)('0' + s % 10);
+    while ((s /= 10) != 0);
+    write(fd, buf + i, sizeof(buf) - (uint32_t)i);
+}
+
 void print_width(uint32_t n, uint32_t width, char pad)
 {
     char c[2] = { pad, '\0' };

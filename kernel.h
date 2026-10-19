@@ -110,7 +110,7 @@ void timer_init(uint32_t hz);
 void time_init(void);
 uint32_t current_time(void);
 void clock_show(void);
-void timer_handle(void);
+void timer_handle(int user);
 
 /* sched.c：任务表、任务切换、睡眠与唤醒 */
 #define NR_TASKS      16            /* 任务槽的个数，槽号就是任务号 */
@@ -118,7 +118,7 @@ void timer_handle(void);
 #define TSS_SEL(n)    ((TSS_GDT_INDEX + (n)) * 8)
 void sched_init(void);
 void sched_start(void);
-void schedule(void);
+void schedule(int user);
 void sched_sleep(uint32_t ticks);
 int current_pid(void);
 void task_write_char(char ch);
@@ -155,6 +155,9 @@ uint32_t sched_set_page_dir(uint32_t dir);
 void sched_set_name(const char *path);
 struct taskinfo;
 int sched_taskinfo(int pid, struct taskinfo *info);
+int sched_nice(int inc);
+struct tms;
+uint32_t sched_times(struct tms *buf);
 int do_exec(const char *path, uint32_t user_argv, struct interrupt_frame *frame);
 #define EXIT_KILLED 0x100           /* 被异常结束时留给父进程的状态：0x100 加异常号 */
 #define EXIT_SIGNAL 0x200           /* 被信号结束时的状态：0x200 加信号编号 */

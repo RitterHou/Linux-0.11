@@ -18,6 +18,8 @@ void print_num(uint32_t n);
 void eprint(const char *s);         /* 写到 2 号描述符（标准错误）：出错的消息不混进管道里的数据 */
 void eprint_num(uint32_t n);
 void print_width(uint32_t n, uint32_t width, char pad);   /* 右对齐到 width 格，前面补 pad（空格或 0） */
+void print_int(int32_t n);          /* 有符号的十进制数：-5 */
+void write_ticks(int32_t fd, uint32_t ticks);   /* tick 数写成秒，两位小数：123 写成 1.23 */
 void print_time(uint32_t t, int seconds);   /* 2026-10-19 05:12（seconds 为 1 时再加 :33），UTC */
 void *sbrk(int32_t increment);      /* 把堆往上推 increment 个字节，返回原来的末尾；失败返回 (void *)-1 */
 void *malloc(uint32_t n);           /* 从堆上要 n 个字节，要不到返回 0 */

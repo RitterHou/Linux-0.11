@@ -11,7 +11,8 @@
  *     后台的子进程改成忽略，exec 之后也不变，所以 Ctrl+C 停不了后台程序，要用 kill。后台运行的脚本也是这样：
  *     运行它的 sh 一开始就忽略 SIGINT，它运行的每条命令也跟着忽略，不然这些命令和前台的 shell 在同一个进程组里，
  *     会被 Ctrl+C 结束。
- *   - 内建命令：cd 换当前目录（不带参数回到根目录），exit [退出码] 退出 shell（init 会再拉起一个），help 显示能用的命令。
+ *   - 内建命令：cd 换当前目录（不带参数回到根目录），exit [退出码] 退出 shell（init 会再拉起一个），
+ *     time 命令… 运行完报告用了多少时间，help 显示能用的命令。
  *     cd 必须是内建的：子进程换了目录，父进程的当前目录不会跟着变。
  *   - sh 脚本：从文件里一行行读命令，不打提示符，# 开头的行是注释；读完就退出。参数之间可以是空格或 Tab，
  *     行尾的回车不算；超过 127 个字节的行报错跳过。脚本的描述符设了 close-on-exec，它运行的命令拿不到。#! 开头、有执行权限的脚本
@@ -345,10 +346,26 @@ int main(int sh_argc, char **sh_argv)
             }
             continue;
         }
+        if (strcmp(argv[0], "time") == 0) {
+            /* time 命令…：运行完在标准错误上报告过了多久、用了多少 CPU 时间（等到的子进程的 cutime、cstime 多了多少） */
+            struct tms before, after;
+            uint32_t start = times(&before);
+            if (argc > 1)
+                run_line(argv + 1, argc - 1, background);
+            uint32_t end = times(&after);
+            eprint("real ");
+            write_ticks(2, end - start);
+            eprint(" user ");
+            write_ticks(2, after.tms_cutime - before.tms_cutime);
+            eprint(" sys ");
+            write_ticks(2, after.tms_cstime - before.tms_cstime);
+            eprint("\n");
+            continue;
+        }
         if (strcmp(argv[0], "help") == 0) {
             print("files: ls cat echo wc grep sort rm ln mv mkdir rmdir chmod touch df sync pwd\n");
-            print("tasks: ps kill sleep date letter hello check\n");
-            print("built in: cd [dir], exit [code], help\n");
+            print("tasks: ps kill sleep nice date letter hello check\n");
+            print("built in: cd [dir], exit [code], time command, help\n");
             print("try: ls /bin | wc, echo hi > /tmp/a, cat < /tmp/a, cd /etc, letter D &\n");
             continue;
         }

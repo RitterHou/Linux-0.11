@@ -969,14 +969,14 @@ def test_all_tasks_exit(_m, _elf):
     d = build_selftest("ALL_EXIT")
     table = symbols(os.path.join(d, "kernel.elf"))
     with Machine(os.path.join(d, "floppy.img")) as m:
-        # 任务 B 先结束，任务 A 写完 5 个 A 后结束，它的消息写在后面
+        # 任务 B 先运行、先结束，任务 A 写完 5 个 A 后结束，它的消息写在后面
         m.wait_for(lambda mm: message_row(mm) == "task 1 exited with code 1", what="任务 A 的结束消息")
         k1 = ticks_value(m)
         time.sleep(1.0)
         check(ticks_value(m) - k1 >= 50, "所有任务结束后定时器应照常工作")
         check(not exception_screen(m)[0], f"不应出现异常面板：{exception_screen(m)[0]!r}")
-        check(task_output(m) == "AbyeAAAA",
-              f"任务 A 写一个 A 就去睡，任务 B 趁机写完 bye 结束，A 再写完剩下的 4 个：{task_output(m)!r}")
+        check(task_output(m) == "byeAAAAA",
+              f"任务 A、B 这一轮的 counter 一样多，先挑任务号大的 B（与 Linux 0.11 相同），B 写完 bye 就结束，A 再写 5 个 A：{task_output(m)!r}")
         for _ in range(10):
             regs = m.registers()
             if regs["HLT"] == 1:
@@ -1147,6 +1147,21 @@ def test_pipe(_m, _elf):
         check(out == "pbwed", f"第 6 行应为 pbwed（p 读写、b 大量数据和读到末尾、w 子进程退出、e 没有读者时写失败、d dup），实际是 {out!r}")
         m.wait_for(lambda mm: mm.screen(4)[3].startswith("memory: 3840/3840 pages free"), timeout=2,
                    what="管道的缓冲区页随两头关闭一起收回")
+
+
+def test_nice(_m, _elf):
+    """nice 和 times：nice 值的范围和继承；nice 0 和 nice 19 抢 CPU 按 20:1 分；两个 nice 0 平分；utime 和 stime 分开记；cutime、cstime"""
+    d = build_selftest("USER_NICE")
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        m.wait_for(lambda mm: message_row(mm) == "task 2 exited with code 0", timeout=25, what="init 的结束消息")
+        out = task_output(m).replace("A", "")
+        expected = "nidfts"
+        meaning = {"n": "nice 返回新的 nice 值，停在 -20～19；priority 是 20 - nice", "i": "fork 和 exec 之后 nice 值不变",
+                   "d": "nice 0 和 nice 19 的两个空转的进程，CPU 至少按 8:1 分（算法是 20:1），nice 19 的没饿死",
+                   "f": "两个 nice 0 的空转进程分得差不多", "t": "用户态空转记在 utime，一直调用 stat 的大半记在 stime",
+                   "s": "收走的子进程用的时间加进了父进程的 cutime、cstime"}
+        for i, ch in enumerate(expected):
+            check(len(out) > i and out[i] == ch, f"第 {i + 1} 项（{meaning[ch]}）没有通过：第 6 行去掉 A 后是 {out!r}，应为 {expected!r}")
 
 
 def test_no_disk(_m, _elf):
@@ -1771,16 +1786,59 @@ def test_stderr(m, elf):
 
 
 # 前几项共用一台正常启动的虚拟机；其余各自启动自检内核。
+def test_nice_shell(m, elf):
+    """nice、ps -l、time：nice 打印和调整 nice 值，后台的 nice -n 5 sleep 在 ps -l 里是 PRI 15、NI 5；time 报告过了多久、用了多少 CPU"""
+    usage = ["usage: nice [-n increment] [command args...]"]
+    for command, expected in [("nice", ["0"]), ("nice -n 3 nice", ["3"]), ("nice nice", ["10"]), ("nice -n -5 nice", ["-5"]),
+                              ("nice -n 30 nice", ["19"]), ("nice -n -30 nice", ["-20"]), ("nice -n 41 nice", usage),
+                              ("nice -n x nice", usage), ("nice -n", usage), ("nice nosuch", ["nice: nosuch: not found"]),
+                              ("nice -n 4", ["4"])]:
+        out = run_command(m, command)
+        check(out == expected, f"{command} 应输出 {expected!r}，实际是 {out!r}")
+    out = run_command(m, "nice -n 5 sleep 3 &")
+    check(len(out) == 1 and re.fullmatch(r"\[\d+\]", out[0]), f"后台运行：{out!r}")
+    pid = out[0][1:-1]
+    out = run_command(m, "ps -l | grep sleep")
+    rows = [r.split() for r in out]
+    check(any(r[0] == pid and r[2:5] == ["S", "15", "5"] and r[-1] == "sleep" for r in rows),
+          f"ps -l：nice 5 的 sleep 每轮 15 个 tick（PRI 15、NI 5），在睡（S）：{out!r}")
+    out = run_command(m, "ps -l")
+    check(out[0] == "PID PPID S PRI  NI    TIME NAME", f"ps -l 的表头：{out[0]!r}")
+    for r in out[1:]:
+        check(re.fullmatch(r" ?\d+ +\d+ [RSZWB] +\d+ +-?\d+ +\d+\.\d\d \S+", r), f"ps -l 每行是任务号、父进程、状态、PRI、NI、TIME、名字：{r!r}")
+    idle = next(r.split() for r in out[1:] if r.split()[-1] == "idle")
+    check(idle[3:6] == ["20", "0", "0.00"], f"任务 0（空闲任务）的时间单独记成空闲比例，不算进 TIME：{idle!r}")
+
+    tm = re.compile(r"real (\d+\.\d\d) user (\d+\.\d\d) sys (\d+\.\d\d)")
+    out = run_command(m, "time sleep 1")
+    g = len(out) == 1 and tm.fullmatch(out[0])
+    check(g and 0.95 <= float(g.group(1)) <= 1.2 and float(g.group(2)) + float(g.group(3)) <= 0.05,
+          f"time sleep 1：过了 1 秒左右，CPU 几乎没用：{out!r}")
+    out = run_command(m, "time check spin")
+    g = len(out) == 1 and tm.fullmatch(out[0])
+    real, user, sys_ = (float(g.group(i)) for i in (1, 2, 3)) if g else (0, 0, 0)
+    check(g and 0.45 <= real <= 0.7 and user >= 0.4 and sys_ <= 0.05 and user + sys_ <= real + 0.02,
+          f"time check spin：在用户态空转半秒，时间几乎都记在 user：{out!r}")
+    out = run_command(m, "time sort /big > /tmp/sorted")
+    g = len(out) == 1 and tm.fullmatch(out[0])
+    real, user, sys_ = (float(g.group(i)) for i in (1, 2, 3)) if g else (0, 0, 0)
+    check(g and user + sys_ <= real + 0.02, f"time sort /big：大半时间在等硬盘，用的 CPU 不超过过了的时间：{out!r}")
+    out = run_command(m, "time")
+    check(out == ["real 0.00 user 0.00 sys 0.00"], f"time 后面没有命令：{out!r}")
+    check(run_command(m, "rm /tmp/sorted") == [], "删掉")
+    m.wait_for(lambda mm: "sleep" not in " ".join(run_command(mm, "ps")), timeout=5, what="后台的 sleep 3 睡完退出")
+
+
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_console_scroll,
                 test_idle_in_hlt, test_demand_paging, test_fork_address_spaces, test_syscall_gate, test_user_setup, test_user_task,
-                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep, test_cache, test_ln_mv, test_script, test_shell_input, test_script_edge_cases, test_clock, test_stderr]
+                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep, test_cache, test_ln_mv, test_script, test_shell_input, test_script_edge_cases, test_clock, test_stderr, test_nice_shell]
 SEPARATE_TESTS = [test_syscalls, test_page_alloc, test_double_free, test_hd_rw, test_early_key, test_keyboard_edge_cases, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,
                   test_big_kernel, test_user_write_kernel, test_user_privileged,
                   test_user_bad_pointer, test_user_exit, test_all_tasks_exit,
                   test_nmi_in_user_mode, test_user_write_code, test_preemption,
-                  test_deep_stack, test_wild_read, test_fork_isolation, test_waitpid, test_file_system, test_exec, test_pipe, test_fs_write, test_signal_syscalls, test_brk, test_alarm, test_sync, test_sync_to_disk, test_link, test_time_syscalls, test_fcntl, test_no_disk]
+                  test_deep_stack, test_wild_read, test_fork_isolation, test_waitpid, test_file_system, test_exec, test_pipe, test_fs_write, test_signal_syscalls, test_brk, test_alarm, test_sync, test_sync_to_disk, test_link, test_time_syscalls, test_fcntl, test_nice, test_no_disk]
 
 
 def main():

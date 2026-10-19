@@ -45,7 +45,9 @@
 #define SYS_UTIME  30               /* utime(path, t)：把文件的修改时间设成 t，t 为 0 就是现在 */
 #define SYS_DUP2   31               /* dup2(old, new)：让描述符 new 也指向 old 打开的文件，new 原来开着的先关掉 */
 #define SYS_FCNTL  32               /* fcntl(fd, cmd, arg)：复制描述符、close-on-exec、打开方式 */
-#define SYS_CALLS  33
+#define SYS_NICE   33               /* nice(inc)：nice 值加上 inc（-20～19），返回新的 nice 值；越大越谦让 */
+#define SYS_TIMES  34               /* times(&tms)：自己和等到的子进程用了多少 CPU 时间，返回开机以来的 tick 数 */
+#define SYS_CALLS  35
 
 /* fsinfo 写回的内容 */
 struct fsinfo {
@@ -117,6 +119,9 @@ static inline void unix_to_date(uint32_t t, struct date *d)
 struct taskinfo {
     int32_t state;                  /* 1 能运行，2 在 sleep 里，3 僵尸，4 在 waitpid 里，5 在等待队列上 */
     int32_t parent;
+    int32_t nice;                   /* -20～19 */
+    int32_t priority;               /* 每一轮能运行几个 tick：20 - nice */
+    uint32_t ticks;                 /* 用了多少 CPU 时间（用户态加内核态的 tick 数） */
     char name[TASK_NAME_LEN];
 };
 
@@ -306,6 +311,25 @@ static inline int32_t dup2(int32_t oldfd, int32_t newfd)
 static inline int32_t fcntl(int32_t fd, int32_t cmd, int32_t arg)
 {
     return syscall3(SYS_FCNTL, (uint32_t)fd, (uint32_t)cmd, (uint32_t)arg);
+}
+
+/* times 写回的内容，单位是 tick（1/100 秒）。字段名与 Linux 0.11 的 include/sys/times.h 相同 */
+struct tms {
+    uint32_t tms_utime;             /* 自己在用户态运行的时间 */
+    uint32_t tms_stime;             /* 自己在内核态运行的时间（系统调用里、缺页处理里） */
+    uint32_t tms_cutime;            /* 等到了的子进程（连同它们等到的子进程）在用户态的时间 */
+    uint32_t tms_cstime;            /* 同上，内核态 */
+};
+
+static inline int32_t nice(int32_t inc)
+{
+    return syscall3(SYS_NICE, (uint32_t)inc, 0, 0);
+}
+
+/* 返回开机以来的 tick 数；buf 可以是 0，只要 tick 数 */
+static inline uint32_t times(struct tms *buf)
+{
+    return (uint32_t)syscall3(SYS_TIMES, (uint32_t)buf, 0, 0);
 }
 
 static inline int32_t chmod(const char *path, uint32_t mode)
