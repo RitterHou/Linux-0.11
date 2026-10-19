@@ -365,7 +365,7 @@ def test_timer_rate(m, elf):
 
 KEY_NAMES = {" ": "spc", "/": "slash", ".": "dot", "-": "minus", "&": "shift-7", "_": "shift-minus",
              "!": "shift-1", "@": "shift-2", "#": "shift-3", "|": "shift-backslash", ">": "shift-dot", "<": "shift-comma",
-             "\n": "ret"}
+             "\\": "backslash", "\n": "ret"}
 
 
 def type_text(m, text):
@@ -417,6 +417,25 @@ def run_command(m, command):
     rows = [r for r in console(m) if r]
     start = len(rows) - 1 - rows[::-1].index(f"$ {command}")
     return rows[start + 1:-1]
+
+
+def run_long(m, command):
+    """和 run_command 一样，不过命令比窗口宽，折成了几行：按拼起来的样子找它（行尾的空格被去掉了，比较时不看空格）。"""
+    wait_prompt(m)
+    type_text(m, command + "\n")
+    typed = ("$ " + command).replace(" ", "")
+    n = (len(command) + 2 + 79) // 80
+    def find(rows):
+        for i in range(len(rows) - n, -1, -1):
+            if "".join(rows[i:i + n]).replace(" ", "") == typed:
+                return i
+        return None
+    def done(mm):
+        rows = [r for r in console(mm) if r]
+        return len(rows) >= 2 and rows[-1] == "$" and find(rows[:-1]) is not None
+    m.wait_for(done, timeout=5, what=f"命令 {command[:30]!r}… 运行完")
+    rows = [r for r in console(m) if r]
+    return rows[find(rows[:-1]) + n:-1]
 
 
 def test_keyboard_echo(m, elf):
@@ -1568,6 +1587,47 @@ def test_shell_input(m, elf):
     run_command(m, "rm /tmp/bg")
 
 
+def test_script_edge_cases(m, elf):
+    """脚本的边角：echo -n/-e；Tab 和行尾回车；超长的行报错跳过；目录和选项；exit 码；脚本的描述符不传下去；数字溢出；太长的命令名；#! 的行尾空白、相对路径的解释器、太长的第一行"""
+    def run_all(cases):
+        for command, expected in cases:
+            out = run_command(m, command) if len(command) + 2 <= 80 else run_long(m, command)
+            check(out == expected, f"{command} 应输出 {expected!r}，实际是 {out!r}")
+
+    run_all([("echo -n ab > /tmp/x", []), ("echo cd >> /tmp/x", []), ("cat /tmp/x", ["abcd"]),
+             ("echo -e a\\tb\\\\ > /tmp/x", []), ("wc /tmp/x", ["1 2 5"]),
+             # Tab 隔开的参数、Tab 缩进、行尾的回车
+             ("echo -e echo\\tone\\r > /tmp/t", []), ("echo -e \\techo\\ttwo >> /tmp/t", []), ("sh /tmp/t", ["one", "two"]),
+             ("echo exit 3 > /tmp/x3", []), ("echo exit 300 > /tmp/x300", []), ("echo check fds > /tmp/f", []),
+             ("sh /tmp", ["sh: /tmp: is a directory"]), ("sh -x /tmp/t", ["sh: -x: unknown option"]),
+             ("sh /tmp/f", ["fds: 0 1 2"]), ("check fds", ["fds: 0 1 2"]),
+             ("sleep 4294967296", ["usage: sleep seconds"]), ("chmod 10000 /tmp/t", ["usage: chmod mode file..."]),
+             ("kill 4294967297", ["kill: 4294967297: cannot signal"]), ("kill -4294967298 1", ["kill: -4294967298: bad signal"])])
+    check(run_command(m, "sh /tmp/x3") == [] and re.fullmatch(r"task \d+ exited with code 3", message_row(m).strip()),
+          f"脚本里的 exit 3：运行脚本的 sh 以 3 退出：{message_row(m)!r}")
+    out = run_command(m, "sh /tmp/x300")
+    check(out == ["sh: exit: 300: bad number"] and message_row(m).endswith("exited with code 0"),
+          f"exit 300 超出 0～255：报错，接着读完脚本，以 0 退出：{out!r} {message_row(m)!r}")
+
+    # 超过 127 个字节的一行：分两次写进去，sh 报错跳过它，接着执行下一行
+    run_all([("echo -n echo " + "a" * 100 + " > /tmp/l", []), ("echo " + "b" * 40 + " >> /tmp/l", []),
+             ("echo echo ok >> /tmp/l", []), ("sh /tmp/l", ["sh: line too long", "ok"])])
+    name = "x" * 123                    # 加上 /bin/ 正好 128 个字节，放不下
+    out = run_long(m, name)
+    check("".join(out) == f"sh: {name}: name too long", f"太长的命令名不截短：{out!r}")
+
+    # #!：行尾的空白和回车去掉；解释器可以是相对路径（从当前目录找起）；第一行太长就运行不了
+    run_all([("echo -e #!/bin/hello one \\r > /tmp/q", []), ("chmod 755 /tmp/q", []), ("/tmp/q x", ["hello one /tmp/q x"]),
+             ("echo -e #!/bin/sh\\r > /tmp/c", []), ("echo -e echo crlf\\r >> /tmp/c", []), ("chmod 755 /tmp/c", []),
+             ("/tmp/c", ["crlf"]),
+             ("echo #!/bin/sh -x > /tmp/o", []), ("chmod 755 /tmp/o", []), ("/tmp/o", ["sh: -x: unknown option"]),
+             ("echo #!bin/sh > /tmp/r", []), ("echo echo rel >> /tmp/r", []), ("chmod 755 /tmp/r", []),
+             ("/tmp/r", ["rel"]), ("cd /tmp", []), ("/tmp/r", ["sh: /tmp/r: not found"]), ("cd /", []),
+             ("echo -n #!/bin/echo " + "a" * 90 + " > /tmp/w", []), ("echo " + "b" * 40 + " >> /tmp/w", []),
+             ("chmod 755 /tmp/w", []), ("/tmp/w", ["sh: /tmp/w: not found"])])
+    for f in ("x", "t", "x3", "x300", "f", "l", "q", "c", "o", "r", "w"):
+        run_command(m, f"rm /tmp/{f}")
+
 
 def utc_now():
     return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
@@ -1615,7 +1675,7 @@ def test_stderr(m, elf):
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_console_scroll,
                 test_idle_in_hlt, test_demand_paging, test_fork_address_spaces, test_syscall_gate, test_user_setup, test_user_task,
-                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep, test_cache, test_ln_mv, test_script, test_shell_input, test_clock, test_stderr]
+                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep, test_cache, test_ln_mv, test_script, test_shell_input, test_script_edge_cases, test_clock, test_stderr]
 SEPARATE_TESTS = [test_syscalls, test_page_alloc, test_double_free, test_hd_rw, test_early_key, test_keyboard_edge_cases, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,
                   test_big_kernel, test_user_write_kernel, test_user_privileged,

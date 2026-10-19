@@ -11,6 +11,8 @@ int main(int argc, char **argv);
 
 uint32_t strlen(const char *s);
 int strcmp(const char *a, const char *b);
+/* 把 base 进制（8 或 10）的数字串放进 *out，返回 1；空串、有别的字符、比 max 大（包括溢出）返回 0 */
+int parse_uint(const char *s, uint32_t base, uint32_t max, uint32_t *out);
 void print(const char *s);          /* 写到 1 号描述符 */
 void print_num(uint32_t n);
 void eprint(const char *s);         /* 写到 2 号描述符（标准错误）：出错的消息不混进管道里的数据 */

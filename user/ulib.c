@@ -31,6 +31,23 @@ uint32_t strlen(const char *s)
     return n;
 }
 
+/* 每加一位之前先看会不会超过 max：n * base + d <= max 就是 n <= (max - d) / base，这样算不会溢出。 */
+int parse_uint(const char *s, uint32_t base, uint32_t max, uint32_t *out)
+{
+    uint32_t n = 0;
+
+    if (*s == '\0')
+        return 0;
+    for (; *s; s++) {
+        uint32_t d = (uint32_t)(*s - '0');
+        if (*s < '0' || d >= base || d > max || n > (max - d) / base)
+            return 0;
+        n = n * base + d;
+    }
+    *out = n;
+    return 1;
+}
+
 int strcmp(const char *a, const char *b)
 {
     while (*a && *a == *b)

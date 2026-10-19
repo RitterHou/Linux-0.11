@@ -12,7 +12,8 @@
  *      系统调用返回时 iret 就落到新程序的第一条指令上。中途失败就返回 -1，旧程序原封不动。
  * 文件开头是 #! 的是脚本：第一行写着解释器的路径，后面可以跟一个参数。那就改去装入解释器，参数排成
  * 解释器的名字、那个参数（有的话）、脚本的路径、原来的 argv[1] 以后。于是 #!/bin/sh 开头的脚本，
- * 运行起来就是 sh 脚本路径 参数…。解释器自己不能又是脚本。Linux 0.11 的 do_execve() 也是这样（tytso 加的）。
+ * 运行起来就是 sh 脚本路径 参数…。解释器自己不能又是脚本。Linux 0.11 的 do_execve() 也是这样（tytso 加的），
+ * 不同的是：它的第一行可以长到 1022 个字节，这里只有 127；它把行尾的空白留在参数里，这里去掉（后来的 Linux 也去掉）。
  * Linux 0.11 读的是 a.out 格式：程序的页在缺页时才从文件里读（do_no_page() 调用 bread_page()），
  * 参数放在栈顶的几页里，同样是改写栈上的 eip 和 esp，让系统调用“返回”到新程序。
  */
@@ -46,7 +47,8 @@ static int elf_ok(const struct elf_header *eh)
 
 /*
  * 看文件是不是 #! 开头的脚本：是的话把解释器的路径放进 interp，重排参数（见文件开头的说明），返回 0；
- * 不是脚本，interp 留空，返回 0；#! 后面没有解释器、参数放不下，返回 -1。
+ * 不是脚本，interp 留空，返回 0；#! 后面没有解释器、第一行太长、参数放不下，返回 -1。
+ * 解释器不是 / 开头的，从当前目录找起，和别的路径一样（Linux 0.11 的 namei() 也从 current->pwd 找起）。
  */
 static int script(const char *path, const struct minix_inode *ip, char *interp, char *args, uint32_t *used,
                   uint32_t *offsets, uint32_t *argc)
@@ -58,29 +60,41 @@ static int script(const char *path, const struct minix_inode *ip, char *interp, 
     if (n < 2 || line[0] != '#' || line[1] != '!')
         return 0;
     line[n] = '\0';
+    char *end = line + 2;
+    while (*end && *end != '\n')
+        end++;
+    if (*end != '\n' && n == (int32_t)sizeof(line) - 1)
+        return -1;                  /* 第一行太长：截短了，解释器的参数就不是写的那样了 */
+    *end = '\0';
+    while (end > line + 2 && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r'))
+        *--end = '\0';             /* 行尾的空白和回车不要：Windows 写的脚本每行末尾有 \r */
     char *p = line + 2, *arg = 0;
     while (*p == ' ' || *p == '\t')
         p++;
     char *start = p;
-    while (*p && *p != ' ' && *p != '\t' && *p != '\n')
+    while (*p && *p != ' ' && *p != '\t')
         p++;
     if (p == start)
         return -1;                  /* #! 后面没有解释器 */
-    char end = *p;
-    *p = '\0';
-    if (end == ' ' || end == '\t') {   /* 解释器后面的整段（到行尾）算一个参数 */
-        arg = p + 1;
-        while (*arg == ' ' || *arg == '\t')
-            arg++;
-        char *q = arg;
-        while (*q && *q != '\n')
-            q++;
-        *q = '\0';
-        if (*arg == '\0')
-            arg = 0;
-    } else if (end != '\n' && n == (int32_t)sizeof(line) - 1) {
-        return -1;                  /* 第一行太长 */
+    if (*p) {                       /* 解释器后面的整段（到行尾）算一个参数 */
+        *p++ = '\0';
+        while (*p == ' ' || *p == '\t')
+            p++;
+        arg = p;
     }
+    uint32_t ni = 0;                /* 先拼好解释器的路径：太长就失败，参数还没动 */
+    if (start[0] != '/') {
+        for (const char *c = current_cwd(); *c; c++)
+            interp[ni++] = *c;
+        if (interp[ni - 1] != '/')
+            interp[ni++] = '/';
+    }
+    for (const char *c = start; *c; c++) {
+        if (ni == PATH_MAX - 1)
+            return -1;
+        interp[ni++] = *c;
+    }
+    interp[ni] = '\0';
     const char *base = start;
     for (const char *q = start; *q; q++)
         if (*q == '/')
@@ -110,10 +124,6 @@ static int script(const char *path, const struct minix_inode *ip, char *interp, 
         offsets[i] = noff[i];
     *argc = nargc;
     *used = nused;
-    uint32_t i = 0;
-    for (; start[i]; i++)
-        interp[i] = start[i];
-    interp[i] = '\0';
     return 0;
 }
 
