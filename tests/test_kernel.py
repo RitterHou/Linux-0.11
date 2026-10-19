@@ -1149,6 +1149,20 @@ def test_alarm(_m, _elf):
                    what="子进程的内存都收回（只剩任务 A 的内核栈）")
 
 
+def test_sync(_m, _elf):
+    """延迟写回：新建文件时一块也不写盘；sync 正好写回那么多块；写 40 KB 时换块写回；从硬盘读回来逐字节核对；删掉后 df 回到原样"""
+    d = build_selftest("USER_SYNC")
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        m.wait_for(lambda mm: message_row(mm) == "task 2 exited with code 0", timeout=15, what="init 的结束消息")
+        out = task_output(m).replace("A", "")
+        expected = "dsewr"
+        meaning = {"d": "新建 3 KB 的文件：多了脏块，硬盘上一块也没写", "s": "sync 把脏块都写回，块数对得上；再 sync 不用写",
+                   "e": "写 40 KB：换块时脏块先写回，没 sync 也写了", "w": "读回来的内容逐字节对（换出去的块写回了硬盘）",
+                   "r": "删掉再 sync：块和 i 节点都收回，没有脏块"}
+        for i, ch in enumerate(expected):
+            check(len(out) > i and out[i] == ch, f"第 {i + 1} 项（{meaning[ch]}）没有通过：第 6 行去掉 A 后是 {out!r}，应为 {expected!r}")
+
+
 def test_fs_write(_m, _elf):
     """写文件：O_EXCL、读写权限、O_TRUNC、O_APPEND、删掉开着的文件、目录的错误、同一个文件开两次共用 i 节点"""
     d = build_selftest("USER_FSWRITE")
@@ -1225,7 +1239,8 @@ def test_shell(m, elf):
                what=f"管道和命令都结束后空闲页回到 {free_before}")
 
     df = run_command(m, "df")
-    check(len(df) == 1 and df[0].startswith("blocks: "), f"df 的输出不对：{df!r}")
+    check(len(df) == 2 and df[0].startswith("blocks: ") and df[1].startswith("cache: "), f"df 的输出不对：{df!r}")
+    df = df[0]                      # 第二行是缓冲区缓存的数字，随时在变
     for command, expected in [("echo hello > /tmp/a", []), ("echo world >> /tmp/a", []), ("cat /tmp/a", ["hello", "world"]),
                               ("wc < /tmp/a", ["2 2 12"]), ("mkdir /tmp/d", []), ("echo x > /tmp/d/f", []),
                               ("rmdir /tmp/d", ["rmdir: /tmp/d: cannot remove (not an empty directory?)"]),
@@ -1239,7 +1254,7 @@ def test_shell(m, elf):
     check(run_command(m, "cat /tmp/big2 | wc") == ["2400 7201 614400"], "复制出的文件要用到二级间接块，内容应完全一样")
     used = run_command(m, "df")[0]
     check(run_command(m, "rm /tmp/big2") == [], "rm 应成功")
-    check(run_command(m, "df") == df, f"删掉之后，块和 i 节点都应收回：复制后是 {used!r}，删掉后应回到 {df!r}")
+    check(run_command(m, "df")[0] == df, f"删掉之后，块和 i 节点都应收回：复制后是 {used!r}，删掉后应回到 {df!r}")
 
     out = run_command(m, "letter D &")
     check(len(out) == 1 and re.fullmatch(r"\[\d+\]", out[0]), f"后台运行应打印任务号：{out!r}")
@@ -1379,17 +1394,37 @@ def test_sleep(m, elf):
     check(re.fullmatch(r"task \d+ killed by signal 2 \(SIGINT\)", message_row(m).strip()), f"sleep 被 SIGINT 结束：{message_row(m)!r}")
 
 
+
+def test_cache(m, elf):
+    """缓冲区缓存：写文件后 df 显示脏块；sync 写回；不 sync，init 每隔大约 5 秒也写回"""
+    check(run_command(m, "sync") == [], "sync 不打印东西")
+    before = run_command(m, "df")[1]
+    check(re.fullmatch(r"cache: 0 of 16 buffers dirty; \d+ blocks written since boot", before), f"sync 之后没有脏块：{before!r}")
+    written = int(before.split("; ")[1].split()[0])
+    check(run_command(m, "echo hi > /tmp/c1") == [], "写文件")
+    after = run_command(m, "df")[1]
+    # 一般是 5 块脏的、一块也没写；init 的 sync 恰好在这中间的话，就是已经写回了这 5 块
+    check(after in (f"cache: 5 of 16 buffers dirty; {written} blocks written since boot",
+                    f"cache: 0 of 16 buffers dirty; {written + 5} blocks written since boot"),
+          f"新建一个文件弄脏 5 块（i 节点位图、区块位图、i 节点表、目录、数据），sync 之前一块也不写盘：{after!r}")
+    m.wait_for(lambda mm: run_command(mm, "df")[1].startswith("cache: 0 of 16"), timeout=12,
+               what="init 每隔大约 5 秒 sync 一次，脏块写回")
+    out = run_command(m, "df")[1]
+    check(out == f"cache: 0 of 16 buffers dirty; {written + 5} blocks written since boot", f"写回了正好 5 块：{out!r}")
+    check(run_command(m, "rm /tmp/c1") == [] and run_command(m, "cat /tmp/c1") == ["cat: /tmp/c1: cannot open"], "删掉")
+
+
 # 前几项共用一台正常启动的虚拟机；其余各自启动自检内核。
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_console_scroll,
                 test_idle_in_hlt, test_demand_paging, test_fork_address_spaces, test_syscall_gate, test_user_setup, test_user_task,
-                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep]
+                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep, test_cache]
 SEPARATE_TESTS = [test_syscalls, test_page_alloc, test_double_free, test_hd_rw, test_early_key, test_keyboard_edge_cases, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,
                   test_big_kernel, test_user_write_kernel, test_user_privileged,
                   test_user_bad_pointer, test_user_exit, test_all_tasks_exit,
                   test_nmi_in_user_mode, test_user_write_code, test_preemption,
-                  test_deep_stack, test_wild_read, test_fork_isolation, test_waitpid, test_file_system, test_exec, test_pipe, test_fs_write, test_signal_syscalls, test_brk, test_alarm, test_no_disk]
+                  test_deep_stack, test_wild_read, test_fork_isolation, test_waitpid, test_file_system, test_exec, test_pipe, test_fs_write, test_signal_syscalls, test_brk, test_alarm, test_sync, test_no_disk]
 
 
 def main():

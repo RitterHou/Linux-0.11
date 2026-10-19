@@ -943,6 +943,61 @@ void user_main(void)
     res[nres++] = ok ? 'e' : 'E';
     write(1, res, (uint32_t)nres);
     exit(0);
+#elif SELFTEST == SELFTEST_USER_SYNC
+    /*
+     * 每一项通过就写一个字母，期望第 6 行（去掉任务 A 的 A）是 dsewr（fsinfo 报告脏块数和开机以来写回的块数）：
+     *   d：新建一个 3 KB 的文件：缓冲区里多了几块脏的，硬盘上一块也没写。
+     *   s：sync 返回 0：脏块都写回了，写回的块数正好多了刚才那么多；再 sync 一次，一块也不用写。
+     *   e：写一个 40 KB 的文件：比 16 个缓冲区还多，换块时脏块先写回硬盘，没 sync 也写了不少，脏的最多 16 块。
+     *   w：从头读这个文件，逐字节核对：前面的块早被换出去了，是从硬盘读回来的，写回的内容没错。
+     *   r：删掉两个文件再 sync：块和 i 节点都收回，没有脏块，df 的数字回到开始时的样子。
+     */
+    struct fsinfo a, b, c, d;
+    static char buf[512];
+    fsinfo(&a);
+    int32_t fd = open("/tmp/f", O_WRONLY | O_CREAT);
+    for (int i = 0; i < 6; i++)
+        write(fd, buf, sizeof(buf));
+    close(fd);
+    fsinfo(&b);
+    int ok = a.dirty == 0 && b.dirty > 0 && b.written == a.written;
+    write(1, ok ? "d" : "D", 1);
+
+    ok = sync() == 0;
+    fsinfo(&c);
+    ok &= c.dirty == 0 && c.written == b.written + b.dirty;
+    sync();
+    fsinfo(&d);
+    ok &= d.written == c.written;
+    write(1, ok ? "s" : "S", 1);
+
+    fd = open("/tmp/g", O_WRONLY | O_CREAT);
+    for (int k = 0; k < 80; k++) {
+        for (int i = 0; i < 512; i++)
+            buf[i] = (char)(k * 7 + i);
+        write(fd, buf, sizeof(buf));
+    }
+    close(fd);
+    fsinfo(&b);
+    ok = b.written > d.written + 16 && b.dirty <= b.buffers;
+    write(1, ok ? "e" : "E", 1);
+
+    fd = open("/tmp/g", O_RDONLY);
+    ok = 1;
+    for (int k = 0; k < 80; k++) {
+        ok &= read(fd, buf, sizeof(buf)) == 512;
+        for (int i = 0; i < 512; i++)
+            ok &= buf[i] == (char)(k * 7 + i);
+    }
+    ok &= read(fd, buf, sizeof(buf)) == 0;
+    close(fd);
+    write(1, ok ? "w" : "W", 1);
+
+    ok = unlink("/tmp/f") == 0 && unlink("/tmp/g") == 0 && sync() == 0;
+    fsinfo(&c);
+    ok &= c.dirty == 0 && c.free_blocks == a.free_blocks && c.free_inodes == a.free_inodes;
+    write(1, ok ? "r" : "R", 1);
+    exit(0);
 #elif SELFTEST == SELFTEST_ALL_EXIT
     write(1, "bye", 3);
     exit(2);
@@ -973,14 +1028,20 @@ void user_main(void)
      * 把控制台 /dev/tty0 打开三次，正好得到 0、1、2 号描述符，再 exec /bin/sh。
      * 之后 init 一边写 B，一边收走结束了的子进程；shell 退出了就再拉起一个。shell 一下子就退出了
      * （比如没有硬盘，exec 不了），就隔 1 秒再试，免得一刻不停地 fork；fork 失败了也隔 1 秒再试。
+     * init 还每隔大约 5 秒调用一次 sync，把缓冲区缓存里改过的块写回硬盘，就像 Linux 0.11 的 update 进程。
      * 自检内核不拉起 shell：它们要用控制台窗口检查键盘回显，shell 的提示符会混进去。
      */
     int32_t shell = start_shell();
     int age = 0, wait = 0;          /* shell 活了几圈（每圈约 2 个 tick）；还要等几圈再拉起 */
+    int rounds = 0;
     for (;;) {
         write(1, &letter, 1);
         sleep(2);
         age++;
+        if (++rounds == 250) {      /* 250 圈约 5 秒 */
+            rounds = 0;
+            sync();
+        }
         int32_t pid;
         while ((pid = waitpid(-1, 0, WNOHANG)) > 0)
             if (pid == shell) {
