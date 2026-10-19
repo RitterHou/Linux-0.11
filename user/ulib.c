@@ -177,6 +177,57 @@ int getgrgid(uint32_t gid, char *name, uint32_t size)
     return 1;
 }
 
+void hash_password(const char *name, const char *password, char out[17])
+{
+    uint64_t h = 0xCBF29CE484222325ull;
+    for (int round = 0; round < 1000; round++) {
+        for (const char *parts[3] = { name, ":", password }, **q = parts; q < parts + 3; q++)
+            for (const char *p = *q; *p; p++) {
+                h ^= (uint8_t)*p;
+                h *= 0x100000001B3ull;
+            }
+    }
+    for (int i = 15; i >= 0; i--, h >>= 4)
+        out[i] = "0123456789abcdef"[h & 15];
+    out[16] = '\0';
+}
+
+int check_password(const char *name, const char *password)
+{
+    char *f[2], want[17];
+    hash_password(name, password, want);
+    return find_line("/etc/shadow", 0, name, f, 2) && strcmp(f[1], want) == 0;
+}
+
+int32_t read_text_line(char *buf, uint32_t size)
+{
+    int32_t n = read(0, buf, size - 1);
+    if (n <= 0)
+        return -1;
+    if (buf[n - 1] == '\n')
+        n--;
+    buf[n] = '\0';
+    return n;
+}
+
+int32_t read_password(const char *prompt, char *buf, uint32_t size)
+{
+    struct termios t;
+    int tty = ioctl(0, TCGETS, &t) == 0;
+    print(prompt);
+    if (tty) {
+        t.c_lflag &= ~(uint32_t)ECHO;
+        ioctl(0, TCSETS, &t);
+    }
+    int32_t n = read_text_line(buf, size);
+    if (tty) {
+        t.c_lflag |= ECHO;
+        ioctl(0, TCSETS, &t);
+        print("\n");               /* 回显关着，敲的回车也没显示 */
+    }
+    return n;
+}
+
 /* 堆：brk 往上推就行，用到的页缺页时内核才补上。 */
 void *sbrk(int32_t increment)
 {

@@ -34,6 +34,16 @@ int getpwnam(const char *name, struct passwd *pw);
 int getpwuid(uint32_t uid, struct passwd *pw);
 int getgrnam(const char *name, uint32_t *gid);
 int getgrgid(uint32_t gid, char *name, uint32_t size);
+/*
+ * 密码：/etc/shadow（只有 root 能读）里每行是 名字:散列。hash_password() 把“名字:密码”算成 16 个十六进制数字
+ * （见 tools/mkshadow.py 的说明）；check_password() 读 shadow 比一比，读不了（不是 root）也算不对。
+ * read_password() 打印提示，关掉终端的回显读一行（去掉换行），再打开回显、换行；读不到返回 -1。
+ * read_text_line() 从标准输入读一行，去掉换行；Ctrl+D 或出错返回 -1。
+ */
+void hash_password(const char *name, const char *password, char out[17]);
+int check_password(const char *name, const char *password);
+int32_t read_password(const char *prompt, char *buf, uint32_t size);
+int32_t read_text_line(char *buf, uint32_t size);
 void *sbrk(int32_t increment);      /* 把堆往上推 increment 个字节，返回原来的末尾；失败返回 (void *)-1 */
 void *malloc(uint32_t n);           /* 从堆上要 n 个字节，要不到返回 0 */
 void free(void *p);

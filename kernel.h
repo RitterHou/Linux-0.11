@@ -189,6 +189,8 @@ void tty_set_pgrp(int pgrp);
 void tty_release_pgrp(int pgrp);
 int32_t tty_read(void *dst, uint32_t n);
 int32_t tty_write(const void *src, uint32_t n);
+struct termios;
+int tty_ioctl(uint32_t cmd, struct termios *t);
 
 /* keyboard.c：键盘 */
 void keyboard_init(void);

@@ -8,6 +8,7 @@
  *   - Ctrl+D 把这一行（不带换行）交出去，后面跟一个结束标记；行是空的，读的程序就得到 0，知道输入结束了。
  *     Unix 的终端都是这样，cat、wc 读到 0 就停。
  *   - Ctrl+C 丢掉正在编辑的这一行，回显 ^C 和换行，给终端的前台进程组发 SIGINT（tty_intr）。
+ * 关掉回显（termios 的 ECHO，输密码时）以后，敲的字照样进这一行，只是不显示，退格和 ^C 也不显示。
  * read(0) 一次最多读走一行；还没有敲完的行，程序读不到，它就睡下等。
  * 程序 write(1) 的输出也写在这个窗口里，和回显共用一个光标，就像一台真正的终端。
  * Linux 0.11 的终端有三个队列：read_q 存键盘送来的原始字符，copy_to_cooked() 处理退格和回显，
@@ -28,6 +29,14 @@ static char ready[READY_SIZE];
 static uint32_t ready_head, ready_tail;     /* 只增不减，相减就是还没读走的字节数 */
 static struct wait_queue tty_wait;
 static int tty_pgrp;                /* 前台进程组：Ctrl+C 发给这一组；0 表示还没有（自检内核不拉起 shell） */
+static uint32_t tty_lflag = ICANON | ECHO;  /* termios 的 c_lflag：开机时一行一行地读、回显 */
+
+/* 回显一个字符：关了回显就不显示。 */
+static void echo(char ch)
+{
+    if (tty_lflag & ECHO)
+        vga_putc(ch);
+}
 
 /*
  * 进程组的头打开控制台时调用：这一组就成了前台进程组。init 拉起 shell 前先 setsid()，
@@ -55,9 +64,9 @@ void tty_input(char ch)
          * 不回显，也不丢掉已经敲的字符；这里像后来的 Unix 一样回显 ^C，丢掉这一行。
          */
         line_len = 0;
-        vga_putc('^');
-        vga_putc('C');
-        vga_putc('\n');
+        echo('^');
+        echo('C');
+        echo('\n');
         if (tty_pgrp > 0)
             sched_kill(-tty_pgrp, SIGINT);
         return;
@@ -65,13 +74,13 @@ void tty_input(char ch)
     if (ch == '\b') {
         if (line_len > 0) {
             line_len--;
-            vga_putc('\b');
+            echo('\b');
         }
         return;
     }
     if (ch == '\n' || ch == EOF_CHAR) {
         if (ch == '\n')
-            vga_putc('\n');
+            echo('\n');
         if (READY_SIZE - (ready_tail - ready_head) >= line_len + 1) {   /* 放不下就丢掉这一行 */
             for (uint32_t i = 0; i < line_len; i++)
                 ready[ready_tail++ % READY_SIZE] = line[i];
@@ -85,8 +94,24 @@ void tty_input(char ch)
         return;
     if (line_len < LINE_MAX - 1) {
         line[line_len++] = ch;
-        vga_putc(ch);
+        echo(ch);
     }
+}
+
+/*
+ * ioctl：TCGETS 取工作方式，TCSETS 设。现在只认 ECHO；ICANON 还不能关（读的时候总是一行一行的），想关就返回 -1。
+ * Linux 0.11 的 tty_ioctl() 把整个 struct termios 存在 tty->termios 里，copy_to_cooked() 按里面的标志处理每个字符。
+ */
+int tty_ioctl(uint32_t cmd, struct termios *t)
+{
+    if (cmd == TCGETS) {
+        *t = (struct termios){ .c_lflag = tty_lflag };
+        return 0;
+    }
+    if (cmd != TCSETS || !(t->c_lflag & ICANON))
+        return -1;
+    tty_lflag = t->c_lflag & (ICANON | ECHO);
+    return 0;
 }
 
 /*

@@ -93,6 +93,7 @@ make test
 - fork：任务 3 有自己的页目录和内核栈；父子都写过栈之后，栈顶映射到不同的物理页，页表项都已改回可写；用户代码那一页父子共用。自检 `USER_FORK`：子进程把栈上的变量改成 99，父进程看到的仍是 7；`fork()` 在父进程返回 3、在子进程返回 0；父进程不等子进程就结束时，已经结束的子进程也被收走，内存全部收回。
 - 抢占（自检 `USER_SPIN`，用户程序一直空转、从不睡眠）：任务 A 只能等任务 B 这一轮的 20 个 tick 用完才运行，约每 20 个 tick 写一个字母；空闲比例降到 10% 以下。
 - 用户和权限（自检 `USER_PERM`）：init 是 root，先建好 root 的文件，再 fork 一个子进程换成用户 100 逐项检查：`setgid`、`setuid` 以后四个号都是 100，再也换不回 0；别人能读的能读，`/etc/passwd`、root 的 0644 文件写不了，`O_TRUNC` 也算写，0700 的目录读不了；`/` 和 `/etc` 里建不了文件、目录、链接，`/tmp` 里能建，主人和组是 100；`/tmp` 有粘滞位，删不掉 root 放在里面的文件，自己的能删；0644 的程序执行不了，0700 的目录里的文件 stat 不到、进不去；别人的文件 chmod 不了，谁都不能 chown；`utime` 设成现在要有写权限，设成别的时间要是主人；kill 不了 root 的进程，能 kill 自己的；nice 调低不了；setuid root 的 `/bin/id` 打印 `euid=0(root)`。回到 root：能删用户的文件，能进 0700 的目录，一个执行位都没有的程序 root 也执行不了，chown 以后 setuid 位清掉了。在 shell 里（`test_users`）：`id` 是 root；`/tmp` 是 `drwxrwxrwt`，`/home/user` 是 100 的；`chown user`、`chown user:users`、`chown 0:0` 都对，没有的用户和组报错；`chmod 4755`、`2755`、`4644`、`1777`、`1776` 之后 ls -l 显示 `s`、`S`、`t`、`T`。
+- su、login、passwd（`test_login`）：`/etc/shadow` 里是 `名字:散列`，和 `tools/mkshadow.py` 算的一样，权限 `-rw-------`；`su`、`passwd` 是 `-rwsr-xr-x`，`login` 不是；root 运行 `su user` 不用输密码；换成 user 以后 `id` 是 100，读不了 shadow、写不了 `/`、kill 不了 root 的 sleep、调低不了 nice，新建的文件是 100 的；user 运行 `su user` 要输密码，敲的密码不显示；输错 root 的密码报 `wrong password`，输对就变回 root；`passwd` 先问原来的密码再问两遍新的，改了以后旧密码不对、新密码对；user 改不了 root 的密码，root 能直接改 user 的；`login` 输错密码说 `login incorrect` 再问，输对了进 `/home/user`；在 `login:` 那里按 Ctrl+D 退出；`su nosuch` 报没有这个用户。
 - nice 和 CPU 时间（自检 `USER_NICE`）：`nice` 返回新的 nice 值，停在 -20～19，`taskinfo` 读到的 priority 是 20 - nice；fork 出的子进程继承 nice 值，exec 成 sleep 以后也不变；一个 nice 0、一个 nice 19 的子进程一起空转 2 秒，nice 0 的至少分到 8 倍（量出来是 190:10，算法是 20:1），nice 19 的也没饿死；两个 nice 0 的分得差不多（100:100）；用户态空转的时间记在 utime，一直调用 stat 的记在 stime；收走的子进程用的时间正好加进父进程的 cutime、cstime。在 shell 里（`test_nice_shell`）：`nice` 打印 0，`nice -n 3 nice` 打印 3，`nice nice` 打印 10，超出范围的停在 -20 和 19，参数不对报用法；后台的 `nice -n 5 sleep 3` 在 `ps -l` 里是 PRI 15、NI 5；`ps -l` 每行的格式对，空闲任务的 TIME 是 0.00；`time sleep 1` 过了 1 秒左右、CPU 几乎没用，`time check spin` 半秒几乎都记在 user。
 - 寄存器设为已知值后执行 `ud2`：异常面板显示 `#UD`，EAX～EBP、EIP（`ud2` 的地址）、各段寄存器、CR3 都与预期一致，ESP 落在内核栈内，EFLAGS 的 IF 为 1。
 - 除以零显示 `#DE`，EIP 正好指向 `div` 指令；触发未填写的 IDT 表项显示 `#GP`，错误码为 `0x182`。
@@ -269,6 +270,7 @@ DS=0x0010 ES=0x0010 FS=0x0010 GS=0x0010 CR2=0x00000000 CR3=0x00018000
 | 39 | `setuid(uid)` | root 把实际、有效、保存的用户号都换成 `uid`；别人只能把有效用户号换成实际的或保存的 | 0；不允许时 -1 |
 | 40 | `setgid(gid)` | 同上，组号 | 0；不允许、`gid` 大于 255 时 -1 |
 | 41 | `chown(path, uid, gid)` | 改文件的主人和组，`-1` 表示不改；普通文件的 setuid、setgid 位清掉 | 0；不是 root、文件不存在时 -1 |
+| 42 | `ioctl(fd, cmd, &termios)` | `TCGETS` 取、`TCSETS` 设终端的工作方式，现在只认回显（`ECHO`），输密码时关掉；取值与 Linux 0.11 相同 | 0；不是终端、命令不认识、想关 `ICANON` 时 -1 |
 | 其他 | | | -1 |
 
 调用的过程：
@@ -594,6 +596,7 @@ loader 进入保护模式时用的是写在 `loader.bin` 里的 GDT。进入内�
 - 退格删掉这一行的最后一个字符，屏幕上也擦掉，这一行删空了就不能再删：删不到提示符这些程序输出的东西。一行超过屏幕宽度会折到下一行，退格能跨回上一行；
 - 回车把这一行连同换行符放进 `ready` 缓冲区（512 字节的环形缓冲区），叫醒睡在 `tty_wait` 上的任务；
 - Ctrl+D 把这一行（不带换行）交出去，后面跟一个结束标记。这一行是空的，读的程序就得到 0，知道输入结束了：直接运行 `cat` 或 `wc`，敲几行，再按 Ctrl+D。键盘驱动记着左 Ctrl 是否按住，按住时字母变成控制字符，Ctrl+D 是 `0x04`。
+- 回显可以关掉：`ioctl(0, TCSETS, &t)` 把 `t.c_lflag` 里的 `ECHO` 去掉，敲的字照样进这一行，只是不显示，退格和 `^C` 也不显示。输密码时这样做。Linux 0.11 的 `struct termios` 还有一张控制字符表等，`copy_to_cooked()` 按 `L_ECHO(tty)` 决定回不回显；这里的 `struct termios` 只有四个标志字段。
 
 `read()` 从控制台读时，`ready` 里没有敲完的行就睡下等；有，就读走一行（最多 `count` 个字节）。先在关中断时搬进内核的临时缓冲区，开中断后再复制给用户：复制时可能缺页或写时复制。`write()` 写到控制台时，逐个字符交给 `vga_putc()`，每个字符关一下中断，免得和键盘中断里的回显同时移动光标。Linux 0.11 的终端有三个队列：`read_q` 存键盘送来的原始字符，`copy_to_cooked()` 处理退格和回显后放进 `secondary`，`tty_read()` 从 `secondary` 里读；这里把前两步合在键盘中断里做。
 
@@ -620,6 +623,9 @@ init（任务 B，内核映像里的 `user_main()`）先 fork 出写 C 的 `/bin
 | `chmod 权限 文件…` | 用八进制改权限，比如 `chmod 755 脚本`、`chmod 4755 程序`（setuid） |
 | `chown 主人[:组] 文件…` | 改主人和组，名字（查 `/etc/passwd`、`/etc/group`）或号码都行；只有 root 能改 |
 | `id` | 打印用户号和组号，例如 `uid=100(user) gid=100(users)`；运行 setuid 程序时还有 `euid=` |
+| `su [用户]` | 换成另一个用户（默认 root）运行 shell；不是 root 要输他的密码 |
+| `login` | 问用户名和密码，换成那个用户，进家目录运行 shell；要以 root 运行 |
+| `passwd [用户]` | 改密码：普通用户只能改自己的，要先输原来的密码；root 能改任何人的 |
 | `sh [脚本]` | 不给参数是交互的 shell；给了脚本就从文件里读命令 |
 | `df` | 用 `fsinfo` 问出数据块和 i 节点各用了多少，以及缓冲区缓存里有几块是脏的 |
 | `sync` | 把脏块都写回硬盘 |
@@ -680,6 +686,8 @@ shell 运行 `ls /bin | grep e | wc` 时，先建第一个管道，fork 出 ls�
 - **setuid 程序**：exec 的程序文件有 setuid 位（`chmod 4755`，`ls -l` 里是 `-rwsr-xr-x`），有效用户号就换成文件的主人；setgid 位换有效组号。然后有效的记成保存的。所以 root 的 setuid 程序以 root 的身份运行，却知道是谁运行的（实际用户号）。`#!` 脚本自己的 setuid 位不管用，只看解释器的，和 Linux 一样：脚本在 exec 和解释器打开它之间可能被换掉。
 - **setuid、setgid**：有效用户号是 root 的，把三个用户号都换掉，从此再也变不回 root，`su` 和 `login` 就是这样变成别人的；别人只能把有效用户号换成实际的或保存的。
 - **信号和 nice**：root 能给谁都发信号；别人要自己的实际或有效用户号，等于对方的实际或保存的用户号，所以结束不了 root 的程序。只有 root 能调低 nice 值（多要 CPU），别人这样调返回 -1、什么也不改。
+- **密码**：`/etc/passwd` 里的密码一栏是 `x`，真的放在 `/etc/shadow` 里，主人是 root、权限 0600，别人读不了。里面存的不是密码，是“名字:密码”的散列：64 位的 FNV-1a 重复算 1000 遍，用户名当盐，`tools/mkshadow.py` 打包时用同样的算法算好（默认的密码 root 是 `root`，user 是 `user`），`user/ulib.c` 的 `hash_password()` 核对时再算一遍比一比。这只是演示“只存散列”：FNV 算得太快，很容易暴力试出来，真正的系统用专门设计得很慢的算法和随机的盐。
+- **su、login、passwd**：`su [用户]`（默认 root）是 root 的 setuid 程序，所以读得了 shadow；实际用户号不是 root 就要输那个用户的密码，输的时候关掉回显；对了先 `setgid` 再 `setuid` 换成那个用户（先换用户就没权限换组了），再 exec 他的 shell，当前目录不变，退出这个 shell 就回到原来的。`login` 问用户名和密码，三次不对就退出，对了还要进他的家目录；它不是 setuid 程序，要 root 来运行。`passwd [用户]` 也是 root 的 setuid 程序：谁运行它都能写 shadow，但它按实际用户号检查你能改谁的密码，普通用户只能改自己的，还要先输对原来的。这正是 setuid 的用处。
 - Linux 0.11 的 `permission()`、`sys_chmod()`、`sys_chown()`、exec 时的 setuid 和这里相同。不同的是：它没有保存的用户号，`sys_setuid()` 是 `setreuid(uid, uid)`，而且只在 `uid > 0` 时才改，`setuid(0)` 什么也不做；它的 `send_sig()` 只比两边的有效用户号；`utime` 和 `nice` 不查权限；没有粘滞位。
 
 ## 堆：brk 和 malloc
@@ -748,11 +756,12 @@ shell 运行 `ls /bin | grep e | wc` 时，先建第一个管道，fork 出 ls�
 | `exec.c` | exec：读 ELF 文件，建新的地址空间，摆好参数 | `fs/exec.c` |
 | `user/` | 用户程序和它们的小函数库（系统调用、malloc、信号处理函数的返回）、链接脚本 | 无（Linux 0.11 的程序用 libc 编译） |
 | `rootfs/` | 硬盘上文件系统的内容，`/bin` 由 `make` 放进去 | 无 |
-| `tools/mkfs.py` | 把 `build/rootfs/` 打包成 Minix v1 镜像 | Linux 0.11 用 Minix 上的 `mkfs` 做根文件系统 |
+| `tools/mkfs.py` | 把 `build/rootfs/` 打包成 Minix v1 镜像，`--own` 设文件的主人、组和权限 | Linux 0.11 用 Minix 上的 `mkfs` 做根文件系统 |
+| `tools/mkshadow.py` | 生成 `/etc/shadow`：默认密码的散列 | |
 | `tools/mkbig.py` | 生成测试用的 600 KB 大文件 `/big` | 无 |
 | `tools/tour_data.py` | 把最新构建出的地址、i 节点号、块号和文件系统的内容回填进 `docs/tour.html` | 无 |
 | `keyboard.c` | 键盘扫描码转字符，支持 Shift 和 Caps Lock，交给终端 | `kernel/chr_drv/keyboard.S` |
-| `tty.c` | 终端：一行的编辑、回显、退格、Ctrl+D、Ctrl+C，读一行，写控制台 | `kernel/chr_drv/tty_io.c` |
+| `tty.c` | 终端：一行的编辑、回显（可以关掉）、退格、Ctrl+D、Ctrl+C，读一行，写控制台，`ioctl` | `kernel/chr_drv/tty_io.c`、`tty_ioctl.c` |
 | `pipe.c` | 管道：一页的环形缓冲区，读写两头 | `fs/pipe.c` |
 | `vga.c` | 直接写 VGA 显存、移动硬件光标、整数转字符串 | `kernel/chr_drv/console.c` |
 | `string.c` | `memset`、`memcpy`：编译器会把大结构体的赋值和清零编译成对它们的调用 | `include/string.h` |

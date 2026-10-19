@@ -54,7 +54,8 @@
 #define SYS_SETUID 39               /* setuid(uid)：root 把三个用户号都换成 uid；别人只能把有效用户号换回实际的或保存的 */
 #define SYS_SETGID 40               /* setgid(gid)：同上，组号 */
 #define SYS_CHOWN  41               /* chown(path, uid, gid)：改文件的主人和组，只有 root 能改 */
-#define SYS_CALLS  42
+#define SYS_IOCTL  42               /* ioctl(fd, cmd, arg)：取、设终端的工作方式（回显没有），输密码时关掉回显 */
+#define SYS_CALLS  43
 
 /* fsinfo 写回的内容 */
 struct fsinfo {
@@ -378,6 +379,25 @@ static inline int32_t setgid(uint32_t gid)
 static inline int32_t chown(const char *path, uint32_t uid, uint32_t gid)
 {
     return syscall3(SYS_CHOWN, (uint32_t)path, uid, gid);
+}
+
+/*
+ * 终端的工作方式：ioctl(fd, TCGETS, &t) 取，ioctl(fd, TCSETS, &t) 设。命令和标志的取值与 Linux 0.11 的
+ * include/termios.h 相同，不过 struct termios 只有这四个字段（它还有控制字符表 c_cc 等），现在只用 c_lflag 的 ECHO：
+ * 关掉以后敲的字不显示，输密码时用。ICANON（一行一行地交给程序）一直开着，还不能关。
+ * 对不是终端的描述符 TCGETS 返回 -1，所以它也能用来问“这是不是终端”（isatty）。
+ */
+#define TCGETS     0x5401
+#define TCSETS     0x5402
+#define ICANON     0000002
+#define ECHO       0000010
+struct termios {
+    uint32_t c_iflag, c_oflag, c_cflag, c_lflag;
+};
+
+static inline int32_t ioctl(int32_t fd, uint32_t cmd, void *arg)
+{
+    return syscall3(SYS_IOCTL, (uint32_t)fd, cmd, (uint32_t)arg);
 }
 
 static inline int32_t chmod(const char *path, uint32_t mode)
