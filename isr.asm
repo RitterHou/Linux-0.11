@@ -51,6 +51,9 @@ isr_common:
     push esp                    ; 参数：指向栈上的 struct interrupt_frame
     call interrupt_dispatch
     add esp, 4
+; 新的用户任务第一次被调度时也从这里开始：sched.c 的 start_in_kernel() 在它的内核栈顶摆好了一个 interrupt_frame
+global isr_return
+isr_return:
     pop gs
     pop fs
     pop es
