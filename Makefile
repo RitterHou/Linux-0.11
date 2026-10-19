@@ -27,7 +27,7 @@ KERNEL_CFLAGS += -DSELFTEST=SELFTEST_$(SELFTEST)
 endif
 
 KERNEL_OBJS := $(addprefix $(BUILD)/, entry.o isr.o kernel.o vga.o gdt.o \
-	interrupt.o paging.o mem.o hd.o buffer.o fs.o file.o pipe.o exec.o tty.o timer.o sched.o syscall.o keyboard.o selftest.o user.o string.o)
+	interrupt.o paging.o mem.o hd.o buffer.o fs.o file.o pipe.o exec.o tty.o serial.o timer.o sched.o syscall.o keyboard.o selftest.o user.o string.o)
 KERNEL_HEADERS := kernel.h io.h syscall.h selftest.h fs.h
 
 .PHONY: all run test clean
@@ -95,17 +95,18 @@ $(BUILD)/hd.img: tools/mkfs.py tools/mkbig.py tools/mkshadow.py $(ROOTFS_FILES) 
 	for p in $(USER_PROGS); do cp $(BUILD)/user/$$p.elf $(BUILD)/rootfs/bin/$$p; done
 	$(PYTHON) tools/mkbig.py $(BUILD)/rootfs/big
 	$(PYTHON) tools/mkshadow.py $(BUILD)/rootfs/etc/shadow root:root user:user
-	$(PYTHON) tools/mkfs.py $@ $(BUILD)/rootfs --chr /dev/tty0=4,0 --chr /dev/tty1=4,1 \
+	$(PYTHON) tools/mkfs.py $@ $(BUILD)/rootfs --chr /dev/tty0=4,0 --chr /dev/tty1=4,1 --chr /dev/ttyS0=4,64 \
 		--own /tmp=0,0,1777 --own /home/user=100,100,755 --own /etc/shadow=0,0,600 \
 		--own /bin/su=0,0,4755 --own /bin/passwd=0,0,4755
 
+# 运行它的终端窗口接在串口上：串口那头是 login，可以在这里登录（user/user 或 root/root）。signal=off：在这里按 Ctrl+C 交给客户机，不结束 QEMU。
 run: $(BUILD)/floppy.img $(BUILD)/hd.img
 	$(QEMU) -name "Two-stage boot - C kernel" \
 		-machine pc -accel tcg -m 16M \
 		-drive file=$<,format=raw,if=floppy,index=0 \
 		-drive file=$(BUILD)/hd.img,format=raw,if=ide,index=0 \
 		-boot order=a -display $(QEMU_DISPLAY) \
-		-nic none -serial none -monitor none -no-reboot $(QEMU_FLAGS)
+		-nic none -chardev stdio,id=com1,signal=off -serial chardev:com1 -monitor none -no-reboot $(QEMU_FLAGS)
 
 # 在无头 QEMU 中运行全部测试；自检内核由测试脚本按需构建到 build/selftest/ 下。
 test: all

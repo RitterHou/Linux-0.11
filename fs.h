@@ -16,7 +16,7 @@
 #define S_IFDIR 0040000
 #define S_IFREG 0100000
 #define S_IFCHR 0020000             /* 字符设备：i 节点的第一个区块号存的是设备号（主设备号 << 8 | 次设备号） */
-#define TTY_MAJOR 4                 /* 终端：次设备号 0 是控制台（/dev/tty0），1 是第 6 行（/dev/tty1） */
+#define TTY_MAJOR 4                 /* 终端：次设备号 0 是控制台（/dev/tty0），1 是第 6 行（/dev/tty1），64 是串口（/dev/ttyS0） */
 
 /* buffer.c：缓冲区缓存 */
 struct buffer {
@@ -92,7 +92,7 @@ int fs_info(struct fsinfo *info);
 #define NR_OPEN 8                   /* 每个任务最多同时打开 8 个文件 */
 #define FILE_INODE 1                /* 文件系统里的文件或目录 */
 #define FILE_TASKS 2                /* 第 6 行的任务输出区（/dev/tty1） */
-#define FILE_CONSOLE 3              /* 控制台：键盘输入和第 8～18 行的窗口（/dev/tty0） */
+#define FILE_TTY   3                /* 终端：控制台 /dev/tty0（键盘和第 8～18 行的窗口）或串口 /dev/ttyS0，见 f->tty */
 #define FILE_PIPE_READ  4           /* 管道读的一头 */
 #define FILE_PIPE_WRITE 5           /* 管道写的一头 */
 struct file {
@@ -102,6 +102,7 @@ struct file {
     uint32_t pos;
     struct m_inode *ip;             /* 文件系统里的文件：内存里的 i 节点 */
     struct pipe *pipe;              /* 管道的两头指向同一个管道 */
+    int tty;                        /* 终端：TTY_CONSOLE 或 TTY_SERIAL */
 };
 struct file *file_open(const char *path, int flags);
 int file_pipe(struct file **read_end, struct file **write_end);

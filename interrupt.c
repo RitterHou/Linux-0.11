@@ -23,6 +23,7 @@
 #define IRQ_BASE_PIC2 0x28          /* 从片 IRQ8～15 映射到 0x28～0x2F */
 #define IRQ_TIMER     (IRQ_BASE + 0)
 #define IRQ_KEYBOARD  (IRQ_BASE + 1)
+#define IRQ_SERIAL    (IRQ_BASE + 4)    /* COM1 */
 #define IRQ_DISK      (IRQ_BASE + 14)   /* 主 IDE 通道 */
 #define PAGE_FAULT_VECTOR 14
 
@@ -322,6 +323,8 @@ static void dispatch(struct interrupt_frame *frame)
         keyboard_handle();
     else if (vector == IRQ_DISK)
         hd_handle();
+    else if (vector == IRQ_SERIAL)
+        serial_handle();
     sched_idle_wakeup();            /* 叫醒了谁、CPU 又正闲着，就马上切过去 */
 }
 

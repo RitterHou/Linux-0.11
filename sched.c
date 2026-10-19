@@ -80,7 +80,7 @@ struct task {
     uint32_t restorer;              /* 处理函数返回到这里（用户程序里的 sig_restore） */
     int pgrp;                       /* 进程组：Ctrl+C 发给终端的前台进程组里的每个任务；fork 时继承 */
     int leader;                     /* 调用过 setsid，是进程组的头：它打开终端时，终端的前台进程组就是它这一组 */
-    int has_tty;                    /* 进程组的头已经有了控制终端（打开过 /dev/tty0）；结束时把终端的前台进程组清掉 */
+    int ctty;                       /* 进程组的头的控制终端：TTY_CONSOLE 等加一，0 是还没有；结束时把那个终端的前台进程组清掉 */
     int interruptible;              /* 睡在 interruptible_sleep_on 里：信号能叫醒它 */
     uint32_t start_brk;             /* 程序的末尾（.bss 的末尾），堆从这里开始；exec 时设好 */
     uint32_t brk;                   /* 堆的末尾：start_brk 到 brk 之间缺页时补页，再往上到栈区之间不补 */
@@ -663,16 +663,16 @@ void signal_current(int sig)
 }
 
 /*
- * 打开控制台时调用：进程组的头第一次打开它，就成了它的控制终端，返回 1，调用者把终端的前台进程组设成这一组。
+ * 打开终端时调用：进程组的头第一次打开一个终端，那个终端就成了它的控制终端，返回 1，调用者把终端的前台进程组设成这一组。
  * 已经有了控制终端的再打开不算，不会把前台进程组抢过来。Linux 0.11 的 sys_open() 也要求 current->tty < 0。
  */
-int sched_claim_tty(void)
+int sched_claim_tty(int tty)
 {
     struct task *t = &tasks[current_task];
 
-    if (!t->leader || t->has_tty)
+    if (!t->leader || t->ctty)
         return 0;
-    t->has_tty = 1;
+    t->ctty = tty + 1;
     return 1;
 }
 
@@ -951,8 +951,8 @@ void sched_exit(uint32_t status)
         if (f)
             file_put(f);
     }
-    if (t->leader && t->has_tty)
-        tty_release_pgrp(t->pgrp);  /* 终端的前台进程组没了头：Ctrl+C 不再发给这一组。Linux 0.11 的 do_exit() 也这样 */
+    if (t->leader && t->ctty)
+        tty_release_pgrp(t->ctty - 1, t->pgrp);  /* 终端的前台进程组没了头：Ctrl+C 不再发给这一组。Linux 0.11 的 do_exit() 也这样 */
     __asm__ volatile("cli");        /* 不再返回，切到的任务从自己的 TSS 装入 EFLAGS，中断状态随之恢复 */
     if (t->page_dir != kernel_page_dir())
         free_page_dir(t->page_dir);
