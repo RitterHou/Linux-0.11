@@ -165,8 +165,9 @@ class Machine:
         return int(m.group(1), 16)
 
     def sendkeys(self, keys, delay=0.05):
+        # sendkey 默认把键按住 100 毫秒再松开，比两次按键之间的间隔还长：键会叠在一起，连着按的方向键可能丢一个。只按住 10 毫秒
         for key in keys:
-            self.cmd(f"sendkey {key}")
+            self.cmd(f"sendkey {key} 10")
             time.sleep(delay)
 
     def wait_for(self, predicate, timeout=5.0, what="条件"):
@@ -395,7 +396,7 @@ def test_boot_screen(m, elf):
     # 写时复制的次数取决于 fork 之后谁先写栈，不卡死；用掉的页数是 A 的内核栈，init、letter、sh、串口上的 login 各自的
     # 内核栈、页目录、页表、栈页，以及它们用到的程序的页（用到才从硬盘读进来），约 25 页。
     # 缺页至少有 init 的栈页，加上 letter、sh、login 各自用到的代码页和数据页；这几个程序各不相同，没有共用的页
-    match = re.fullmatch(r"memory: (\d+)/3840 pages free  page faults: (\d+)  copy-on-write: (\d+)  shared: 0", rows[3])
+    match = re.fullmatch(r"memory: (\d+)/3840 pages free  faults: (\d+)  cow: (\d+)  shared: 0", rows[3])
     check(match and 3800 <= int(match.group(1)) <= 3825 and int(match.group(2)) >= 4 and int(match.group(3)) >= 2,
           f"第 3 行不对：{rows[3]!r}")
     check(re.fullmatch(r"ticks: \d+( +idle: +\d+%)? +\d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC", rows[4]) is not None, f"第 4 行不对：{rows[4]!r}")
@@ -1105,7 +1106,7 @@ def test_deep_stack(_m, _elf):
         check("k" in task_output(m) and "x" not in task_output(m),
               f"write 读到栈区里没映射的页时内核应补上，返回 1（用户程序写 k）：{task_output(m)!r}")
         row3 = m.screen(4)[3]
-        match = re.fullmatch(r"memory: (\d+)/3840 pages free  page faults: (\d+)  copy-on-write: \d+  shared: \d+", row3)
+        match = re.fullmatch(r"memory: (\d+)/3840 pages free  faults: (\d+)  cow: \d+  shared: \d+", row3)
         check(match is not None, f"第 3 行不对：{row3!r}")
         check(int(match.group(2)) >= 5, f"5 页栈应各缺页一次：{row3!r}")
         check(match.group(1) == "3839", f"任务 B 结束后它的页应全部收回，只剩任务 A 的内核栈：{row3!r}")
@@ -1238,7 +1239,7 @@ def test_no_disk(_m, _elf):
         m.wait_for(lambda mm: {"A", "B", "C"} <= set(task_output(mm)), timeout=3, what="第 6 行的 A、B、C")
         check(m.screen(1)[0][11:12] != "E", "没有硬盘，不应有程序被 exec 装入")
         # 每拉起一次 shell 都要 fork，就有写时复制；隔 1 秒才重试的话，2 秒里只会多几次
-        cow = lambda: int(re.search(r"copy-on-write: (\d+)", m.screen(4)[3]).group(1))
+        cow = lambda: int(re.search(r"cow: (\d+)", m.screen(4)[3]).group(1))
         c1 = cow()
         time.sleep(2.0)
         c2 = cow()
@@ -2033,7 +2034,15 @@ def test_serial(m, elf):
     check(b"only-console" not in m.serial_buf, "控制台的输出不出现在串口上")
     m.serial_send("ecx\x7fho hi\r")
     out = m.serial_wait("$ ")
-    check(out == "ecx\b \bho hi\r\nhi\r\n$ ", f"终端的退格键送来 DEL：删掉 x，回显“退格、空格、退格”把它擦掉：{out!r}")
+    check(out == "ecx\x1b[1D\x1b[Kho hi\r\nhi\r\n$ ",
+          f"终端的退格键送来 DEL，当成退格：shell 的行编辑删掉 x，用转义序列退一格、擦到行尾：{out!r}")
+    m.serial_send("cat\r")
+    m.serial_wait("cat\r\n")
+    m.serial_send("ab\x7fc\r")
+    out = m.serial_wait("c\r\nac\r\n", what="cat 在规范模式下读，读到 ac")
+    check(out == "ab\b \bc\r\nac\r\n", f"规范模式由终端回显：退格发成“退格、空格、退格”把 b 擦掉：{out!r}")
+    m.serial_send("\x04")
+    m.serial_wait("$ ")
 
     m.serial_send("sleep 10\r")
     time.sleep(0.5)
@@ -2121,7 +2130,7 @@ def entry_row(m, path, name):
 def test_demand_loading(m, elf):
     """按需装入：程序的页用到才从硬盘读；同一个程序同时运行两份，只读的页共用；运行中的程序删掉了照样运行；运行中的程序写不了，开着写的文件也运行不了"""
     def memory():
-        g = re.fullmatch(r"memory: (\d+)/3840 pages free  page faults: \d+  copy-on-write: \d+  shared: (\d+)", m.screen(4)[3])
+        g = re.fullmatch(r"memory: (\d+)/3840 pages free  faults: \d+  cow: \d+  shared: (\d+)", m.screen(4)[3])
         check(g, f"第 3 行：{m.screen(4)[3]!r}")
         return int(g.group(1)), int(g.group(2))
 
@@ -2210,10 +2219,74 @@ def test_raw_tty(m, elf):
     m.serial_wait("login: ")
 
 
+def test_line_edit(m, elf):
+    """shell 的行编辑：左右方向键在行中间插入、退格；Home、End；上下方向键翻历史；Ctrl+C 丢掉这一行；串口上一样"""
+    rows = lambda: [r for r in console(m) if r]
+
+    def edit(keys, shown, output):
+        wait_prompt(m)
+        for k in keys:
+            if isinstance(k, list):
+                m.sendkeys(k)
+            else:
+                type_text(m, k)
+        m.wait_for(lambda mm: rows()[-1:] == [shown], timeout=3, what=f"编辑中的这一行显示成 {shown!r}")
+        type_text(m, "\n")
+        m.wait_for(lambda mm: rows()[-3:] == [shown, output, "$"], timeout=3, what=f"回车执行，打印 {output!r}")
+
+    edit(["echo hllo", ["left"] * 3, "e"], "$ echo hello", "hello")
+    edit(["echo abXc", ["left", "backspace"]], "$ echo abc", "abc")
+    edit(["cho x", ["home"], "e", ["end"], "y"], "$ echo xy", "xy")
+    edit(["echo ab", ["left", "left", "left", "right"], "-"], "$ echo -ab", "-ab")      # 左移三格到空格前，右移一格到 a 前
+    edit(["xx", ["backspace", "backspace", "backspace", "left", "right"], "echo ok"], "$ echo ok", "ok")
+    for keys, shown in [(["up"], "$ echo ok"), (["up"], "$ echo -ab"), (["up", "up", "up"], "$ echo hello"),
+                        (["up"], "$ echo hello"), (["down"], "$ echo abc"), (["down", "down", "down"], "$ echo ok")]:
+        m.sendkeys(keys)
+        m.wait_for(lambda mm: rows()[-1:] == [shown], timeout=3, what=f"翻历史：{keys} 以后显示 {shown!r}")
+    m.sendkeys(["down"])
+    m.wait_for(lambda mm: rows()[-1:] == ["$"], timeout=3, what="翻到最下面是正在敲的空行")
+    type_text(m, "echo new")
+    m.sendkeys(["up", "down"])
+    m.wait_for(lambda mm: rows()[-1:] == ["$ echo new"], timeout=3, what="翻上去再翻回来，正在敲的那一行还在")
+    m.sendkeys(["ctrl-c"])
+    m.wait_for(lambda mm: rows()[-2:] == ["$ echo new^C", "$"], timeout=3, what="Ctrl+C 丢掉这一行")
+    m.sendkeys(["up"])
+    m.wait_for(lambda mm: rows()[-1:] == ["$ echo ok"], timeout=3, what="丢掉的那一行不进历史")
+    m.sendkeys(["ctrl-c"])
+    wait_prompt(m)
+    out = run_command(m, "cat /hello.txt | wc")
+    check(out == ["1 8 41"], f"行编辑以后换回规范模式运行命令：{out!r}")
+    wait_prompt(m)
+    type_text(m, "check raw\n")
+    m.wait_for(lambda mm: rows()[-1:] == ["$ check raw"], timeout=3, what="check raw 把终端换成原始模式")
+    m.sendkeys(["ctrl-c"])
+    wait_prompt(m)
+    type_text(m, "wc\n")
+    m.wait_for(lambda mm: rows()[-1:] == ["$ wc"], timeout=3, what="wc 开始读终端")
+    type_text(m, "a b\n")
+    m.sendkeys(["ctrl-d"])
+    m.wait_for(lambda mm: rows()[-3:] == ["a b", "1 2 4", "$"], timeout=3,
+               what="check raw 留下原始模式就被结束了，shell 换回规范模式再运行 wc：回显、一行一行地读、Ctrl+D 结束")
+
+    m.serial_send("user\r")
+    m.serial_wait("password: ")
+    m.serial_send("user\r")
+    m.serial_wait("$ ")
+    m.serial_send("echo serial\r")
+    m.serial_wait("serial\r\n$ ")
+    m.serial_send("\x1b[A")
+    out = m.serial_wait("echo serial", what="串口上按上箭头翻出上一条")
+    m.serial_send("\x1b[D\x1b[D!\r")
+    out = m.serial_wait("$ ", what="在串口上也能挪光标插入")
+    check(out.endswith("seri!al\r\n$ "), f"串口上翻历史、往左挪两格插入 !：{out!r}")
+    m.serial_send("exit\r")
+    m.serial_wait("login: ")
+
+
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_console_scroll,
                 test_idle_in_hlt, test_demand_paging, test_fork_address_spaces, test_syscall_gate, test_user_setup, test_user_task,
-                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep, test_cache, test_ln_mv, test_script, test_shell_input, test_script_edge_cases, test_clock, test_stderr, test_nice_shell, test_users, test_login, test_serial, test_mount, test_demand_loading, test_raw_tty]
+                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep, test_cache, test_ln_mv, test_script, test_shell_input, test_script_edge_cases, test_clock, test_stderr, test_nice_shell, test_users, test_login, test_serial, test_mount, test_demand_loading, test_raw_tty, test_line_edit]
 SEPARATE_TESTS = [test_syscalls, test_page_alloc, test_double_free, test_hd_rw, test_early_key, test_keyboard_edge_cases, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,
                   test_big_kernel, test_user_write_kernel, test_user_privileged,

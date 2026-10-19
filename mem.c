@@ -29,9 +29,9 @@ void mem_show(void)
     line_append_dec(&line, free_pages);
     line_append(&line, "/");
     line_append_dec(&line, PAGING_PAGES);
-    line_append(&line, " pages free  page faults: ");
+    line_append(&line, " pages free  faults: ");      /* 写短一点：几个数都变大了也放得进 80 列 */
     line_append_dec(&line, page_faults);
-    line_append(&line, "  copy-on-write: ");
+    line_append(&line, "  cow: ");
     line_append_dec(&line, cow_faults);
     line_append(&line, "  shared: ");
     line_append_dec(&line, shared_pages);
