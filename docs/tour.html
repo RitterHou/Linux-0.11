@@ -515,10 +515,10 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
     <ol class="milestones" id="milestones" aria-label="第一行每个字母代表的里程碑"></ol>
   </div>
   <div class="stats">
-    <span><b data-fact="loc">7,791</b>行汇编与 C</span>
-    <span><b data-fact="kernelKB">40 KB</b>内核</span>
-    <span><b data-fact="commits">57</b>个提交</span>
-    <span><b data-fact="tests">56</b>项自动化测试</span>
+    <span><b data-fact="loc">8,182</b>行汇编与 C</span>
+    <span><b data-fact="kernelKB">44 KB</b>内核</span>
+    <span><b data-fact="commits">60</b>个提交</span>
+    <span><b data-fact="tests">59</b>项自动化测试</span>
   </div>
 </header>
 
@@ -869,6 +869,7 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
       <li>i 节点里有 9 个块号：前 7 个直接指向数据块；第 8 个指向一个间接块，里面是 512 个块号；第 9 个指向二级间接块。600 KB 的测试文件 <code>/big</code> 要用到二级间接块。</li>
       <li>缓冲区缓存只有 16 个缓冲区。没有的块，就挑一个没人在用、最久没用过的缓冲区换掉。别的任务正在读同一块，就睡下等它读完。</li>
       <li>打开的文件在文件表里占一项，记下 i 节点和读写位置，文件描述符指向它。fork 之后父子共用这一项，读写位置也共用。</li>
+      <li>目录项只是“名字 → i 节点号”，所以一个文件可以有好几个名字：<code>ln a b</code> 在目录里再加一项，指向同一个 i 节点，链接数加一。删掉一个名字（unlink 就是“去掉一个链接”）只是链接数减一，减到 0 才真正收回。<code>mv</code> 就是先 link 新名字、再 unlink 旧名字，内容一个字节也不用搬。</li>
     </ul></details>
   </div>
 </section>
@@ -895,6 +896,7 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
       <li>程序找到终端靠设备文件：<code>/dev/tty0</code> 是控制台，<code>/dev/tty1</code> 是第 6 行。i 节点的类型是字符设备，第一个块号存着设备号 4,0 或 4,1，与 Linux 0.11 相同。init 把 <code>/dev/tty0</code> 打开三次，得到 0、1、2 号描述符，再 exec shell。</li>
       <li>用户程序是 ELF 文件，链接在用户空间的底部 0x40000000：代码页只读，数据页可写，<code>.bss</code> 是 exec 分出来的清零的页。中途任何一步失败，exec 就收回新的页目录、返回 -1，原来的程序不受影响。</li>
       <li>Linux 0.11 读的是 a.out 格式，程序的页在缺页时才从文件里读，同一个程序的进程可以共用代码页。</li>
+      <li>文件开头是 <code>#!/bin/sh</code> 的是脚本：exec 改去装入第一行写着的解释器，参数排成“解释器、脚本的路径、原来的参数”，于是运行脚本就是 <code>sh 脚本</code>，sh 从文件里一行行读命令。新建的文件没有执行权限，要先 <code>chmod 755</code>。Linux 0.11 的 do_execve() 也这样处理 #!。</li>
     </ul></details>
   </div>
 </section>
@@ -1005,9 +1007,9 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
     <p><code>make test</code> 在后台启动没有窗口的 QEMU，通过它的监视器读显存、读寄存器、翻译地址、模拟按键，逐项核对。需要故意出错的场景，就另外编一个自检内核。</p>
   </div>
   <div class="big3">
-    <div><b data-fact="tests">56</b><span>项测试，一条 <code>make test</code> 全部跑完</span></div>
-    <div><b data-fact="selftests">33</b><span>个自检内核：除零、越权、坏指针、重复释放、fork、waitpid、读写文件、exec、管道、信号、堆……</span></div>
-    <div><b data-fact="commits">57</b><span>个提交：每加一个机制，测试通过后单独提交</span></div>
+    <div><b data-fact="tests">59</b><span>项测试，一条 <code>make test</code> 全部跑完</span></div>
+    <div><b data-fact="selftests">34</b><span>个自检内核：除零、越权、坏指针、重复释放、fork、waitpid、读写文件、exec、管道、信号、堆……</span></div>
+    <div><b data-fact="commits">60</b><span>个提交：每加一个机制，测试通过后单独提交</span></div>
   </div>
   <p style="color: var(--ink-2); max-width: 70ch">新加的测试都先在临时副本里把代码故意改坏，确认测试真的会失败，再改回来。</p>
   <h3 style="margin-top: 8px">代码审查发现的问题（节选）</h3>
@@ -1020,20 +1022,20 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
   <details><summary>全部提交</summary><ol class="commits" id="commits"></ol></details>
 </section>
 
-<footer>源码在仓库的 <code>learning</code> 分支，<code>main</code> 分支是 Linux 0.11 原始源码。页面里的地址取自提交 <span class="mono" data-fact="head">f6ffabc</span> 构建出的 kernel.elf。在仓库里运行 <code>make run</code> 可以在 QEMU 中看到真实的屏幕。</footer>
+<footer>源码在仓库的 <code>learning</code> 分支，<code>main</code> 分支是 Linux 0.11 原始源码。页面里的地址取自提交 <span class="mono" data-fact="head">0efa905</span> 构建出的 kernel.elf。在仓库里运行 <code>make run</code> 可以在 QEMU 中看到真实的屏幕。</footer>
 </main>
 
 <script>
 /* ===================== 构建事实：来自 objdump -h / -t build/kernel.elf ===================== */
 const FACTS = {
-  head: "f6ffabc", loc: "7,791", kernelKB: "40 KB", kernelSectors: 80, commits: 57, tests: 56,
-  text: 0x10000, rodata: 0x18060, data: 0x18714, user: 0x19000, userData: 0x1a000, userEnd: 0x1a000,
-  bss: 0x1a000, bssEnd: 0x2996c, stackTop: 0x1b000, gdt: 0x1b010, idt: 0x1b0e0,
-  identity: 0x1c000, pageDir: 0x20000, alias: 0x21000, ticks: 0x27bb8, tss: 0x292c4,
-  userMain: 0x19010, kmain: 0x101c0, selftests: 33,
+  head: "0efa905", loc: "8,182", kernelKB: "44 KB", kernelSectors: 88, commits: 60, tests: 59,
+  text: 0x10000, rodata: 0x18930, data: 0x18fec, user: 0x1a000, userData: 0x1b000, userEnd: 0x1b000,
+  bss: 0x1b000, bssEnd: 0x2ad6c, stackTop: 0x1c000, gdt: 0x1c010, idt: 0x1c0e0,
+  identity: 0x1d000, pageDir: 0x21000, alias: 0x22000, ticks: 0x28fb8, tss: 0x2a6c4,
+  userMain: 0x1a010, kmain: 0x101c0, selftests: 34,
 };
 /* 硬盘镜像里的 i 节点号、块号，sh 和 check 里的地址：也由 tools/tour_data.py 回填，各章只引用它 */
-const DISK = {"firstData":8,"itable":[4,7],"imap":2,"zmap":3,"ino":{"bin":3,"dev":23,"etc":26,"issue":27,"hello":28,"tmp":29,"big":2},"blk":{"root":8,"bin":612,"etc":804,"issue":805,"tmp":807,"big":[9,611]},"root":[[".",1],["..",1],["big",2],["bin",3],["dev",23],["etc",26],["hello.txt",28],["tmp",29]],"etc":[[".",26],["..",1],["issue",27]],"issueSize":27,"tmpSize":32,"newIno":30,"newInoBlock":4,"newBit":801,"newBlock":808,"owners":[[803,"/dev"],[804,"/etc"],[805,"/etc/issue"],[806,"/hello.txt"],[807,"/tmp"]],"df":{"blocks":4088,"used":800,"inodes":128,"inodesUsed":29},"lsBin":["d     336   3  .","d     128   1  ..","-    8912   4  cat","-    9108   5  check","-    8908   6  df","-    8912   7  echo","-    8956   8  grep","-    8912   9  hello","-    8912  10  kill","-    8912  11  letter","-    8908  12  ls","-    8912  13  mkdir","-    8936  14  ps","-    8912  15  pwd","-    8908  16  rm","-    8912  17  rmdir","-    8932  18  sh","-    8960  19  sleep","-    9104  20  sort","-    8912  21  sync","-    8976  22  wc"],"sortEnd":"0x40001024","onIntr":"0x40000790","sigRestore":"0x400007A0","waitRet":"0x40000449","crashEip":"0x40000282"};
+const DISK = {"firstData":8,"itable":[4,7],"imap":2,"zmap":3,"ino":{"bin":3,"dev":26,"etc":29,"issue":30,"hello":31,"tmp":32,"big":2},"blk":{"root":8,"bin":612,"etc":834,"issue":835,"tmp":837,"big":[9,611]},"root":[[".",1],["..",1],["big",2],["bin",3],["dev",26],["etc",29],["hello.txt",31],["tmp",32]],"etc":[[".",29],["..",1],["issue",30]],"issueSize":27,"tmpSize":32,"newIno":33,"newInoBlock":5,"newBit":831,"newBlock":838,"owners":[[833,"/dev"],[834,"/etc"],[835,"/etc/issue"],[836,"/hello.txt"],[837,"/tmp"]],"df":{"blocks":4088,"used":830,"inodes":128,"inodesUsed":32},"lsBin":["d     384   3  .","d     128   1  ..","-    8912   4  cat","-    9108   5  check","-    8912   6  chmod","-    8908   7  df","-    8912   8  echo","-    8956   9  grep","-    8912  10  hello","-    8912  11  kill","-    8912  12  letter","-    8908  13  ln","-    8908  14  ls","-    8912  15  mkdir","-    8908  16  mv","-    8936  17  ps","-    8912  18  pwd","-    8908  19  rm","-    8912  20  rmdir","-    9024  21  sh","-    8960  22  sleep","-    9104  23  sort","-    8912  24  sync","-    8976  25  wc"],"sortEnd":"0x40001024","onIntr":"0x400008A0","sigRestore":"0x400008B0","waitRet":"0x40000187","crashEip":"0x40000282"};
 const $ = id => document.getElementById(id);
 const hex = (n, w = 5) => "0x" + (n >>> 0).toString(16).toUpperCase().padStart(w, "0");
 const hex8 = n => hex(n, 8);
@@ -1147,7 +1149,7 @@ const MILESTONES = [
   ];
 
   /* ---------- 模拟的 shell：文件系统取自 make 生成的 build/hd.img，各个命令照着 /bin 里的程序写 ---------- */
-  const FS0 = {"ninodes":128,"blocks":4088,"nFreeBlocks":3288,"inodes":{"1":["d",128],"2":["-",614400],"3":["d",336],"4":["-",8912],"5":["-",9108],"6":["-",8908],"7":["-",8912],"8":["-",8956],"9":["-",8912],"10":["-",8912],"11":["-",8912],"12":["-",8908],"13":["-",8912],"14":["-",8936],"15":["-",8912],"16":["-",8908],"17":["-",8912],"18":["-",8932],"19":["-",8960],"20":["-",9104],"21":["-",8912],"22":["-",8976],"23":["d",64],"24":["c",0],"25":["c",0],"26":["d",48],"27":["-",27],"28":["-",41],"29":["d",32]},"dirs":{"1":[[".",1],["..",1],["big",2],["bin",3],["dev",23],["etc",26],["hello.txt",28],["tmp",29]],"3":[[".",3],["..",1],["cat",4],["check",5],["df",6],["echo",7],["grep",8],["hello",9],["kill",10],["letter",11],["ls",12],["mkdir",13],["ps",14],["pwd",15],["rm",16],["rmdir",17],["sh",18],["sleep",19],["sort",20],["sync",21],["wc",22]],"23":[[".",23],["..",1],["tty0",24],["tty1",25]],"26":[[".",26],["..",1],["issue",27]],"29":[[".",29],["..",1]]},"texts":{"27":"Linux 0.11 learning kernel\n","28":"Hello from the Minix file system on hda!\n"}};
+  const FS0 = {"ninodes":128,"blocks":4088,"nFreeBlocks":3258,"inodes":{"1":["d",128],"2":["-",614400],"3":["d",384],"4":["-",8912],"5":["-",9108],"6":["-",8912],"7":["-",8908],"8":["-",8912],"9":["-",8956],"10":["-",8912],"11":["-",8912],"12":["-",8912],"13":["-",8908],"14":["-",8908],"15":["-",8912],"16":["-",8908],"17":["-",8936],"18":["-",8912],"19":["-",8908],"20":["-",8912],"21":["-",9024],"22":["-",8960],"23":["-",9104],"24":["-",8912],"25":["-",8976],"26":["d",64],"27":["c",0],"28":["c",0],"29":["d",48],"30":["-",27],"31":["-",41],"32":["d",32]},"dirs":{"1":[[".",1],["..",1],["big",2],["bin",3],["dev",26],["etc",29],["hello.txt",31],["tmp",32]],"3":[[".",3],["..",1],["cat",4],["check",5],["chmod",6],["df",7],["echo",8],["grep",9],["hello",10],["kill",11],["letter",12],["ln",13],["ls",14],["mkdir",15],["mv",16],["ps",17],["pwd",18],["rm",19],["rmdir",20],["sh",21],["sleep",22],["sort",23],["sync",24],["wc",25]],"26":[[".",26],["..",1],["tty0",27],["tty1",28]],"29":[[".",29],["..",1],["issue",30]],"32":[[".",32],["..",1]]},"texts":{"30":"Linux 0.11 learning kernel\n","31":"Hello from the Minix file system on hda!\n"}};
   const ROOT_INO = name => FS0.dirs[1].find(e => e[0] === name)[1];   /* 根目录里各项的 i 节点号：/bin 多一个程序，后面的号都会变 */
   const BIN = FS0.dirs[ROOT_INO("bin")], DEV = FS0.dirs[ROOT_INO("dev")];
   const PROGS = BIN.map(e => e[0]).filter(n => n !== "." && n !== "..");
@@ -1163,10 +1165,10 @@ const MILESTONES = [
   let fs;
   function fsReset() {
     fs = { inodes: {}, dirs: {}, data: {} };
-    for (const [k, [type, size]] of Object.entries(FS0.inodes)) fs.inodes[k] = { type, size };
+    for (const [k, [type, size]] of Object.entries(FS0.inodes)) fs.inodes[k] = { type, size, mode: type === "d" ? 0o755 : 0o644, nlinks: 1 };
     for (const [k, ents] of Object.entries(FS0.dirs)) fs.dirs[k] = ents.map(e => [...e]);
     for (const [k, text] of Object.entries(FS0.texts)) fs.data[k] = text;
-    for (const [name, ino] of BIN) if (PROGS.includes(name)) fs.data[ino] = { elf: name };
+    for (const [name, ino] of BIN) if (PROGS.includes(name)) { fs.data[ino] = { elf: name }; fs.inodes[ino].mode = 0o755; }
     fs.data[ROOT_INO("big")] = null;           /* null 表示 /big 原来的内容 */
   }
   const contentOf = ino => fs.data[ino] === null ? bigData() : fs.data[ino];
@@ -1216,7 +1218,7 @@ const MILESTONES = [
     let ino = 1;
     while (fs.inodes[ino]) ino++;              /* i 节点位图里第一个 0 */
     if (ino > FS0.ninodes) return 0;
-    fs.inodes[ino] = { type, size: 0 };
+    fs.inodes[ino] = { type, size: 0, mode: type === "d" ? 0o755 : 0o644, nlinks: 1 };   /* 新建的文件没有执行权限 */
     const ents = fs.dirs[d[0]], hole = ents.indexOf(null), slot = hole >= 0 ? hole : ents.length;
     if (hole >= 0) ents[hole] = [d[1], ino];   /* 先找删掉后空出来的目录项，没有就接在目录末尾 */
     else { ents.push([d[1], ino]); fs.inodes[d[0]].size += 16; dirty(ITABLE(d[0])); }
@@ -1224,6 +1226,17 @@ const MILESTONES = [
     if (type === "d") { fs.dirs[ino] = [[".", ino], ["..", d[0]]]; fs.inodes[ino].size = 32; dirty("zmap", "f" + ino + ":0", ITABLE(d[0])); }
     else fs.data[ino] = "";
     return ino;
+  }
+  /* link：在目录里再加一项指向同一个 i 节点，链接数加一（fs_link）；目录不行，新名字不能已经存在 */
+  function link(cwd, from, to) {
+    const ino = lookup(cwd, from), d = dirOf(cwd, to);
+    if (!ino || fs.inodes[ino].type === "d" || !d || fs.dirs[d[0]].some(e => e && e[0] === d[1])) return false;
+    const ents = fs.dirs[d[0]], hole = ents.indexOf(null), slot = hole >= 0 ? hole : ents.length;
+    if (hole >= 0) ents[hole] = [d[1], ino];
+    else { ents.push([d[1], ino]); fs.inodes[d[0]].size += 16; dirty(ITABLE(d[0])); }
+    fs.inodes[ino].nlinks++;
+    dirty("d" + d[0] + ":" + Math.floor(slot * 16 / 1024), ITABLE(ino));
+    return true;
   }
   function remove(cwd, p, wantDir) {
     const d = dirOf(cwd, p);
@@ -1233,6 +1246,11 @@ const MILESTONES = [
     const ino = ents[k][1], isDir = fs.inodes[ino].type === "d";
     if (isDir !== wantDir || (isDir && fs.dirs[ino].some((e, j) => j > 1 && e))) return false;
     ents[k] = null;                            /* 目录项的 i 节点号清 0，目录本身不变短 */
+    if (!isDir && fs.inodes[ino].nlinks > 1) {  /* 还有别的名字：只是链接数减一 */
+      fs.inodes[ino].nlinks--;
+      dirty("d" + d[0] + ":" + Math.floor(k * 16 / 1024), ITABLE(ino));
+      return true;
+    }
     dirty("d" + d[0] + ":" + Math.floor(k * 16 / 1024), ITABLE(ino), "imap");
     if (fs.inodes[ino].size > 0) dirty("zmap");
     if (isDir) dirty(ITABLE(d[0]));
@@ -1271,8 +1289,9 @@ const MILESTONES = [
   const SIGNAME = { 2: " (SIGINT)", 9: " (SIGKILL)", 13: " (SIGPIPE)", 15: " (SIGTERM)" };
   function deliver(t, sig, me) {
     if (sig !== 9 && (t.ign || []).includes(sig)) return;
-    if (t.name === "sh" && (sig === 2 || sig === 15)) return;     /* shell 接住 SIGINT、忽略 SIGTERM */
-    if (t === me || t.name === "sh") { t.killedBy = sig; return; }   /* 自己：kill 返回前就结束；shell：这条命令做完再结束 */
+    if (t.interactive && (sig === 2 || sig === 15)) return;     /* 交互的 shell 接住 SIGINT、忽略 SIGTERM */
+    if (t === me || t.interactive) { t.killedBy = sig; return; }   /* 自己：kill 返回前就结束；shell：这条命令做完再结束 */
+    if (t.script) st.shells = st.shells.filter(x => x !== t);      /* 运行脚本的 sh 被结束：脚本的后面几行不再执行 */
     st.tasks = st.tasks.filter(x => x !== t);
     if (t.ch) st.letters = st.letters.replace(t.ch, "");
     st.deaths.push(`task ${t.pid} killed by signal ${sig}${SIGNAME[sig] || ""}`);
@@ -1294,7 +1313,7 @@ const MILESTONES = [
     st.sleepers = st.sleepers.filter(z => st.tasks.includes(z.task));
     flushDeaths();
     st.reader = null;
-    sh.state = "B";
+    st.shells.at(-1).state = "B";
     prompt();                                   /* shell 的 read 或 waitpid 被 on_intr 打断，打出提示符 */
   }
 
@@ -1314,9 +1333,21 @@ const MILESTONES = [
   function printBytes(s) { for (let i = 0; i < s.length; i++) putc(s.charCodeAt(i)); }
   const out = printBytes;
   const println = text => printBytes(text + "\n");
-  function prompt() { out("$ "); st.line = ""; st.ready = true; st.reader = null; }
+  function prompt() {
+    if (st.shells.length && st.shells.at(-1).script) return nextScriptLine();
+    out("$ "); st.line = ""; st.ready = true; st.reader = null;
+  }
+  /* 运行脚本的 sh：读下一行，跳过空行和 # 开头的注释；读完了就像 exit 一样退出 */
+  function nextScriptLine() {
+    const sh = st.shells.at(-1), sc = sh.script;
+    while (sc.i < sc.lines.length) {
+      const line = sc.lines[sc.i++].slice(0, 127), argv = line.split(" ").filter(Boolean);
+      if (argv.length && argv[0][0] !== "#") return execute(line.trim());
+    }
+    return shellExit(sh);
+  }
   function startShell(cwd = "/") {
-    const sh = { pid: freePid(), ppid: st.shells.length ? st.shells.at(-1).pid : 2, state: "B", name: "sh", cwd };
+    const sh = { pid: freePid(), ppid: st.shells.length ? st.shells.at(-1).pid : 2, state: "B", name: "sh", cwd, interactive: true };
     sh.pgrp = st.shells.length ? st.shells.at(-1).pgrp : sh.pid;  /* init 拉起的 shell 先 setsid() 自成一组；嵌套的 sh 留在原来的组 */
     st.tasks.push(sh);
     st.shells.push(sh);
@@ -1419,6 +1450,39 @@ const MILESTONES = [
       return 0;
     }
     if (prog === "sync") { syncAll(); return 0; }
+    if (prog === "ln") {
+      if (args.length !== 2) { print("usage: ln file newname\n"); return 2; }
+      if (!link(sh.cwd, args[0], args[1])) { print(`ln: ${args[1]}: cannot link\n`); return 1; }
+      return 0;
+    }
+    if (prog === "mv") {
+      /* 和 user/mv.c 一样：link 新名字，再 unlink 旧名字；搬进目录；新名字是文件就先删掉；目录搬不了 */
+      if (args.length !== 2) { print("usage: mv file newname\n"); return 2; }
+      const from = lookup(sh.cwd, args[0]);
+      if (!from) { print(`mv: ${args[0]}: no such file\n`); return 1; }
+      if (fs.inodes[from].type === "d") { print(`mv: ${args[0]}: cannot move a directory\n`); return 1; }
+      let dst = args[1];
+      const into = lookup(sh.cwd, dst);
+      if (into && fs.inodes[into].type === "d") dst = (dst.endsWith("/") ? dst : dst + "/") + args[0].replace(/\/+$/, "").split("/").pop();
+      const old = lookup(sh.cwd, dst);
+      if (old) {
+        if (old === from) return 0;
+        if (fs.inodes[old].type === "d" || !remove(sh.cwd, dst, false)) { print(`mv: ${dst}: cannot replace\n`); return 1; }
+      }
+      if (!link(sh.cwd, args[0], dst) || !remove(sh.cwd, args[0], false)) { print(`mv: ${dst}: cannot move\n`); return 1; }
+      return 0;
+    }
+    if (prog === "chmod") {
+      if (args.length < 2 || !/^[0-7]+$/.test(args[0])) { print("usage: chmod mode file...\n"); return 2; }
+      let code = 0;
+      for (const a of args.slice(1)) {
+        const ino = lookup(sh.cwd, a);
+        if (!ino) { print(`chmod: ${a}: cannot change mode\n`); code = 1; continue; }
+        fs.inodes[ino].mode = parseInt(args[0], 8) & 0o7777;
+        dirty(ITABLE(ino));
+      }
+      return code;
+    }
     if (prog === "sleep") {
       /* alarm 定闹钟，pause 等 SIGALRM：这里记下什么时候醒，tick() 里到时间就让它退出 */
       const n = args.length === 1 && /^\d+$/.test(args[0]) ? Number(args[0]) : -1;
@@ -1490,10 +1554,22 @@ const MILESTONES = [
   const FS_TTY = Object.fromEntries(DEV.filter(e => e[0].startsWith("tty")).map(([n, ino]) => [ino, n === "tty0" ? "console" : "tty1"]));
 
   /* exec 找程序：命令名里没有 / 就到 /bin 下找；文件得是一个程序，否则 exec 失败 */
-  function findProgram(name, sh) {
-    const ino = lookup(sh.cwd, name.includes("/") ? name : "/bin/" + name);
-    const d = ino && fs.inodes[ino].type === "-" ? fs.data[ino] : null;
-    return d && isElf(d) ? d.elf : null;
+  /*
+   * 要有执行权限；ELF 就运行它。#! 开头的脚本换成解释器，参数照 exec.c 排成：解释器的名字、#! 行里的那个参数、
+   * 脚本的路径、原来的 argv[1] 以后，一共不能超过 16 个；解释器自己也得是程序。返回 { prog, argv, script }，不行返回 null。
+   */
+  function findProgram(name, sh, argv = [name]) {
+    const path = name.includes("/") ? name : "/bin/" + name, ino = lookup(sh.cwd, path), node = ino && fs.inodes[ino];
+    if (!node || node.type !== "-" || !(node.mode & 0o111)) return null;
+    const d = fs.data[ino];
+    if (isElf(d)) return { prog: d.elf, argv };
+    if (typeof d !== "string" || !d.startsWith("#!")) return null;
+    const m = d.slice(2).split("\n")[0].match(/^[ \t]*([^ \t]+)(?:[ \t]+(.*))?$/);
+    if (!m) return null;
+    const iino = lookup(sh.cwd, m[1]), inode = iino && fs.inodes[iino];
+    if (!inode || inode.type !== "-" || !(inode.mode & 0o111) || !isElf(fs.data[iino])) return null;
+    const nargv = [m[1].split("/").pop(), ...(m[2] ? [m[2]] : []), join(sh.cwd, path), ...argv.slice(1)];
+    return nargv.length > 16 ? null : { prog: fs.data[iino].elf, argv: nargv, script: path.split("/").pop() };
   }
 
   /* 运行一行里用 | 隔开的几段：每段一个子进程，前一段写进管道的，就是后一段读到的（run_line） */
@@ -1505,7 +1581,7 @@ const MILESTONES = [
     const kids = runnable.map(argv => { const t = { pid: freePid(), ppid: sh.pid, state: "B", name: "sh", pgrp: sh.pgrp, ign: background ? [2] : [] }; st.tasks.push(t); return t; });
     if (!background) sh.state = "W";        /* 前台命令运行时，shell 在 waitpid 里等它们 */
     else if (kids.length) println(`[${kids.at(-1).pid}]`);
-    let pipeData = ttyInput ?? "", forever = false;
+    let pipeData = ttyInput ?? "", forever = false, scriptKid = null;
     const reports = [];
     runnable.forEach((argv, k) => {
       const me = kids[k];
@@ -1514,13 +1590,18 @@ const MILESTONES = [
       const args = redirect(argv, io, sh);
       if (args === null) code = 1;
       else if (args.length) {
-        const prog = findProgram(args[0], sh);
+        const found = findProgram(args[0], sh, args), prog = found && found.prog, pargs = found ? found.argv : [];
         if (!prog) { writeTo(io.output, `sh: ${args[0]}: not found\n`); code = 127; }
         else {
-          me.name = prog;
-          if (prog === "letter") { me.state = "S"; me.ch = (args[1] || "?")[0]; st.letters += me.ch; forever = true; return; }
-          if (prog === "sh") { forever = true; return; }
-          code = runProgram(prog, args.slice(1), io.input, io.output, sh, me);
+          me.name = found.script || prog;            /* 脚本在 ps 里显示脚本的名字 */
+          if (prog === "letter") { me.state = "S"; me.ch = (pargs[1] || "?")[0]; st.letters += me.ch; forever = true; return; }
+          if (prog === "sh" && pargs.length > 1) {   /* sh 脚本：一行行读命令 */
+            const file = lookup(sh.cwd, pargs[1]), text = file && fs.inodes[file].type === "-" ? contentOf(file) : null;
+            if (typeof text !== "string") { writeTo(io.output, `sh: ${pargs[1]}: cannot open\n`); code = 1; }
+            else if (background || runnable.length > 1) { writeTo(io.output, "(scripts in the background or in a pipeline: try it in QEMU)\n"); }
+            else { me.script = { lines: text.split("\n"), i: 0 }; me.cwd = sh.cwd; scriptKid = me; forever = true; return; }
+          } else if (prog === "sh") { forever = true; return; }
+          else code = runProgram(prog, pargs.slice(1), io.input, io.output, sh, me);
           if (code && code.sleep) {             /* sleep：睡着，到时间才结束；前台的话 shell 一直等它 */
             me.state = "S";
             st.sleepers.push({ task: me, until: st.ticks + code.sleep * 100, fg: !background });
@@ -1543,6 +1624,11 @@ const MILESTONES = [
     if (empty >= 0) println("sh: empty command");
     if (background) { /* 不等它们 */ }
     else if (forever) {
+      if (scriptKid) {                          /* 运行脚本的 sh 成了栈顶的 shell，旧的在 waitpid 里等它 */
+        scriptKid.state = "R";
+        st.shells.push(scriptKid);
+        return nextScriptLine();
+      }
       const shKid = kids.find(t => t.name === "sh");
       if (shKid && runnable.length === 1) {   /* 前台的 sh：新的 shell 读终端，旧的在 waitpid 里等它 */
         st.tasks = st.tasks.filter(t => t !== shKid);
@@ -1581,7 +1667,7 @@ const MILESTONES = [
       else if (first[i] === ">" || first[i] === ">>") { redirOut = true; i++; }
       else plain.push(first[i]);
     }
-    const prog = plain.length && !redirIn ? findProgram(plain[0], sh) : null;
+    const prog = plain.length && !redirIn ? (findProgram(plain[0], sh) || {}).prog : null;
     if (!background && prog && readsStdin(prog, plain.slice(1))) {
       /* 只有一段、输出到屏幕的 cat 和 grep 读到一行就处理一行；其余的等 Ctrl+D 之后一起算 */
       const live = segs.length === 1 && !redirOut && (prog === "cat" || prog === "grep");
@@ -1613,7 +1699,7 @@ const MILESTONES = [
     runLine(r.segs, false, r.text);
   }
   const normalize = p => "/" + p.split("/").reduce((out, part) => (part === ".." ? out.pop() : part && part !== "." && out.push(part), out), []).join("/");
-  const HELP = ["files: ls cat echo wc grep sort rm mkdir rmdir df sync pwd", "tasks: ps kill sleep letter hello check", "built in: cd [dir], exit, help",
+  const HELP = ["files: ls cat echo wc grep sort rm ln mv mkdir rmdir chmod df sync pwd", "tasks: ps kill sleep letter hello check", "built in: cd [dir], exit, help",
                 "try: ls /bin | wc, echo hi > /tmp/a, cat < /tmp/a, cd /etc, letter D &"];
 
   function reset() {
@@ -2521,9 +2607,9 @@ const FILES = [
   ["fs.c · fs.h", "Minix 文件系统：超级块、i 节点表、位图、bmap()、namei()、写文件、目录的增删、文件系统锁", "fs/super.c、fs/inode.c、fs/namei.c、fs/bitmap.c、fs/truncate.c"],
   ["file.c", "打开的文件、文件表、设备文件", "fs/open.c、fs/read_write.c、fs/file_table.c"],
   ["pipe.c", "管道：一页的环形缓冲区，读写两头", "fs/pipe.c"],
-  ["exec.c", "exec：读 ELF，建新的地址空间，摆好参数", "fs/exec.c"],
+  ["exec.c", "exec：读 ELF，建新的地址空间，摆好参数；#! 脚本换成解释器", "fs/exec.c"],
   ["tty.c", "终端：一行的编辑、回显、退格、Ctrl+D、Ctrl+C", "kernel/chr_drv/tty_io.c"],
-  ["user/*.c", "硬盘上的程序：sh、ls、cat、wc、grep、sort、rm、mkdir、df、sync、pwd、kill、sleep、ps……，小函数库里的 malloc", "（Linux 0.11 的 /bin 下是用 libc 编的程序）"],
+  ["user/*.c", "硬盘上的程序：sh、ls、cat、wc、grep、sort、rm、ln、mv、chmod、mkdir、df、sync、pwd、kill、sleep、ps……，小函数库里的 malloc", "（Linux 0.11 的 /bin 下是用 libc 编的程序）"],
   ["tools/mkfs.py", "把 rootfs/ 打包成 Minix 镜像，建设备文件", "Minix 的 mkfs"],
   ["sched.c", "任务表、TSS、任务切换、睡眠与唤醒、等待队列、fork、exit、waitpid、信号和进程组、当前目录", "kernel/sched.c、kernel/fork.c、kernel/exit.c、kernel/signal.c"],
   ["syscall.c / syscall.h", "系统调用表与调用方式", "kernel/system_call.s、include/unistd.h"],
@@ -2553,6 +2639,7 @@ const COMMITS = [
   ["3bda4b5", "信号：kill、Ctrl+C、进程组"], ["04113e4", "信号处理函数"], ["3c699d1", "审查：信号的测试缺口和小问题"],
   ["497f028", "brk、malloc 和 sort"], ["551bc82", "审查：堆和栈之间的保护区、realloc、sort"],
   ["2aea8ae", "网页：堆的审查修复"], ["a81f507", "alarm、pause 和 sleep"], ["f6ffabc", "缓冲区延迟写回和 sync"],
+  ["464cc06", "网页：延迟写回、闹钟"], ["55649f1", "硬链接、ln 和 mv"], ["0efa905", "shell 脚本、#! 和 chmod"],
 ];
 $("commits").innerHTML = COMMITS.map(([h, s]) => `<li><span class="h">${h}</span><span>${s}</span></li>`).join("");
 </script>
