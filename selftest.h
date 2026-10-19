@@ -45,6 +45,7 @@
 #define SELFTEST_USER_FCNTL        41   /* dup2、fcntl、close-on-exec */
 #define SELFTEST_USER_NICE         42   /* nice 和 times：nice 值、继承、按 nice 分 CPU、utime 和 stime、cutime */
 #define SELFTEST_USER_PERM         43   /* 用户和权限：用户号、读写执行、新建和删除、粘滞位、chmod、chown、kill、setuid 程序 */
+#define SELFTEST_USER_STOP         44   /* 作业控制：停下、WUNTRACED、SIGCONT、拦不住的 SIGSTOP、孤儿进程组、setpgid */
 
 #define SELFTEST_IN_USER(n) ((n) >= 20)
 

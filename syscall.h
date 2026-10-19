@@ -57,7 +57,9 @@
 #define SYS_IOCTL  42               /* ioctl(fd, cmd, arg)：取、设终端的工作方式（回显没有），输密码时关掉回显 */
 #define SYS_MOUNT  43               /* mount(dev, dir)：把块设备 dev 上的文件系统挂到目录 dir 上，只有 root 能挂 */
 #define SYS_UMOUNT 44               /* umount(path)：卸下一块盘，path 是块设备或者挂载点 */
-#define SYS_CALLS  45
+#define SYS_SETPGID 45              /* setpgid(pid, pgid)：把自己或子进程放进进程组 pgid（0 就是它自己的号），作业控制用 */
+#define SYS_GETPGRP 46              /* getpgrp()：自己所在的进程组 */
+#define SYS_CALLS  47
 
 /* fsinfo 写回的内容 */
 struct fsinfo {
@@ -145,6 +147,7 @@ struct taskinfo {
 };
 
 #define WNOHANG    1                /* waitpid 的选项：子进程还没结束就立刻返回 0 */
+#define WUNTRACED  2                /* waitpid 的选项：子进程停下来了也返回，状态是 0x400 加让它停下的信号 */
 #define EINTR      4                /* 系统调用在睡着等的时候被信号打断，返回 -EINTR */
 
 /* 信号的编号与 Linux 0.11 的 include/signal.h 相同 */
@@ -153,6 +156,13 @@ struct taskinfo {
 #define SIGPIPE    13               /* 往读的一头全关了的管道里写 */
 #define SIGALRM    14               /* alarm 定的闹钟到了 */
 #define SIGTERM    15               /* kill 命令默认发的信号 */
+#define SIGHUP     1                /* 挂断：进程组没人管了（shell 退出了），里面停着的进程收到它 */
+#define SIGCHLD    17               /* 子进程结束或停下（默认不理） */
+#define SIGCONT    18               /* 停着的接着运行（默认不理，可它总是让停着的进程接着运行） */
+#define SIGSTOP    19               /* 停下：不能忽略，也不能接住 */
+#define SIGTSTP    20               /* 终端上按了 Ctrl+Z：默认停下 */
+#define SIGTTIN    21               /* 后台进程读终端：默认停下 */
+#define SIGTTOU    22               /* 后台进程写终端：这里不发 */
 typedef void (*sighandler_t)(int);
 #define SIG_DFL    ((sighandler_t)0)    /* 默认动作：结束进程 */
 #define SIG_IGN    ((sighandler_t)1)    /* 不理这个信号 */
@@ -400,6 +410,8 @@ static inline int32_t chown(const char *path, uint32_t uid, uint32_t gid)
  */
 #define TCGETS     0x5401
 #define TCSETS     0x5402
+#define TIOCGPGRP  0x540F           /* 取终端的前台进程组：arg 指向一个 int32_t */
+#define TIOCSPGRP  0x5410           /* 设终端的前台进程组（tcsetpgrp）：Ctrl+C、Ctrl+Z 发给这一组，只有它能读终端 */
 #define ICANON     0000002
 #define ECHO       0000010
 struct termios {
@@ -439,6 +451,16 @@ static inline int32_t pause(void)
 static inline int32_t setsid(void)
 {
     return syscall3(SYS_SETSID, 0, 0, 0);
+}
+
+static inline int32_t setpgid(int32_t pid, int32_t pgid)
+{
+    return syscall3(SYS_SETPGID, (uint32_t)pid, (uint32_t)pgid, 0);
+}
+
+static inline int32_t getpgrp(void)
+{
+    return syscall3(SYS_GETPGRP, 0, 0, 0);
 }
 
 static inline __attribute__((noreturn)) void exit(int code)

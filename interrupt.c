@@ -256,8 +256,12 @@ static void handle_signals(struct interrupt_frame *frame)
 {
     uint32_t handler, restorer;
     int sig = sched_take_signal(&handler, &restorer);
-    if (!sig || handler == (uint32_t)SIG_IGN)   /* 忽略的信号发的时候就丢掉了，这里只是防万一 */
+    if (!sig)
         return;
+    if (handler == (uint32_t)SIG_IGN) {     /* 忽略的信号发的时候就丢掉了，这里只是防万一 */
+        handle_signals(frame);
+        return;
+    }
     if (handler != (uint32_t)SIG_DFL) {
         uint32_t sp = frame->user_esp - 7 * 4;
         if (sp < frame->user_esp && user_write_ok(sp, 7 * 4)) {
@@ -275,6 +279,15 @@ static void handle_signals(struct interrupt_frame *frame)
             return;
         }
     }
+    if (sig == SIGSTOP || sig == SIGTSTP || sig == SIGTTIN || sig == SIGTTOU) {
+        sched_stop(sig);            /* 默认动作是停下：SIGCONT 或 SIGKILL 让它接着运行 */
+        handle_signals(frame);      /* 停着的时候可能又来了信号（SIGKILL）：回用户态之前处理掉 */
+        return;
+    }
+    if (sig == SIGCONT || sig == SIGCHLD) {
+        handle_signals(frame);      /* 默认不理，接着看下一个 */
+        return;
+    }
     struct text_line line;
     line_init(&line);
     line_append(&line, "task ");
@@ -282,7 +295,7 @@ static void handle_signals(struct interrupt_frame *frame)
     line_append(&line, " killed by signal ");
     line_append_dec(&line, (uint32_t)sig);
     line_append(&line, sig == SIGINT ? " (SIGINT)" : sig == SIGKILL ? " (SIGKILL)" : sig == SIGPIPE ? " (SIGPIPE)" : sig == SIGALRM ? " (SIGALRM)" :
-                       sig == SIGTERM ? " (SIGTERM)" : "");
+                       sig == SIGTERM ? " (SIGTERM)" : sig == SIGHUP ? " (SIGHUP)" : "");
     line_show(&line, VGA_YELLOW, TASK_MESSAGE_ROW);
     sched_exit(EXIT_SIGNAL | (uint32_t)sig);
 }

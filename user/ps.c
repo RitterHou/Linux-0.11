@@ -1,6 +1,6 @@
 /*
  * ps [-l]：列出所有任务：任务号、父进程、状态、名字。状态：R 能运行，S 在 sleep 里，Z 僵尸，W 在 waitpid 里，
- * B 在等待队列上（等键盘、等硬盘）。-l 再加上实际用户号（UID）、每轮的 tick 数（PRI）、nice 值（NI）和用了多少 CPU 时间（TIME，秒）。
+ * B 在等待队列上（等键盘、等硬盘），T 停着（Ctrl+Z、SIGSTOP）。-l 再加上实际用户号（UID）、每轮的 tick 数（PRI）、nice 值（NI）和用了多少 CPU 时间（TIME，秒）。
  */
 #include "ulib.h"
 
@@ -17,7 +17,7 @@ static void print_signed(int32_t n, uint32_t width)
 
 int main(int argc, char **argv)
 {
-    static const char states[] = "?RSZWB";
+    static const char states[] = "?RSZWBT";
     struct taskinfo info;
     int lng = argc > 1 && strcmp(argv[1], "-l") == 0;
 
@@ -32,7 +32,7 @@ int main(int argc, char **argv)
         if (info.parent < 10)
             print(" ");
         print_num((uint32_t)info.parent);
-        char s[4] = { ' ', info.state >= 1 && info.state <= 5 ? states[info.state] : '?', ' ', '\0' };
+        char s[4] = { ' ', info.state >= 1 && info.state <= 6 ? states[info.state] : '?', ' ', '\0' };
         print(s);
         if (lng) {
             print_width((uint32_t)info.uid, 5, ' ');

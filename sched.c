@@ -42,6 +42,9 @@
 #define TASK_ZOMBIE    3            /* 已经结束，内存已收回，等父进程用 waitpid 取走退出码 */
 #define TASK_WAITING   4            /* 在 waitpid 里等子进程结束，不参与调度 */
 #define TASK_BLOCKED   5            /* 睡在某个等待队列上（例如等硬盘），等 wake_up 叫醒 */
+#define TASK_STOPPED   6            /* 收到 SIGSTOP、SIGTSTP 这些停下了，不参与调度，等 SIGCONT */
+
+#define STOP_SIGNALS   ((1u << (SIGSTOP - 1)) | (1u << (SIGTSTP - 1)) | (1u << (SIGTTIN - 1)) | (1u << (SIGTTOU - 1)))
 
 #define INIT_TASK      2            /* init：内核建的用户任务，收养孤儿、拉起 shell，不能被信号结束 */
 
@@ -80,6 +83,9 @@ struct task {
     uint32_t restorer;              /* 处理函数返回到这里（用户程序里的 sig_restore） */
     int pgrp;                       /* 进程组：Ctrl+C 发给终端的前台进程组里的每个任务；fork 时继承 */
     int leader;                     /* 调用过 setsid，是进程组的头：它打开终端时，终端的前台进程组就是它这一组 */
+    int sid;                        /* 会话：setsid 的那个任务的号，fork 继承。一个终端属于一个会话，作业控制只在会话里面 */
+    int stopsig;                    /* 停着的话，是哪个信号让它停下的 */
+    int stop_reported;              /* 这次停下已经让父进程的 waitpid(WUNTRACED) 拿到过了 */
     int ctty;                       /* 进程组的头的控制终端：TTY_CONSOLE 等加一，0 是还没有；结束时把那个终端的前台进程组清掉 */
     int interruptible;              /* 睡在 interruptible_sleep_on 里：信号能叫醒它 */
     uint32_t start_brk;             /* 程序的末尾（.bss 的末尾），堆从这里开始；exec 时设好 */
@@ -379,7 +385,7 @@ static int setup_task(int n, void (*entry)(void), uint32_t cr3)
 
     if (kstack == 0)
         return 0;
-    tasks[n] = (struct task){ .state = TASK_RUNNING, .page_dir = cr3, .kstack = kstack, .cwd = "/", .pgrp = n,
+    tasks[n] = (struct task){ .state = TASK_RUNNING, .page_dir = cr3, .kstack = kstack, .cwd = "/", .pgrp = n, .sid = n,
                               .counter = DEF_PRIORITY, .priority = DEF_PRIORITY };
     tss[n] = (struct tss){ .eip = (uint32_t)entry, .eflags = 0x202, .cr3 = cr3,
                            .iomap_base = sizeof(struct tss) };   /* 没有 I/O 权限位图 */
@@ -622,8 +628,26 @@ static void send_signal(int n, int sig)
     struct task *t = &tasks[n];
     uint32_t bit = 1u << (sig - 1);
 
-    if (t->action[sig - 1] == (uint32_t)SIG_IGN)
+    if (sig == SIGCONT || sig == SIGKILL) {
+        /*
+         * SIGCONT 总是让停着的进程接着运行，不管它怎么处理这个信号；还没处理的停下的信号也作废。
+         * SIGKILL 也要先让它接着运行，它才能在回到用户态之前被结束。
+         */
+        if (sig == SIGCONT)
+            t->signal &= ~STOP_SIGNALS;
+        if (t->state == TASK_STOPPED) {
+            t->state = TASK_RUNNING;
+            t->stopsig = 0;
+        }
+        if (sig == SIGCONT && t->action[sig - 1] <= (uint32_t)SIG_IGN)
+            return;                 /* 没设处理函数：接着运行就是全部，不用再挂上 */
+    }
+    if (bit & STOP_SIGNALS)
+        t->signal &= ~(1u << (SIGCONT - 1));    /* 停下的信号让没处理的 SIGCONT 作废 */
+    if (t->action[sig - 1] == (uint32_t)SIG_IGN && sig != SIGSTOP)
         return;
+    if (sig == SIGCHLD && t->action[sig - 1] == (uint32_t)SIG_DFL)
+        return;                     /* SIGCHLD 默认不理 */
     t->signal |= bit;
     if (t->state == TASK_SLEEPING || t->state == TASK_WAITING || (t->state == TASK_BLOCKED && t->interruptible))
         t->state = TASK_RUNNING;
@@ -672,7 +696,7 @@ int sched_kill(int pid, int sig)
  */
 int sched_signal(int sig, uint32_t handler, uint32_t restorer)
 {
-    if (sig < 1 || sig > 32 || sig == SIGKILL)
+    if (sig < 1 || sig > 32 || sig == SIGKILL || sig == SIGSTOP)   /* 这两个谁也拦不住 */
         return -1;
     if (handler > (uint32_t)SIG_IGN && (!user_range_ok(handler, 1) || !user_range_ok(restorer, 1)))
         return -1;                      /* 处理函数在用户态运行，必须是用户自己的内存 */
@@ -714,7 +738,79 @@ int sched_setsid(void)
         return -1;
     t->leader = 1;
     t->pgrp = current_task;
+    t->sid = current_task;
     return current_task;
+}
+
+/*
+ * setpgid：把 pid（0 是自己）放进进程组 pgid（0 就是 pid 自己的号）。只能改自己或者自己的子进程，
+ * 会话的头不能改，要进的组得是同一个会话里已经有的（或者新开一个以自己为号的组）。shell 给每个作业一个进程组：
+ * 第一个子进程的号就是组号，后面的子进程都放进去。Linux 0.11 的 sys_setpgid() 也是这样。
+ */
+int sched_setpgid(int pid, int pgid)
+{
+    pid = pid ? pid : current_task;
+    pgid = pgid ? pgid : pid;
+    if (pid < 1 || pid >= NR_TASKS || pgid < 1 || pgid >= NR_TASKS)
+        return -1;
+    uint32_t flags = irq_save();
+    struct task *t = &tasks[pid];
+    int ok = t->state != TASK_UNUSED && t->state != TASK_ZOMBIE && (pid == current_task || t->parent == current_task) &&
+             !t->leader && t->sid == tasks[current_task].sid;
+    if (ok && pgid != pid) {
+        ok = 0;
+        for (int n = 1; n < NR_TASKS; n++)
+            if (tasks[n].state != TASK_UNUSED && tasks[n].pgrp == pgid && tasks[n].sid == t->sid)
+                ok = 1;
+    }
+    if (ok)
+        t->pgrp = pgid;
+    irq_restore(flags);
+    return ok ? 0 : -1;
+}
+
+int sched_sid(void)
+{
+    return tasks[current_task].sid;
+}
+
+/* 会话 sid 里有没有进程组 pgrp：设终端的前台进程组时检查 */
+int sched_pgrp_in_session(int pgrp, int sid)
+{
+    for (int n = 1; n < NR_TASKS; n++)
+        if (tasks[n].state != TASK_UNUSED && tasks[n].state != TASK_ZOMBIE && tasks[n].pgrp == pgrp && tasks[n].sid == sid)
+            return 1;
+    return 0;
+}
+
+/*
+ * 当前任务停下（SIGSTOP、SIGTSTP 这些的默认动作，或者后台读终端）：状态改成停着，在 waitpid 里等着的父进程叫醒，
+ * 让它看到；切走，等 SIGCONT 把它改回能运行，才从这里接着往下走。Linux 0.11 的 do_signal() 不认停下的信号。
+ */
+void sched_stop(int sig)
+{
+    uint32_t flags = irq_save();
+    struct task *t = &tasks[current_task];
+    t->state = TASK_STOPPED;
+    t->stopsig = sig;
+    t->stop_reported = 0;
+    if (t->parent && tasks[t->parent].state == TASK_WAITING)
+        tasks[t->parent].state = TASK_RUNNING;
+    while (t->state == TASK_STOPPED)
+        reschedule();
+    irq_restore(flags);
+}
+
+/* 当前任务有没有挂着、还没处理的信号 */
+int sched_signal_pending(void)
+{
+    return tasks[current_task].signal != 0;
+}
+
+/* 当前任务对信号 sig 是怎么处理的：SIG_DFL、SIG_IGN 或者处理函数的地址 */
+uint32_t sched_action(int sig)
+{
+    return tasks[current_task].action[sig - 1];
 }
 
 /* 给当前任务自己发信号：往没人读的管道里写时发 SIGPIPE。init 和内核任务照样收不到。 */
@@ -902,6 +998,7 @@ int sched_fork(const struct interrupt_frame *frame)
     };
     tasks[n] = (struct task){ .state = TASK_RUNNING, .page_dir = dir, .kstack = kstack, .parent = current_task,
                               .restorer = tasks[current_task].restorer, .pgrp = tasks[current_task].pgrp,   /* 收到的信号不继承 */
+                              .sid = tasks[current_task].sid,
                               .start_brk = tasks[current_task].start_brk, .brk = tasks[current_task].brk,
                               .cloexec = tasks[current_task].cloexec,
                               .priority = tasks[current_task].priority, .counter = tasks[current_task].priority,
@@ -970,6 +1067,14 @@ int sched_waitpid(int pid, uint32_t *status, int options)
             if (pid > 0 && n != pid)
                 continue;
             have_child = 1;
+            if (tasks[n].state == TASK_STOPPED && (options & WUNTRACED) && !tasks[n].stop_reported) {
+                tasks[n].stop_reported = 1;     /* 一次停下只报告一次 */
+                uint32_t st = EXIT_STOPPED | (uint32_t)tasks[n].stopsig;
+                irq_restore(flags);
+                if (status)
+                    *status = st;
+                return n;
+            }
             if (tasks[n].state == TASK_ZOMBIE) {
                 uint32_t st = tasks[n].status;
                 /* 子进程用的 CPU 时间算到父进程的 cutime、cstime 里。Linux 0.11 只加子进程自己的，不加孙子进程的 */
@@ -1024,7 +1129,7 @@ void sched_exit(uint32_t status)
     }
     sched_drop_exec();              /* 和关文件一样要拿文件系统锁，趁还能睡的时候做 */
     if (t->leader && t->ctty)
-        tty_release_pgrp(t->ctty - 1, t->pgrp);  /* 终端的前台进程组没了头：Ctrl+C 不再发给这一组。Linux 0.11 的 do_exit() 也这样 */
+        tty_release_pgrp(t->ctty - 1, t->sid);   /* 终端的会话没了头：Ctrl+C 不再发给谁。Linux 0.11 的 do_exit() 也这样 */
     __asm__ volatile("cli");        /* 不再返回，切到的任务从自己的 TSS 装入 EFLAGS，中断状态随之恢复 */
     if (t->page_dir != kernel_page_dir())
         free_page_dir(t->page_dir);
@@ -1034,6 +1139,14 @@ void sched_exit(uint32_t status)
             tasks[n].parent = 0;
             if (tasks[n].state == TASK_ZOMBIE)
                 release(n);
+            else if (tasks[n].state == TASK_STOPPED) {
+                /*
+                 * 停着的孩子没人管了（比如 shell 退出了，留下 Ctrl+Z 停下的作业）：再也没人会让它接着运行。
+                 * POSIX 的规定是给它 SIGHUP 再 SIGCONT：接着运行，马上被 SIGHUP 结束。
+                 */
+                send_signal(n, SIGHUP);
+                send_signal(n, SIGCONT);
+            }
         }
     }
     t->status = status;

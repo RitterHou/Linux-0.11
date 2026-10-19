@@ -406,14 +406,30 @@ static int32_t sys_ioctl(uint32_t fd, uint32_t cmd, uint32_t arg, struct interru
     struct file *f = fd_file(fd);
     struct termios t;
     int from_user = from_user_mode(frame);
+    uint32_t size = cmd == TIOCGPGRP || cmd == TIOCSPGRP ? sizeof(int32_t) : sizeof(t);
 
-    if (!f || f->type != FILE_TTY || (from_user && !user_write_ok(arg, sizeof(t))))
+    if (!f || f->type != FILE_TTY || (from_user && !user_write_ok(arg, size)))
         return -1;
-    t = *(struct termios *)arg;
+    for (uint32_t i = 0; i < size; i++)
+        ((char *)&t)[i] = ((const char *)arg)[i];
     int ret = tty_ioctl(f->tty, cmd, &t);
     if (ret == 0)
-        *(struct termios *)arg = t;
+        for (uint32_t i = 0; i < size; i++)
+            ((char *)arg)[i] = ((const char *)&t)[i];
     return ret;
+}
+
+/* setpgid(pid, pgid)、getpgrp()：见 sched.c 的 sched_setpgid()。 */
+static int32_t sys_setpgid(uint32_t pid, uint32_t pgid, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)c, (void)frame;
+    return sched_setpgid((int)pid, (int)pgid);
+}
+
+static int32_t sys_getpgrp(uint32_t a, uint32_t b, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)a, (void)b, (void)c, (void)frame;
+    return sched_pgrp();
 }
 
 /* chown(path, uid, gid)：见 fs.c 的 fs_chown()。 */
@@ -736,6 +752,8 @@ static const syscall_fn syscall_table[SYS_CALLS] = {
     [SYS_IOCTL]  = sys_ioctl,
     [SYS_MOUNT]  = sys_mount,
     [SYS_UMOUNT] = sys_umount,
+    [SYS_SETPGID] = sys_setpgid,
+    [SYS_GETPGRP] = sys_getpgrp,
 };
 
 void syscall_dispatch(struct interrupt_frame *frame)

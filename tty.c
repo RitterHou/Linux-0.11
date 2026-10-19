@@ -12,6 +12,7 @@
  *   - Ctrl+D 把这一行（不带换行）交出去，后面跟一个结束标记；行是空的，读的程序就得到 0，知道输入结束了。
  *     Unix 的终端都是这样，cat、wc 读到 0 就停。
  *   - Ctrl+C 丢掉正在编辑的这一行，回显 ^C 和换行，给终端的前台进程组发 SIGINT（tty_intr）。
+ *   - Ctrl+Z 一样丢掉这一行，回显 ^Z，给前台进程组发 SIGTSTP：默认让它们停下，shell 把它们记成一个停着的作业。
  * 关掉回显（termios 的 ECHO，输密码时）以后，敲的字照样进这一行，只是不显示，退格和 ^C 也不显示。
  * 串口那头的终端敲回车送来的是 \r，退格送来的是 DEL（0x7F）：分别当成换行和退格（termios 的 ICRNL 和 VERASE）。
  * 方向键送来的是转义序列 ESC [ A 这样的三个字符：规范模式不认得它们，整个丢掉。
@@ -32,6 +33,7 @@
 #define READY_SIZE 512              /* 敲完、还没被读走的行；2 的幂，下标回绕时取模也对 */
 #define EOF_CHAR   0x04             /* Ctrl+D；在 ready 里当作一行的结束标记，不交给程序 */
 #define INTR_CHAR  0x03             /* Ctrl+C */
+#define SUSP_CHAR  0x1A             /* Ctrl+Z */
 
 struct tty {
     char line[LINE_MAX];            /* 正在编辑的这一行 */
@@ -40,6 +42,7 @@ struct tty {
     uint32_t ready_head, ready_tail;    /* 只增不减，相减就是还没读走的字节数 */
     struct wait_queue wait;         /* 等着读的任务 */
     int pgrp;                       /* 前台进程组：Ctrl+C 发给这一组；0 表示还没有（自检内核不拉起 shell） */
+    int sid;                        /* 终端属于哪个会话（打开它的会话的头的号）：只有这个会话里的进程能设前台进程组 */
     uint32_t lflag;                 /* termios 的 c_lflag：开机时一行一行地读、回显 */
     int esc;                        /* 规范模式下正在丢掉的转义序列：1 收到了 ESC，2 收到了 ESC [ */
     void (*putc)(char ch);          /* 输出一个字符：写显存，或者从串口发出去 */
@@ -62,16 +65,17 @@ static void echo(struct tty *t, char ch)
  * 所以前台进程组是 shell 这一组，shell fork 出的程序都在里面，init 和它的 letter 不在。
  * Linux 0.11 的 sys_open() 也是在 current->leader 打开终端、它还没有控制终端时，把 tty->pgrp 设成它的组。
  */
-void tty_set_pgrp(int tty, int pgrp)
+void tty_set_pgrp(int tty, int pgrp, int sid)
 {
     ttys[tty].pgrp = pgrp;
+    ttys[tty].sid = sid;
 }
 
-/* 进程组的头结束了：前台进程组还是它那一组的话，清掉。init 拉起的新 shell 打开终端时再设上。 */
-void tty_release_pgrp(int tty, int pgrp)
+/* 会话的头结束了：终端还属于这个会话的话，清掉，Ctrl+C 不再发给谁。init 拉起的新 shell 打开终端时再设上。 */
+void tty_release_pgrp(int tty, int sid)
 {
-    if (ttys[tty].pgrp == pgrp)
-        ttys[tty].pgrp = 0;
+    if (ttys[tty].sid == sid)
+        ttys[tty].pgrp = ttys[tty].sid = 0;
 }
 
 /* 由键盘中断或串口中断调用（自检也会直接调用），此时中断关着。 */
@@ -83,7 +87,7 @@ void tty_input(int tty, char ch)
         ch = '\n';
     if (ch == 0x7F)                 /* 终端的退格键 */
         ch = '\b';
-    if (!(t->lflag & ICANON) && ch != INTR_CHAR) {    /* 原始模式：原样交出去 */
+    if (!(t->lflag & ICANON) && ch != INTR_CHAR && ch != SUSP_CHAR) {    /* 原始模式：原样交出去 */
         if (READY_SIZE - (t->ready_tail - t->ready_head) >= 1) {
             t->ready[t->ready_tail++ % READY_SIZE] = ch;
             echo(t, ch);
@@ -102,6 +106,15 @@ void tty_input(int tty, char ch)
     }
     if (ch == 0x1B) {
         t->esc = 1;
+        return;
+    }
+    if (ch == SUSP_CHAR) {          /* Ctrl+Z：和 Ctrl+C 一样，只是发的是 SIGTSTP */
+        t->line_len = 0;
+        echo(t, '^');
+        echo(t, 'Z');
+        echo(t, '\n');
+        if (t->pgrp > 0)
+            sched_kill(-t->pgrp, SIGTSTP);
         return;
     }
     if (ch == INTR_CHAR) {
@@ -148,8 +161,24 @@ void tty_input(int tty, char ch)
  * ioctl：TCGETS 取工作方式，TCSETS 设。认 ECHO 和 ICANON 两个标志。
  * Linux 0.11 的 tty_ioctl() 把整个 struct termios 存在 tty->termios 里，copy_to_cooked() 按里面的标志处理每个字符。
  */
-int tty_ioctl(int tty, uint32_t cmd, struct termios *t)
+int tty_ioctl(int tty, uint32_t cmd, void *arg)
 {
+    struct termios *t = arg;
+    if (cmd == TIOCGPGRP) {
+        *(int32_t *)arg = ttys[tty].pgrp;
+        return 0;
+    }
+    if (cmd == TIOCSPGRP) {
+        /*
+         * tcsetpgrp：换前台进程组。只有这个终端所属会话里的进程能换，换成的组也得在这个会话里：
+         * 不然别的会话（串口上登录的人）能把控制台抢过去。shell 运行前台作业时换成作业的组，作业停下或结束了换回自己。
+         */
+        int32_t pgrp = *(int32_t *)arg;
+        if (sched_sid() != ttys[tty].sid || !sched_pgrp_in_session(pgrp, ttys[tty].sid))
+            return -1;
+        ttys[tty].pgrp = pgrp;
+        return 0;
+    }
     if (cmd == TCGETS) {
         *t = (struct termios){ .c_lflag = ttys[tty].lflag };
         return 0;
@@ -170,6 +199,19 @@ int32_t tty_read(int tty, void *dst, uint32_t n)
     struct tty *t = &ttys[tty];
     char tmp[LINE_MAX];
     uint32_t got = 0;
+
+    /*
+     * 作业控制：这个终端所属会话里的后台进程来读，就让它停下（SIGTTIN 的默认动作），不然它和前台的程序抢键盘。
+     * shell 用 fg 把它放到前台、发 SIGCONT，它接着往下，再看一遍自己是不是前台。
+     * 它要是忽略或者接住了 SIGTTIN，读就返回 -1（POSIX 的 EIO）。只让读的这一个停下，同组的别的进程接着运行。
+     */
+    while (t->sid && sched_sid() == t->sid && t->pgrp && sched_pgrp() != t->pgrp) {
+        if (sched_action(SIGTTIN) != (uint32_t)SIG_DFL)
+            return -1;
+        sched_stop(SIGTTIN);
+        if (sched_signal_pending())
+            return -EINTR;          /* 停着的时候来了 SIGKILL 之类 */
+    }
     uint32_t flags = irq_save();
 
     while (t->ready_tail == t->ready_head) {

@@ -59,8 +59,8 @@ struct file *file_open(const char *path, int flags)
             if (d.zone[0] == (TTY_MAJOR << 8 | 0) || (d.zone[0] == (TTY_MAJOR << 8 | 64) && serial_present())) {
                 type = FILE_TTY;
                 tty = d.zone[0] == (TTY_MAJOR << 8 | 0) ? TTY_CONSOLE : TTY_SERIAL;
-                if (sched_claim_tty(tty))
-                    tty_set_pgrp(tty, sched_pgrp());    /* 进程组的头第一次打开终端：它这一组成了这个终端的前台进程组 */
+                if (sched_claim_tty(tty))   /* 会话的头第一次打开终端：终端归这个会话，它这一组成了前台进程组 */
+                    tty_set_pgrp(tty, sched_pgrp(), sched_sid());
             } else if (d.zone[0] == (TTY_MAJOR << 8 | 1)) {
                 type = FILE_TASKS;
             } else {
