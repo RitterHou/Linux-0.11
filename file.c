@@ -71,6 +71,16 @@ struct file *file_open(const char *path, int flags)
                 goto fail;          /* 目录只有内核能改；硬盘这样的块设备只能 mount，不能直接读写 */
             if (!(ip = iget(dev, ino)))
                 goto fail;
+            if (access != O_RDONLY && ip->execs > 0) {
+                /*
+                 * 有任务正在运行这个程序：它的页是用到时才从文件里读的，改了文件，后读进来的页就和先读进来的对不上。
+                 * Unix 在这里返回 ETXTBSY（text file busy）。Linux 0.11 一次就把程序读进来，没有这个问题。
+                 */
+                iput(ip);
+                goto fail;
+            }
+            if (access != O_RDONLY)
+                ip->writers++;
             if ((flags & O_TRUNC) && access != O_RDONLY)
                 fs_truncate(ip);
         }
@@ -132,6 +142,8 @@ void file_put(struct file *f)
         panic("trying to close a closed file");
     int last = --f->count == 0;
     struct m_inode *ip = last && f->type == FILE_INODE ? f->ip : 0;
+    if (ip && (f->mode & O_ACCMODE) != O_RDONLY)
+        ip->writers--;
     if (last && (f->type == FILE_PIPE_READ || f->type == FILE_PIPE_WRITE))
         pipe_close(f->pipe, f->type == FILE_PIPE_WRITE);   /* 最后一个拿着这一头的关掉了 */
     irq_restore(flags);

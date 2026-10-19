@@ -295,7 +295,7 @@ static void dispatch(struct interrupt_frame *frame)
         if (vector == PAGE_FAULT_VECTOR) {
             uint32_t cr2;
             __asm__ volatile("movl %%cr2, %0" : "=r"(cr2));     /* 出错的虚拟地址 */
-            if (handle_page_fault(cr2, frame->error_code))
+            if (handle_page_fault(cr2, frame->error_code, (frame->eflags & 0x200) != 0))
                 return;             /* 补上了一页：返回后 CPU 重新执行出错的指令 */
         }
         if (from_user_mode(frame) && caused_by_program(vector))

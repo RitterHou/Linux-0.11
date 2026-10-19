@@ -92,6 +92,9 @@ struct task {
     uint32_t cutime, cstime;        /* waitpid 收走的子进程（连同它们收走的子进程）用了多少 */
     uint16_t uid, euid, suid;       /* 实际、有效、保存的用户号：内核建的任务都是 0（root）。fork 继承 */
     uint16_t gid, egid, sgid;       /* 组号，同上 */
+    struct m_inode *exec_ip;        /* 正在运行的程序文件（iget 着）：缺页时从它里面读程序的页。内核建的任务是 0 */
+    struct segment segs[MAX_SEGS];  /* 程序要装入的段，exec 时从 ELF 的程序头里抄下来 */
+    int nsegs;
 };
 
 static struct tss tss[NR_TASKS];
@@ -262,6 +265,67 @@ void sched_exec_ids(int set_uid, uint32_t uid, int set_gid, uint32_t gid)
         t->egid = (uint16_t)gid;
     t->suid = t->euid;
     t->sgid = t->egid;
+}
+
+/*
+ * exec 换上了新程序：记下程序文件和它的段，返回原来的程序文件，由调用者放手（sched_drop_exec 那样）。
+ * 调用者拿着文件系统锁，ip 已经 iget 过、execs 加过一。
+ */
+struct m_inode *sched_set_exec(struct m_inode *ip, const struct segment *segs, int n)
+{
+    struct task *t = &tasks[current_task];
+    struct m_inode *old = t->exec_ip;
+    uint32_t flags = irq_save();            /* 缺页处理会读这几项 */
+    t->exec_ip = ip;
+    t->nsegs = n;
+    for (int i = 0; i < n; i++)
+        t->segs[i] = segs[i];
+    irq_restore(flags);
+    return old;
+}
+
+/* 当前任务运行的程序文件和它的段；内核建的任务返回 0。 */
+struct m_inode *current_exec(const struct segment **segs, int *n)
+{
+    struct task *t = &tasks[current_task];
+    *segs = t->segs;
+    *n = t->nsegs;
+    return t->exec_ip;
+}
+
+/*
+ * 别的任务正在运行同一个程序文件 ip，而且已经装入了 va 这一页：返回那个物理页，引用次数加一；没有返回 0。
+ * 调用者关着中断：找到以后、加上引用之前，那个任务不会结束、把页还回去。
+ */
+uint32_t sched_share_page(struct m_inode *ip, uint32_t va)
+{
+    for (int n = 1; n < NR_TASKS; n++) {
+        if (n == current_task || tasks[n].exec_ip != ip || tasks[n].state == TASK_UNUSED || tasks[n].state == TASK_ZOMBIE)
+            continue;
+        uint32_t page = user_page_phys(tasks[n].page_dir, va);
+        if (page) {
+            page_add_ref(page);
+            return page;
+        }
+    }
+    return 0;
+}
+
+/* 不再运行这个程序了（exec 换了别的、或者要结束了）：放开程序文件。会拿文件系统锁，要在能睡的时候调用。 */
+void sched_drop_exec(void)
+{
+    struct task *t = &tasks[current_task];
+    struct m_inode *ip = t->exec_ip;
+    if (!ip)
+        return;
+    fs_lock();
+    uint32_t flags = irq_save();
+    t->exec_ip = 0;
+    t->nsegs = 0;
+    irq_restore(flags);
+    ip->execs--;
+    iput(ip);                       /* 程序文件已经删掉了的话，最后一个运行它的结束时才真正收回 */
+    fs_unlock();
 }
 
 /* times 系统调用：自己和收走的子进程用了多少 CPU 时间，返回开机以来的 tick 数。Linux 0.11 的 sys_times() 也返回 jiffies。 */
@@ -842,7 +906,14 @@ int sched_fork(const struct interrupt_frame *frame)
                               .cloexec = tasks[current_task].cloexec,
                               .priority = tasks[current_task].priority, .counter = tasks[current_task].priority,
                               .uid = tasks[current_task].uid, .euid = tasks[current_task].euid, .suid = tasks[current_task].suid,
-                              .gid = tasks[current_task].gid, .egid = tasks[current_task].egid, .sgid = tasks[current_task].sgid };
+                              .gid = tasks[current_task].gid, .egid = tasks[current_task].egid, .sgid = tasks[current_task].sgid,
+                              .exec_ip = tasks[current_task].exec_ip, .nsegs = tasks[current_task].nsegs };
+    for (int i = 0; i < MAX_SEGS; i++)
+        tasks[n].segs[i] = tasks[current_task].segs[i];
+    if (tasks[n].exec_ip) {         /* 子进程运行的是同一个程序：多一个引用。调用者拿着文件系统锁（见 sys_fork） */
+        tasks[n].exec_ip->count++;
+        tasks[n].exec_ip->execs++;
+    }
     for (int i = 0; i < 32; i++)
         tasks[n].action[i] = tasks[current_task].action[i];
     set_name(n, tasks[current_task].name);
@@ -951,6 +1022,7 @@ void sched_exit(uint32_t status)
         if (f)
             file_put(f);
     }
+    sched_drop_exec();              /* 和关文件一样要拿文件系统锁，趁还能睡的时候做 */
     if (t->leader && t->ctty)
         tty_release_pgrp(t->ctty - 1, t->pgrp);  /* 终端的前台进程组没了头：Ctrl+C 不再发给这一组。Linux 0.11 的 do_exit() 也这样 */
     __asm__ volatile("cli");        /* 不再返回，切到的任务从自己的 TSS 装入 EFLAGS，中断状态随之恢复 */

@@ -69,7 +69,9 @@ struct dir_entry {                  /* 目录项，16 字节 */
 struct m_inode {
     uint32_t dev;                   /* 在哪块盘上 */
     uint32_t ino;
-    int count;                      /* 有几处在用：打开的文件、正在执行的操作 */
+    int count;                      /* 有几处在用：打开的文件、正在执行的操作、正在运行它的任务 */
+    int writers;                    /* 有几个打开的文件能写它 */
+    int execs;                      /* 有几个任务正在运行它（按需从它里面装入程序的页）：这时不让写 */
     struct minix_inode d;           /* 磁盘上那 32 字节的拷贝，改了就写回去 */
 };
 

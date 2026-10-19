@@ -170,7 +170,12 @@ static int32_t sys_exit(uint32_t code, uint32_t b, uint32_t c, struct interrupt_
 static int32_t sys_fork(uint32_t a, uint32_t b, uint32_t c, struct interrupt_frame *frame)
 {
     (void)a, (void)b, (void)c;
-    return from_user_mode(frame) ? sched_fork(frame) : -1;
+    if (!from_user_mode(frame))
+        return -1;
+    fs_lock();                      /* 子进程也引用程序文件的 i 节点：改 i 节点表要拿着锁 */
+    int pid = sched_fork(frame);
+    fs_unlock();
+    return pid;
 }
 
 /*

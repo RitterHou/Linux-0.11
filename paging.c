@@ -122,6 +122,7 @@ _Static_assert(USER_LOW % 0x400000u == 0 && USER_TOP - USER_LOW == 0x400000u,
 
 uint32_t page_faults;               /* 缺页异常补上了几页（页不存在），显示在第 3 行 */
 uint32_t cow_faults;                /* 写时复制处理了几次（写了 fork 留下的只读页） */
+uint32_t shared_pages;              /* 程序的只读页和正在运行同一个程序的进程共用了几次 */
 
 uint32_t kernel_page_dir(void)
 {
@@ -219,17 +220,70 @@ static int copy_on_write(uint32_t *pte)
 }
 
 /*
- * 缺页异常（14 号）：出错的地址在用户空间、而且是“页不存在”（错误码第 0 位为 0），
- * 就分配一页清零的物理页映射上去，返回 1；中断返回后 CPU 重新执行出错的那条指令，这次就能访问了。
- * 写了 fork 留下的只读页，交给 copy_on_write()。
- * 别的情况（页存在但没有权限、地址在堆和栈之间的空地或者不在用户空间、内存用完了）返回 0，由调用者照原来的规则处理：
- * 用户程序出错就结束它，内核出错就显示异常面板。
- * 内核读写用户传来的缓冲区时也可能碰到堆或栈里还没映射的页，同样在这里补上（prepare_user）。
- * 页表本身也是按需分配的：第一次缺页时，第 256 个页目录项还是空的。
- * Linux 0.11 的 do_no_page() 也是这样，用 get_free_page() 分一页、put_page() 填进页表；
- * 它还会先试着从可执行文件里读入那一页，或者与正在运行同一程序的进程共用，这里只有清零的页。
+ * 程序的页：exec 时一页也不装，用到哪一页才从程序文件里读哪一页（按需装入）。只读的页（代码和只读数据）先看看
+ * 有没有别的进程正在运行同一个程序、已经有了这一页：有就直接共用那个物理页，引用次数加一，不用再读硬盘。
+ * 可写的页（.data、.bss）每个进程一份。读文件要睡（等硬盘），所以要先打开中断；出错时中断关着（不能睡）就不行。
+ * 返回 1 表示装好了，0 表示这一页不归程序管（交给下面当堆的页处理），-1 表示失败。
+ * Linux 0.11 的 do_no_page() 也是先 share_page()，不行再 bread_page() 从文件里读，它还要求共用的页没有被写过。
  */
-int handle_page_fault(uint32_t addr, uint32_t error_code)
+static int load_program_page(uint32_t *pde, uint32_t addr, int can_sleep)
+{
+    const struct segment *segs;
+    int n;
+    struct m_inode *ip = current_exec(&segs, &n);
+    uint32_t va = addr & ~(PAGE_SIZE - 1), page = 0;
+    int writable = 0, covered = 0;
+    for (int i = 0; ip && i < n; i++) {
+        if (va < segs[i].vaddr + segs[i].memsz && va + PAGE_SIZE > segs[i].vaddr) {
+            covered = 1;
+            writable |= segs[i].writable;
+        }
+    }
+    if (!covered)
+        return 0;
+    if (!can_sleep)
+        return -1;
+    if (!writable && (page = sched_share_page(ip, va)) != 0) {
+        shared_pages++;
+    } else {
+        if ((page = get_free_page()) == 0)
+            return -1;
+        __asm__ volatile("sti");    /* 读硬盘要睡；回来以后接着关着中断，和进来时一样 */
+        int ok = exec_fill_page(va, page, &writable);
+        __asm__ volatile("cli");
+        if (ok <= 0) {
+            free_page(page);
+            return -1;
+        }
+    }
+    if (!(*pde & PAGE_PRESENT)) {   /* 睡的时候页目录不会变：只有这个任务自己改它的页表 */
+        uint32_t table = get_free_page();
+        if (table == 0) {
+            free_page(page);
+            return -1;
+        }
+        *pde = table | PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
+    }
+    uint32_t *table = (uint32_t *)(*pde & ~0xFFFu);
+    table[(addr >> 12) & (ENTRIES - 1)] = page | PAGE_PRESENT | PAGE_USER | (writable ? PAGE_WRITE : 0);
+    page_faults++;
+    mem_show();
+    return 1;
+}
+
+/*
+ * 缺页异常（14 号）：出错的地址在用户空间、而且是“页不存在”（错误码第 0 位为 0）：
+ *   - 程序的页：从程序文件里读进来，或者和别的进程共用，见 load_program_page()；
+ *   - 堆（brk 以下）和栈区（顶端 64 KB）：分配一页清零的物理页映射上去。
+ * 返回 1；中断返回后 CPU 重新执行出错的那条指令，这次就能访问了。写了 fork 留下的只读页，交给 copy_on_write()。
+ * 别的情况（页存在但没有权限、地址在堆和栈之间的空地或者不在用户空间、内存用完了、读不出程序文件）返回 0，
+ * 由调用者照原来的规则处理：用户程序出错就结束它，内核出错就显示异常面板。
+ * can_sleep：出错之前中断是开着的，处理时可以睡（从文件读程序的页要睡）。
+ * 内核读写用户传来的缓冲区时也可能碰到还没映射的页，同样在这里补上（prepare_user）。
+ * 页表本身也是按需分配的：第一次缺页时，第 256 个页目录项还是空的。
+ * Linux 0.11 的 do_no_page() 也是这样，用 get_free_page() 分一页、put_page() 填进页表。
+ */
+int handle_page_fault(uint32_t addr, uint32_t error_code, int can_sleep)
 {
     if (addr < USER_LOW || addr >= USER_TOP)
         return 0;
@@ -253,6 +307,11 @@ int handle_page_fault(uint32_t addr, uint32_t error_code)
      */
     if ((addr & ~(PAGE_SIZE - 1)) >= current_brk() && addr < STACK_LOW)
         return 0;
+    if (addr < STACK_LOW) {
+        int loaded = load_program_page(pde, addr, can_sleep);
+        if (loaded != 0)
+            return loaded > 0;
+    }
     if (!(*pde & PAGE_PRESENT)) {
         uint32_t table = get_free_page();       /* 已清零：1024 项都不存在 */
         if (table == 0)
@@ -293,9 +352,9 @@ static int prepare_user(uint32_t addr, uint32_t size, int write)
         uint32_t pte = (pde & PAGE_PRESENT) ? ((uint32_t *)(pde & ~0xFFFu))[(page >> 12) & (ENTRIES - 1)] : 0;
         int ok = 1;
         if (!(pte & PAGE_PRESENT))
-            ok = handle_page_fault(page, write ? PF_WRITE : 0);
+            ok = handle_page_fault(page, write ? PF_WRITE : 0, flags & 0x200);   /* 进来之前开着中断，就能睡 */
         else if (write && !(pte & PAGE_WRITE))
-            ok = handle_page_fault(page, PF_PROTECTION | PF_WRITE);     /* 写时复制的页复制好；代码页失败 */
+            ok = handle_page_fault(page, PF_PROTECTION | PF_WRITE, 0);  /* 写时复制的页复制好；代码页失败 */
         irq_restore(flags);
         if (!ok)
             return 0;
@@ -317,7 +376,7 @@ int user_write_ok(uint32_t addr, uint32_t size)
 
 /*
  * 在页目录 dir 的用户空间里给 addr 所在的页准备一个物理页（清零的），返回它的物理地址；没有内存时返回 0。
- * 这一页已经有了就直接用它，需要可写时打开可写位。exec 用它往还没装入 CR3 的新页目录里放程序：
+ * 这一页已经有了就直接用它，需要可写时打开可写位。exec 用它往还没装入 CR3 的新页目录里放栈顶那一页（参数）：
  * 物理页在一一对应映射的范围内，内核按物理地址直接写。页表不存在时先分一页当页表。
  */
 uint32_t map_user_page(uint32_t dir, uint32_t addr, int writable)
@@ -342,16 +401,14 @@ uint32_t map_user_page(uint32_t dir, uint32_t addr, int writable)
     return page;
 }
 
-/* 页目录 dir 里 addr 所在的页：没有映射返回 -1，可写返回 1，只读返回 0。 */
-int user_page_writable(uint32_t dir, uint32_t addr)
+/* 页目录 dir 里 addr 所在的页的物理地址；没有映射返回 0。 */
+uint32_t user_page_phys(uint32_t dir, uint32_t addr)
 {
     uint32_t pde = ((uint32_t *)dir)[addr >> 22];
     if (!(pde & PAGE_PRESENT))
-        return -1;
+        return 0;
     uint32_t pte = ((uint32_t *)(pde & ~0xFFFu))[(addr >> 12) & (ENTRIES - 1)];
-    if (!(pte & PAGE_PRESENT))
-        return -1;
-    return (pte & PAGE_WRITE) ? 1 : 0;
+    return (pte & PAGE_PRESENT) ? pte & ~0xFFFu : 0;
 }
 
 /*

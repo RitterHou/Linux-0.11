@@ -393,9 +393,11 @@ def test_boot_screen(m, elf):
           f"第 1 行应显示硬盘的扇区数和型号，以及挂载的文件系统：{rows[1]!r}")
     check(rows[2] == "Hello from kmain() in C!", f"第 2 行不对：{rows[2]!r}")
     # 写时复制的次数取决于 fork 之后谁先写栈，不卡死；用掉的页数是 A 的内核栈，init、letter、sh、串口上的 login 各自的
-    # 内核栈、页目录、页表、栈页，letter 的代码页，sh 和 login 的代码页和数据页，约 27 页
-    match = re.fullmatch(r"memory: (\d+)/3840 pages free  page faults: 1  copy-on-write: (\d+)", rows[3])
-    check(match and 3800 <= int(match.group(1)) <= 3825 and int(match.group(2)) >= 2, f"第 3 行不对：{rows[3]!r}")
+    # 内核栈、页目录、页表、栈页，以及它们用到的程序的页（用到才从硬盘读进来），约 25 页。
+    # 缺页至少有 init 的栈页，加上 letter、sh、login 各自用到的代码页和数据页；这几个程序各不相同，没有共用的页
+    match = re.fullmatch(r"memory: (\d+)/3840 pages free  page faults: (\d+)  copy-on-write: (\d+)  shared: 0", rows[3])
+    check(match and 3800 <= int(match.group(1)) <= 3825 and int(match.group(2)) >= 4 and int(match.group(3)) >= 2,
+          f"第 3 行不对：{rows[3]!r}")
     check(re.fullmatch(r"ticks: \d+( +idle: +\d+%)? +\d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC", rows[4]) is not None, f"第 4 行不对：{rows[4]!r}")
     check(rows[5] == "paging: on, 0xC0000000 -> 0xB8000", f"第 5 行不对：{rows[5]!r}")
     check(rows[6].startswith("tasks: "), f"第 6 行不对：{rows[6]!r}")
@@ -1101,7 +1103,7 @@ def test_deep_stack(_m, _elf):
         check("k" in task_output(m) and "x" not in task_output(m),
               f"write 读到栈区里没映射的页时内核应补上，返回 1（用户程序写 k）：{task_output(m)!r}")
         row3 = m.screen(4)[3]
-        match = re.fullmatch(r"memory: (\d+)/3840 pages free  page faults: (\d+)  copy-on-write: \d+", row3)
+        match = re.fullmatch(r"memory: (\d+)/3840 pages free  page faults: (\d+)  copy-on-write: \d+  shared: \d+", row3)
         check(match is not None, f"第 3 行不对：{row3!r}")
         check(int(match.group(2)) >= 5, f"5 页栈应各缺页一次：{row3!r}")
         check(match.group(1) == "3839", f"任务 B 结束后它的页应全部收回，只剩任务 A 的内核栈：{row3!r}")
@@ -2114,10 +2116,66 @@ def entry_row(m, path, name):
     return next((r for r in run_command(m, f"ls -l {path} | grep {name}") if r.split()[-1] == name), "")
 
 
+def test_demand_loading(m, elf):
+    """按需装入：程序的页用到才从硬盘读；同一个程序同时运行两份，只读的页共用；运行中的程序删掉了照样运行；运行中的程序写不了，开着写的文件也运行不了"""
+    def memory():
+        g = re.fullmatch(r"memory: (\d+)/3840 pages free  page faults: \d+  copy-on-write: \d+  shared: (\d+)", m.screen(4)[3])
+        check(g, f"第 3 行：{m.screen(4)[3]!r}")
+        return int(g.group(1)), int(g.group(2))
+
+    def settle(command):
+        """在后台运行 command，等它读完表、睡下，返回这时的空闲页数和共用次数"""
+        check(re.fullmatch(r"\[\d+\]", run_command(m, command + " &")[0]), f"后台运行 {command}")
+        time.sleep(1)
+        return memory()
+
+    check(run_command(m, "check lazy > /tmp/lazy0") == [], "先在前台运行一次：shell 自己的页（写时复制的栈）都备好了")
+    base, shared0 = memory()
+    free1, _ = settle("check lazy > /tmp/lazy1")
+    used1 = base - free1
+    check(used1 <= 10, f"只读表的第一页：一共只多用了 {used1} 页（内核栈、页目录、页表、栈、用到的代码和数据，加表的一页）")
+    time.sleep(3)
+    free2, _ = settle("check lazy all > /tmp/lazy2")
+    used2 = base - free2
+    check(used2 - used1 >= 15, f"读遍 16 页的表：比只读一页多用了 {used2 - used1} 页，应至少多 15 页（第一次 {used1}，这次 {used2}）")
+    free3, shared3 = settle("check lazy all > /tmp/lazy3")
+    check(free2 - free3 <= used1 and shared3 - shared0 >= 16,
+          f"同时再运行一份：表的 16 页和代码页都和前一份共用，只多用了 {free2 - free3} 页，共用了 {shared3 - shared0} 次")
+    time.sleep(3)
+    check(run_command(m, "cat /tmp/lazy1 /tmp/lazy2 /tmp/lazy3") == ["lazy ok"] * 3, "每一份读到的表都对")
+    run_command(m, "echo")              # shell 读命令之前收走结束了的后台程序
+    check(memory()[0] == base, f"都结束以后空闲页回到 {base}：{memory()[0]}")
+
+    inodes = lambda: run_command(m, "df")[0].split("inodes: ")[1]
+    check(run_command(m, "echo > /tmp/lazy4") == [], "先建好输出文件，免得它多占一个 i 节点")
+    before = inodes()
+    for command, expected in [("cat /bin/check > /tmp/lz", []), ("chmod 755 /tmp/lz", []), ("/tmp/lz lazy late > /tmp/lazy4 &", None),
+                              ("rm /tmp/lz", []), ("cat /tmp/lz", ["cat: /tmp/lz: cannot open"])]:
+        out = run_command(m, command)
+        check(expected is None or out == expected, f"{command} 应输出 {expected!r}，实际是 {out!r}")
+    check(inodes() != before, f"名字删了，可程序还在运行：i 节点还没收回：{inodes()!r}")
+    time.sleep(2)
+    check(run_command(m, "cat /tmp/lazy4") == ["lazy ok"], "程序文件删掉了，它还在运行，后面用到的页照样从删掉的文件里读出来")
+    run_command(m, "echo")
+    check(inodes() == before, f"程序结束以后，删掉的文件的 i 节点和块才收回：{inodes()!r}，原来 {before!r}")
+
+    for command, expected in [("cat /bin/check > /tmp/lz", []), ("chmod 755 /tmp/lz", []), ("/tmp/lz lazy > /tmp/lazy5 &", None),
+                              ("echo x >> /tmp/lz", ["sh: /tmp/lz: cannot redirect"])]:
+        out = run_command(m, command)
+        check(expected is None or out == expected, f"{command} 应输出 {expected!r}，实际是 {out!r}")
+    time.sleep(3.5)
+    check(run_command(m, "cat /tmp/lazy5") == ["lazy ok"], "程序在运行，它的文件写不进去，程序没被改坏")
+    out = run_command(m, "/tmp/lz lazy >> /tmp/lz")
+    check(out == ["sh: /tmp/lz: not found"], f"子进程先开着 /tmp/lz 写，再 exec 它：运行不了：{out!r}")
+    check(run_command(m, "/tmp/lz lazy late") == ["lazy ok"], "文件没被改，照样能运行")
+    for f in ("lz", "lazy0", "lazy1", "lazy2", "lazy3", "lazy4", "lazy5"):
+        run_command(m, f"rm /tmp/{f}")
+
+
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_console_scroll,
                 test_idle_in_hlt, test_demand_paging, test_fork_address_spaces, test_syscall_gate, test_user_setup, test_user_task,
-                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep, test_cache, test_ln_mv, test_script, test_shell_input, test_script_edge_cases, test_clock, test_stderr, test_nice_shell, test_users, test_login, test_serial, test_mount]
+                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep, test_cache, test_ln_mv, test_script, test_shell_input, test_script_edge_cases, test_clock, test_stderr, test_nice_shell, test_users, test_login, test_serial, test_mount, test_demand_loading]
 SEPARATE_TESTS = [test_syscalls, test_page_alloc, test_double_free, test_hd_rw, test_early_key, test_keyboard_edge_cases, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,
                   test_big_kernel, test_user_write_kernel, test_user_privileged,

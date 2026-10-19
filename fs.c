@@ -293,23 +293,37 @@ int namei(const char *path, uint32_t *devp, uint32_t *ino, struct minix_inode *i
 
 /* ------------------------------------------------------------------ 文件系统锁 */
 
-static int fs_busy;
+/*
+ * 拿着锁的任务可以再拿一次（只记一下深度）：它在文件系统里往用户的缓冲区复制时，缓冲区可能落在程序还没装入的页上，
+ * 缺页处理要从程序文件里读那一页，又要拿这把锁。这一层只读程序文件，而程序文件正在运行时谁也写不了它（见 file.c），
+ * 外面那一层正在改的东西不会被它碰到。Linux 0.11 每个 i 节点、每个缓冲区各有一把锁，没有这个问题。
+ */
+static int fs_busy, fs_owner, fs_depth;
 static struct wait_queue fs_wait;
 
 void fs_lock(void)
 {
     uint32_t flags = irq_save();
+    if (fs_busy && fs_owner == current_pid()) {
+        fs_depth++;
+        irq_restore(flags);
+        return;
+    }
     while (fs_busy)
         sleep_on(&fs_wait);
     fs_busy = 1;
+    fs_owner = current_pid();
+    fs_depth = 1;
     irq_restore(flags);
 }
 
 void fs_unlock(void)
 {
     uint32_t flags = irq_save();
-    fs_busy = 0;
-    wake_up(&fs_wait);
+    if (--fs_depth == 0) {
+        fs_busy = 0;
+        wake_up(&fs_wait);
+    }
     irq_restore(flags);
 }
 
@@ -355,6 +369,7 @@ struct m_inode *iget(uint32_t dev, uint32_t ino)
     empty->dev = dev;
     empty->ino = ino;
     empty->count = 1;
+    empty->writers = empty->execs = 0;
     return empty;
 }
 

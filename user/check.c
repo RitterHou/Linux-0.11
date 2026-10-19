@@ -7,8 +7,32 @@
  * 最后打印 badptr ok。内核要是等到写的时候才发现那一页是只读的，就只能停机了。
  * check fds：打印开着的描述符，例如 fds: 0 1 2。看 exec 之后还留着哪些描述符（close-on-exec 关掉了哪些）。
  * check spin：在用户态空转半秒（50 个 tick），给 time 和 nice 一个一直要 CPU 的程序。
+ * check lazy [all|late]：程序里有一张 64 KB（16 页）的只读表，每页开头记着页号。不带参数只读第一页，all 读遍 16 页，
+ * 读完都睡 3 秒（好让别人看第 3 行的空闲页数）；late 先睡 1 秒再读遍 16 页。每页的记号都对，以 0 退出，打印 lazy ok。
+ * 睡之前还往 .data 里的 mine 写下自己的任务号，睡醒再看：可写的页每个进程一份，别的 check 写不到这里。
+ * 程序的页是用到才从硬盘读进来的：只读第一页，就只多用了一页；两个 check 一起运行，只读的页共用。
  */
 #include "ulib.h"
+
+/* 16 页的只读表：放在 .rodata，和代码一起映射成只读，能和别的进程共用 */
+#define PAGE_WORDS 1024
+static const uint32_t table[16 * PAGE_WORDS] = {
+    [0 * PAGE_WORDS] = 1, [1 * PAGE_WORDS] = 2, [2 * PAGE_WORDS] = 3, [3 * PAGE_WORDS] = 4,
+    [4 * PAGE_WORDS] = 5, [5 * PAGE_WORDS] = 6, [6 * PAGE_WORDS] = 7, [7 * PAGE_WORDS] = 8,
+    [8 * PAGE_WORDS] = 9, [9 * PAGE_WORDS] = 10, [10 * PAGE_WORDS] = 11, [11 * PAGE_WORDS] = 12,
+    [12 * PAGE_WORDS] = 13, [13 * PAGE_WORDS] = 14, [14 * PAGE_WORDS] = 15, [15 * PAGE_WORDS] = 16,
+};
+
+/* 读表的前 n 页，看每页开头的记号对不对。volatile：不让 clang 把读表省掉 */
+static int read_table(int n)
+{
+    int ok = 1;
+    for (int k = 0; k < n; k++)
+        ok &= ((const volatile uint32_t *)table)[k * PAGE_WORDS] == (uint32_t)(k + 1);
+    return ok;
+}
+
+static volatile int32_t mine = -1;  /* .data */
 
 /* volatile：否则 clang 看出它们从没被改过，直接把值算出来，.data 和 .bss 就根本不会生成 */
 volatile int initialized = 12345;
@@ -118,6 +142,18 @@ int main(int argc, char **argv)
             for (volatile int i = 0; i < 100000; i++)   /* 隔一阵才问一次：系统调用在 QEMU 里很慢，问得勤了时间都记在内核态 */
                 ;
         return 0;
+    }
+    if (argc >= 2 && strcmp(argv[1], "lazy") == 0) {
+        int late = argc == 3 && strcmp(argv[2], "late") == 0, all = argc == 3 && strcmp(argv[2], "all") == 0;
+        mine = getpid();
+        if (late)
+            sleep(100);
+        int ok = read_table(all || late ? 16 : 1);
+        if (!late)
+            sleep(300);
+        ok &= mine == getpid();
+        print(ok ? "lazy ok\n" : "lazy bad\n");
+        return ok ? 0 : 1;
     }
     if (argc == 2 && strcmp(argv[1], "malloc") == 0)
         return check_malloc() ? 0 : 1;
