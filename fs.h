@@ -74,6 +74,7 @@ void fs_truncate(struct m_inode *ip);
 struct m_inode *fs_create(const char *path);
 int fs_mkdir(const char *path);
 int fs_unlink(const char *path);
+int fs_link(const char *oldpath, const char *newpath);
 int fs_rmdir(const char *path);
 struct fsinfo;
 int fs_info(struct fsinfo *info);

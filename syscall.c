@@ -272,6 +272,20 @@ static int32_t path_op(uint32_t path, struct interrupt_frame *frame, int (*op)(c
     return ret;
 }
 
+/* link(old, new)：两个路径都复制进内核，在文件系统锁里交给 fs_link()。 */
+static int32_t sys_link(uint32_t oldpath, uint32_t newpath, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)c;
+    char from[PATH_MAX], to[PATH_MAX];
+
+    if (get_path(from, oldpath, from_user_mode(frame)) < 0 || get_path(to, newpath, from_user_mode(frame)) < 0)
+        return -1;
+    fs_lock();
+    int ret = fs_link(from, to);
+    fs_unlock();
+    return ret;
+}
+
 static int32_t sys_unlink(uint32_t path, uint32_t b, uint32_t c, struct interrupt_frame *frame)
 {
     (void)b, (void)c;
@@ -467,6 +481,7 @@ static const syscall_fn syscall_table[SYS_CALLS] = {
     [SYS_ALARM]  = sys_alarm,
     [SYS_PAUSE]  = sys_pause,
     [SYS_SYNC]   = sys_sync,
+    [SYS_LINK]   = sys_link,
 };
 
 void syscall_dispatch(struct interrupt_frame *frame)

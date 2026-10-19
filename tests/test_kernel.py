@@ -1163,6 +1163,20 @@ def test_sync(_m, _elf):
             check(len(out) > i and out[i] == ch, f"第 {i + 1} 项（{meaning[ch]}）没有通过：第 6 行去掉 A 后是 {out!r}，应为 {expected!r}")
 
 
+def test_link(_m, _elf):
+    """硬链接：两个名字一个 i 节点、链接数 2；从一个名字写另一个马上读得到；删一个名字不收回；开着的文件删光名字也能读；错误情况"""
+    d = build_selftest("USER_LINK")
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        m.wait_for(lambda mm: message_row(mm) == "task 2 exited with code 0", timeout=10, what="init 的结束消息")
+        out = task_output(m).replace("A", "")
+        expected = "lwuoe"
+        meaning = {"l": "link 之后同一个 i 节点、链接数 2、内容一样", "w": "从一个名字写，另一个名字马上读得到",
+                   "u": "删掉一个名字不收回，链接数变回 1；两个都删了才收回", "o": "开着的文件删光名字也能读，关掉才收回",
+                   "e": "目录、已经存在的名字、不存在的源和目录、太长的名字都不行"}
+        for i, ch in enumerate(expected):
+            check(len(out) > i and out[i] == ch, f"第 {i + 1} 项（{meaning[ch]}）没有通过：第 6 行去掉 A 后是 {out!r}，应为 {expected!r}")
+
+
 def test_fs_write(_m, _elf):
     """写文件：O_EXCL、读写权限、O_TRUNC、O_APPEND、删掉开着的文件、目录的错误、同一个文件开两次共用 i 节点"""
     d = build_selftest("USER_FSWRITE")
@@ -1414,17 +1428,40 @@ def test_cache(m, elf):
     check(run_command(m, "rm /tmp/c1") == [] and run_command(m, "cat /tmp/c1") == ["cat: /tmp/c1: cannot open"], "删掉")
 
 
+
+def test_ln_mv(m, elf):
+    """ln 和 mv：两个名字同一个 i 节点，删一个另一个还在；mv 改名、搬进目录、覆盖；目录搬不了"""
+    ino = lambda out, name: next((l.split()[2] for l in out if l.split()[-1] == name), None)
+    for command, expected in [("echo hi > /tmp/x", []), ("ln /tmp/x /tmp/y", [])]:
+        check(run_command(m, command) == expected, f"{command} 应输出 {expected!r}")
+    out = run_command(m, "ls /tmp")
+    check(ino(out, "x") and ino(out, "x") == ino(out, "y"), f"x 和 y 是同一个 i 节点：{out!r}")
+    first = ino(out, "x")
+    for command, expected in [("rm /tmp/x", []), ("cat /tmp/y", ["hi"]), ("mv /tmp/y /tmp/z", []), ("mkdir /tmp/dd", []),
+                              ("mv /tmp/z /tmp/dd", []), ("cat /tmp/dd/z", ["hi"]), ("echo a > /tmp/w", []),
+                              ("mv /tmp/w /tmp/dd/z", []), ("cat /tmp/dd/z", ["a"]), ("mv /tmp/dd/z /tmp/dd/z", []),
+                              ("cat /tmp/dd/z", ["a"]), ("mv /tmp/dd /tmp/ee", ["mv: /tmp/dd: cannot move a directory"]),
+                              ("ln /tmp/nothing /tmp/q", ["ln: /tmp/q: cannot link"]), ("ln /tmp /tmp/t2", ["ln: /tmp/t2: cannot link"]),
+                              ("mv /tmp/nothing /tmp/q", ["mv: /tmp/nothing: no such file"]), ("ln", ["usage: ln file newname"])]:
+        out = run_command(m, command)
+        check(out == expected, f"{command} 应输出 {expected!r}，实际是 {out!r}")
+    out = run_command(m, "ls /tmp")
+    check([l.split()[-1] for l in out] == [".", "..", "dd"], f"改名、搬走以后 /tmp 里只剩 dd：{out!r}")
+    check(run_command(m, "rm /tmp/dd/z") == [] and run_command(m, "rmdir /tmp/dd") == [], "清理")
+    check(first is not None, "有 i 节点号")
+
+
 # 前几项共用一台正常启动的虚拟机；其余各自启动自检内核。
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_console_scroll,
                 test_idle_in_hlt, test_demand_paging, test_fork_address_spaces, test_syscall_gate, test_user_setup, test_user_task,
-                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep, test_cache]
+                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep, test_cache, test_ln_mv]
 SEPARATE_TESTS = [test_syscalls, test_page_alloc, test_double_free, test_hd_rw, test_early_key, test_keyboard_edge_cases, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,
                   test_big_kernel, test_user_write_kernel, test_user_privileged,
                   test_user_bad_pointer, test_user_exit, test_all_tasks_exit,
                   test_nmi_in_user_mode, test_user_write_code, test_preemption,
-                  test_deep_stack, test_wild_read, test_fork_isolation, test_waitpid, test_file_system, test_exec, test_pipe, test_fs_write, test_signal_syscalls, test_brk, test_alarm, test_sync, test_no_disk]
+                  test_deep_stack, test_wild_read, test_fork_isolation, test_waitpid, test_file_system, test_exec, test_pipe, test_fs_write, test_signal_syscalls, test_brk, test_alarm, test_sync, test_link, test_no_disk]
 
 
 def main():
