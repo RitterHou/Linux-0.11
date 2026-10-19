@@ -26,7 +26,10 @@ int main(int argc, char **argv)
         inc = neg ? -(int32_t)n : (int32_t)n;
         i = 3;
     }
+    int32_t old = nice(0);
     nice(inc);
+    if (inc < 0 && old > -20 && nice(0) == old)
+        eprint("nice: cannot set niceness\n");    /* 只有 root 能调低；命令照样运行，和 coreutils 一样 */
     if (i >= argc) {                /* nice -n 3：没有命令，打印调过以后的值 */
         print_int(nice(0));
         print("\n");

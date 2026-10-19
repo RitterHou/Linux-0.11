@@ -1468,7 +1468,7 @@ def test_cwd(m, elf):
         check(out == expected, f"{command} 应输出 {expected!r}，实际是 {out!r}")
     run_command(m, "cd /etc")
     out = run_command(m, "ls")
-    check(names(out) == [".", "..", "group", "issue", "passwd"], f"ls 不带参数应列出当前目录 /etc：{out!r}")
+    check(names(out) == [".", "..", "group", "issue", "passwd", "shadow"], f"ls 不带参数应列出当前目录 /etc：{out!r}")
     check(names(run_command(m, "ls ..")) == names(run_command(m, "ls /")), "ls .. 应与 ls / 相同")
     wait_prompt(m)
     type_text(m, "exit\n")
@@ -1868,10 +1868,98 @@ def test_users(m, elf):
     check(run_command(m, "rm /tmp/owned") == [], "删掉")
 
 
+def test_login(m, elf):
+    """su、login、passwd：/etc/shadow 只有 root 能读；su 问密码时不回显；换成 user 以后权限都按 user 算；passwd 改密码；login 进家目录"""
+    banner = "shell on hda: try help, ls /bin, cat /hello.txt, ps"
+
+    def answer(prompt, text):
+        m.wait_for(lambda mm: last_line(mm) == prompt.rstrip(), timeout=5, what=f"提示 {prompt!r}")
+        type_text(m, text + "\n")
+
+    def new_shell(what):
+        m.wait_for(lambda mm: [r for r in console(mm) if r][-2:] == [banner, "$"], timeout=5, what=what)
+
+    def run_all(cases):
+        for command, expected in cases:
+            out = run_command(m, command)
+            check(out == expected, f"{command} 应输出 {expected!r}，实际是 {out!r}")
+
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
+    import mkshadow
+    shadow = run_command(m, "cat /etc/shadow")
+    check(shadow == [f"root:{mkshadow.hash_password('root', 'root')}", f"user:{mkshadow.hash_password('user', 'user')}"],
+          f"/etc/shadow 里是 名字:散列，和 tools/mkshadow.py 算的一样：{shadow!r}")
+    rows = run_command(m, "ls -l /etc") + run_command(m, "ls -l /bin | grep su") + run_command(m, "ls -l /bin | grep login")
+    perms = {r.split()[-1]: r.split()[0] for r in rows + run_command(m, "ls -l /bin | grep passwd")}
+    check(perms.get("shadow") == "-rw-------" and perms.get("su") == "-rwsr-xr-x" and perms.get("passwd") == "-rwsr-xr-x"
+          and perms.get("login") == "-rwxr-xr-x", f"shadow 只有 root 能读写，su、passwd 是 setuid 程序：{perms!r}")
+    out = run_command(m, "sleep 30 &")
+    sleeper = out[0][1:-1]
+
+    wait_prompt(m)
+    type_text(m, "su user\n")
+    new_shell("root 运行 su 不用输密码，换成 user 运行一个新的 shell")
+    run_all([("id", ["uid=100(user) gid=100(users)"]), ("cat /etc/shadow", ["cat: /etc/shadow: cannot open"]),
+             ("echo x > /x", ["sh: /x: cannot redirect"]), (f"kill {sleeper}", [f"kill: {sleeper}: cannot signal"]),
+             ("nice -n -5 nice", ["nice: cannot set niceness", "0"]), ("cd /home/user", []), ("echo hi > f", [])])
+    row = next((r for r in run_command(m, "ls -l") if r.split()[-1] == "f"), "")
+    check(row.split()[2:4] == ["100", "100"], f"user 新建的文件是 user 的：{row!r}")
+    run_all([("rm f", []), ("cd /", [])])
+
+    type_text(m, "su user\n")
+    m.wait_for(lambda mm: last_line(mm) == "password:", timeout=5, what="不是 root，su 要问密码")
+    type_text(m, "us")
+    time.sleep(0.3)
+    check(last_line(m) == "password:", f"回显关着：敲的密码不显示在屏幕上：{last_line(m)!r}")
+    type_text(m, "er\n")
+    new_shell("密码对了")
+    run_all([("id", ["uid=100(user) gid=100(users)"]), ("exit", [])])
+    type_text(m, "su\n")
+    answer("password: ", "user")
+    m.wait_for(lambda mm: [r for r in console(mm) if r][-2:] == ["su: wrong password", "$"], timeout=5, what="root 的密码不对")
+    type_text(m, "su\n")
+    answer("password: ", "root")
+    new_shell("user 运行 su，输对 root 的密码，变回 root")
+    run_all([("id", ["uid=0(root) gid=0(root)"]), ("exit", []), ("id", ["uid=100(user) gid=100(users)"])])
+
+    type_text(m, "passwd\n")
+    answer("old password: ", "user")
+    answer("new password: ", "secret")
+    answer("retype new password: ", "secret")
+    m.wait_for(lambda mm: [r for r in console(mm) if r][-2:] == ["password changed", "$"], timeout=5, what="passwd 改好了密码")
+    run_all([("passwd root", ["passwd: you may only change your own password"])])
+    type_text(m, "su user\n")
+    answer("password: ", "user")
+    m.wait_for(lambda mm: [r for r in console(mm) if r][-2:] == ["su: wrong password", "$"], timeout=5, what="旧密码不对了")
+    type_text(m, "su user\n")
+    answer("password: ", "secret")
+    new_shell("新密码对")
+    run_all([("exit", []), ("exit", []), ("id", ["uid=0(root) gid=0(root)"])])
+    type_text(m, "passwd user\n")
+    answer("new password: ", "user")                  # root 改别人的密码不用输原来的
+    answer("retype new password: ", "user")
+    m.wait_for(lambda mm: [r for r in console(mm) if r][-2:] == ["password changed", "$"], timeout=5, what="root 把密码改回去")
+    check(run_command(m, "cat /etc/shadow") == shadow, "改回去以后 shadow 和原来一样")
+
+    type_text(m, "login\n")
+    answer("login: ", "user")
+    answer("password: ", "wrong")
+    m.wait_for(lambda mm: [r for r in console(mm) if r][-2:] == ["login incorrect", "login:"], timeout=5, what="密码不对，再问一次")
+    type_text(m, "user\n")
+    answer("password: ", "user")
+    new_shell("login 成功，运行 user 的 shell")
+    run_all([("pwd", ["/home/user"]), ("id", ["uid=100(user) gid=100(users)"]), ("exit", [])])
+    type_text(m, "login\n")
+    m.wait_for(lambda mm: last_line(mm) == "login:", timeout=5, what="login 问用户名")
+    m.sendkeys(["ctrl-d"])
+    wait_prompt(m)
+    run_all([("su nosuch", ["su: nosuch: no such user"]), ("id", ["uid=0(root) gid=0(root)"]), (f"kill {sleeper}", [])])
+
+
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_console_scroll,
                 test_idle_in_hlt, test_demand_paging, test_fork_address_spaces, test_syscall_gate, test_user_setup, test_user_task,
-                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep, test_cache, test_ln_mv, test_script, test_shell_input, test_script_edge_cases, test_clock, test_stderr, test_nice_shell, test_users]
+                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep, test_cache, test_ln_mv, test_script, test_shell_input, test_script_edge_cases, test_clock, test_stderr, test_nice_shell, test_users, test_login]
 SEPARATE_TESTS = [test_syscalls, test_page_alloc, test_double_free, test_hd_rw, test_early_key, test_keyboard_edge_cases, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,
                   test_big_kernel, test_user_write_kernel, test_user_privileged,

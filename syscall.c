@@ -394,6 +394,22 @@ static int32_t sys_setgid(uint32_t gid, uint32_t b, uint32_t c, struct interrupt
     return sched_setgid(gid);
 }
 
+/* ioctl(fd, cmd, arg)：只有控制台（/dev/tty0）是终端，见 tty.c 的 tty_ioctl()。arg 先复制进内核，再复制回去。 */
+static int32_t sys_ioctl(uint32_t fd, uint32_t cmd, uint32_t arg, struct interrupt_frame *frame)
+{
+    struct file *f = fd_file(fd);
+    struct termios t;
+    int from_user = from_user_mode(frame);
+
+    if (!f || f->type != FILE_CONSOLE || (from_user && !user_write_ok(arg, sizeof(t))))
+        return -1;
+    t = *(struct termios *)arg;
+    int ret = tty_ioctl(cmd, &t);
+    if (ret == 0)
+        *(struct termios *)arg = t;
+    return ret;
+}
+
 /* chown(path, uid, gid)：见 fs.c 的 fs_chown()。 */
 static int32_t sys_chown(uint32_t path, uint32_t uid, uint32_t gid, struct interrupt_frame *frame)
 {
@@ -687,6 +703,7 @@ static const syscall_fn syscall_table[SYS_CALLS] = {
     [SYS_SETUID] = sys_setuid,
     [SYS_SETGID] = sys_setgid,
     [SYS_CHOWN]  = sys_chown,
+    [SYS_IOCTL]  = sys_ioctl,
 };
 
 void syscall_dispatch(struct interrupt_frame *frame)
