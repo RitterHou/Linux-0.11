@@ -9,6 +9,9 @@
  *     后台的子进程改成忽略，exec 之后也不变，所以 Ctrl+C 停不了后台程序，要用 kill。
  *   - 内建命令：cd 换当前目录（不带参数回到根目录），exit 退出 shell（init 会再拉起一个），help 显示能用的命令。
  *     cd 必须是内建的：子进程换了目录，父进程的当前目录不会跟着变。
+ *   - sh 脚本：从文件里一行行读命令，不打提示符，# 开头的行是注释；读完就退出。#! 开头、有执行权限的脚本
+ *     可以直接运行：exec 发现 #!/bin/sh，就改成运行 sh 脚本（见 exec.c）。运行脚本的 sh 不接住 Ctrl+C，
+ *     它和它正在运行的程序一起被结束。
  * Linux 0.11 的 init 运行的是磁盘上的 /bin/sh（当年的 bash），道理相同：pipe、fork、dup、exec、wait。
  */
 #include "ulib.h"
@@ -196,31 +199,73 @@ static void on_intr(int sig)
     (void)sig;
 }
 
+/*
+ * 从 fd 读一行，去掉换行放进 line，返回长度；读完了返回 -1；被信号打断返回 -EINTR。
+ * 终端一次 read 正好是一行；文件一次读进来好几行，多出来的留在 buf 里给下一次。
+ * 最后一行没有换行（文件末尾，或者在一行字后面按了 Ctrl+D）也算一行，下一次再返回 -1。
+ */
+static char buf[512];
+static uint32_t buf_len, buf_pos;
+static int at_end;
+
+static int32_t read_line(int32_t fd, char *line)
+{
+    uint32_t n = 0;
+    for (;;) {
+        while (buf_pos < buf_len) {
+            char c = buf[buf_pos++];
+            if (c == '\n') {
+                line[n] = '\0';
+                return (int32_t)n;
+            }
+            if (n < LINE_LEN - 1)       /* 太长的行截断 */
+                line[n++] = c;
+        }
+        if (at_end) {
+            line[n] = '\0';
+            return n ? (int32_t)n : -1;
+        }
+        int32_t got = read(fd, buf, sizeof(buf));
+        if (got == -EINTR && n == 0)
+            return -EINTR;
+        if (got <= 0)
+            at_end = 1;
+        else
+            buf_len = (uint32_t)got, buf_pos = 0;
+    }
+}
+
 int main(int sh_argc, char **sh_argv)
 {
-    (void)sh_argc, (void)sh_argv;
     char line[LINE_LEN];
     char *argv[MAX_ARGS + 1];
-    int32_t st;
+    int32_t st, in = 0;
+    int interactive = sh_argc < 2;
 
-    signal(SIGINT, on_intr);        /* Ctrl+C 结束的是前台程序，不是 shell 自己 */
-    signal(SIGTERM, SIG_IGN);       /* kill 0 发给这一组，也不该把 shell 自己结束；kill -9 才行 */
-    print("shell on hda: try help, ls /bin, cat /hello.txt, ps\n");
+    if (!interactive && (in = open(sh_argv[1], O_RDONLY)) < 0) {
+        print("sh: ");
+        print(sh_argv[1]);
+        print(": cannot open\n");
+        return 1;
+    }
+    if (interactive) {
+        signal(SIGINT, on_intr);    /* Ctrl+C 结束的是前台程序，不是 shell 自己 */
+        signal(SIGTERM, SIG_IGN);   /* kill 0 发给这一组，也不该把 shell 自己结束；kill -9 才行 */
+        print("shell on hda: try help, ls /bin, cat /hello.txt, ps\n");
+    }
     for (;;) {
         while (waitpid(-1, &st, WNOHANG) > 0)
             ;                       /* 收走结束了的后台程序 */
-        print("$ ");
-        int32_t n = read(0, line, LINE_LEN - 1);
-        if (n == 0)                 /* 空行上按了 Ctrl+D：像 exit 一样退出 */
+        if (interactive)
+            print("$ ");
+        int32_t n = read_line(in, line);
+        if (n == -1)                /* 读完了：脚本读到末尾，或者在空行上按了 Ctrl+D，像 exit 一样退出 */
             return 0;
         if (n < 0)
             continue;               /* 在提示符上按了 Ctrl+C（-EINTR）：终端已经回显 ^C，重新打提示符 */
-        line[n] = '\0';
-        if (line[n - 1] == '\n')
-            line[n - 1] = '\0';
         int argc = split(line, argv);
-        if (argc == 0)
-            continue;
+        if (argc == 0 || argv[0][0] == '#')
+            continue;               /* 空行和注释 */
         int background = strcmp(argv[argc - 1], "&") == 0;
         if (background) {
             argv[--argc] = 0;
@@ -239,7 +284,7 @@ int main(int sh_argc, char **sh_argv)
             continue;
         }
         if (strcmp(argv[0], "help") == 0) {
-            print("files: ls cat echo wc grep sort rm ln mv mkdir rmdir df sync pwd\n");
+            print("files: ls cat echo wc grep sort rm ln mv mkdir rmdir chmod df sync pwd\n");
             print("tasks: ps kill sleep letter hello check\n");
             print("built in: cd [dir], exit, help\n");
             print("try: ls /bin | wc, echo hi > /tmp/a, cat < /tmp/a, cd /etc, letter D &\n");

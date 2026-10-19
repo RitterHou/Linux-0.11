@@ -272,6 +272,20 @@ static int32_t path_op(uint32_t path, struct interrupt_frame *frame, int (*op)(c
     return ret;
 }
 
+/* chmod(path, mode)：改权限。 */
+static int32_t sys_chmod(uint32_t path, uint32_t mode, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)c;
+    char name[PATH_MAX];
+
+    if (get_path(name, path, from_user_mode(frame)) < 0)
+        return -1;
+    fs_lock();
+    int ret = fs_chmod(name, mode);
+    fs_unlock();
+    return ret;
+}
+
 /* link(old, new)：两个路径都复制进内核，在文件系统锁里交给 fs_link()。 */
 static int32_t sys_link(uint32_t oldpath, uint32_t newpath, uint32_t c, struct interrupt_frame *frame)
 {
@@ -482,6 +496,7 @@ static const syscall_fn syscall_table[SYS_CALLS] = {
     [SYS_PAUSE]  = sys_pause,
     [SYS_SYNC]   = sys_sync,
     [SYS_LINK]   = sys_link,
+    [SYS_CHMOD]  = sys_chmod,
 };
 
 void syscall_dispatch(struct interrupt_frame *frame)

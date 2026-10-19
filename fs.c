@@ -650,6 +650,23 @@ int fs_unlink(const char *path)
     return remove_entry(path, 0);
 }
 
+/* chmod：改文件的权限位（低 12 位），类型不变。Linux 0.11 的 sys_chmod() 也是这样，它还要检查是不是文件的主人。 */
+int fs_chmod(const char *path, uint32_t mode)
+{
+    uint32_t ino;
+    struct minix_inode d;
+
+    if (namei(path, &ino, &d) < 0)
+        return -1;
+    struct m_inode *ip = iget(ino);
+    if (!ip)
+        return -1;
+    ip->d.mode = (uint16_t)((ip->d.mode & S_IFMT) | (mode & 07777));
+    write_inode(ip);
+    iput(ip);
+    return 0;
+}
+
 /*
  * link：给已经存在的文件再起一个名字 newpath。两个名字是目录里的两项，指向同一个 i 节点，链接数加一：
  * 文件只有一份，从哪个名字打开都一样。删掉一个名字（unlink 的意思就是“去掉一个链接”）只是链接数减一，

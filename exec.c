@@ -10,6 +10,9 @@
  *      于是程序的入口 _start(argc, argv) 可以写成一个普通的 C 函数。
  *   5. 都成功了，才换上新页目录、收回旧的，再改写栈上保存的现场：EIP 改成程序的入口，ESP 改成新栈顶。
  *      系统调用返回时 iret 就落到新程序的第一条指令上。中途失败就返回 -1，旧程序原封不动。
+ * 文件开头是 #! 的是脚本：第一行写着解释器的路径，后面可以跟一个参数。那就改去装入解释器，参数排成
+ * 解释器的名字、那个参数（有的话）、脚本的路径、原来的 argv[1] 以后。于是 #!/bin/sh 开头的脚本，
+ * 运行起来就是 sh 脚本路径 参数…。解释器自己不能又是脚本。Linux 0.11 的 do_execve() 也是这样（tytso 加的）。
  * Linux 0.11 读的是 a.out 格式：程序的页在缺页时才从文件里读（do_no_page() 调用 bread_page()），
  * 参数放在栈顶的几页里，同样是改写栈上的 eip 和 esp，让系统调用“返回”到新程序。
  */
@@ -39,6 +42,79 @@ static int elf_ok(const struct elf_header *eh)
     return eh->ident[0] == 0x7F && eh->ident[1] == 'E' && eh->ident[2] == 'L' && eh->ident[3] == 'F' &&
            eh->ident[4] == 1 && eh->ident[5] == 1 && eh->type == 2 && eh->machine == 3 &&
            eh->phentsize == sizeof(struct elf_phdr) && eh->phnum <= MAX_PHDRS;
+}
+
+/*
+ * 看文件是不是 #! 开头的脚本：是的话把解释器的路径放进 interp，重排参数（见文件开头的说明），返回 0；
+ * 不是脚本，interp 留空，返回 0；#! 后面没有解释器、参数放不下，返回 -1。
+ */
+static int script(const char *path, const struct minix_inode *ip, char *interp, char *args, uint32_t *used,
+                  uint32_t *offsets, uint32_t *argc)
+{
+    char line[PATH_MAX];
+    int32_t n = inode_read(ip, 0, line, sizeof(line) - 1);
+
+    interp[0] = '\0';
+    if (n < 2 || line[0] != '#' || line[1] != '!')
+        return 0;
+    line[n] = '\0';
+    char *p = line + 2, *arg = 0;
+    while (*p == ' ' || *p == '\t')
+        p++;
+    char *start = p;
+    while (*p && *p != ' ' && *p != '\t' && *p != '\n')
+        p++;
+    if (p == start)
+        return -1;                  /* #! 后面没有解释器 */
+    char end = *p;
+    *p = '\0';
+    if (end == ' ' || end == '\t') {   /* 解释器后面的整段（到行尾）算一个参数 */
+        arg = p + 1;
+        while (*arg == ' ' || *arg == '\t')
+            arg++;
+        char *q = arg;
+        while (*q && *q != '\n')
+            q++;
+        *q = '\0';
+        if (*arg == '\0')
+            arg = 0;
+    } else if (end != '\n' && n == (int32_t)sizeof(line) - 1) {
+        return -1;                  /* 第一行太长 */
+    }
+    const char *base = start;
+    for (const char *q = start; *q; q++)
+        if (*q == '/')
+            base = q + 1;
+
+    /* 新的参数：解释器的名字、arg、脚本的路径，再接上原来的 argv[1] 以后 */
+    const char *front[3] = { base, arg, path };
+    static char out[ARG_BYTES];     /* 内核栈只有一页，do_exec 已经用了 1 KB；exec 在文件系统锁里，同时只有一个 */
+    uint32_t noff[MAX_ARGS], nargc = 0, nused = 0;
+    for (int k = 0; k < 3 + (int)(*argc > 1 ? *argc - 1 : 0); k++) {
+        const char *s = k < 3 ? front[k] : args + offsets[k - 3 + 1];
+        if (!s)
+            continue;
+        uint32_t len = 0;
+        while (s[len])
+            len++;
+        if (nargc == MAX_ARGS || nused + len + 1 > ARG_BYTES)
+            return -1;
+        noff[nargc++] = nused;
+        for (uint32_t i = 0; i <= len; i++)
+            out[nused + i] = s[i];
+        nused += len + 1;
+    }
+    for (uint32_t i = 0; i < nused; i++)
+        args[i] = out[i];
+    for (uint32_t i = 0; i < nargc; i++)
+        offsets[i] = noff[i];
+    *argc = nargc;
+    *used = nused;
+    uint32_t i = 0;
+    for (; start[i]; i++)
+        interp[i] = start[i];
+    interp[i] = '\0';
+    return 0;
 }
 
 /* 把一个要装入的段放进新的页目录 dir。 */
@@ -88,13 +164,22 @@ int do_exec(const char *path, uint32_t user_argv, struct interrupt_frame *frame)
         used += (uint32_t)len + 1;
     }
 
-    /* 2. 文件：必须是普通文件，有执行权限，是 ELF 可执行文件 */
+    /* 2. 文件：必须是普通文件，有执行权限，是 ELF 可执行文件；#! 开头的脚本换成它的解释器 */
     uint32_t ino;
     struct minix_inode ip;
     struct elf_header eh;
     struct elf_phdr ph[MAX_PHDRS];
+    char interp[PATH_MAX];
+    const char *name = path;        /* ps 里显示的名字：脚本显示脚本自己的名字 */
     if (namei(path, &ino, &ip) < 0 || (ip.mode & S_IFMT) != S_IFREG || !(ip.mode & 0111))
         return -1;
+    if (script(path, &ip, interp, args, &used, offsets, &argc) < 0)
+        return -1;
+    if (interp[0]) {
+        path = interp;
+        if (namei(path, &ino, &ip) < 0 || (ip.mode & S_IFMT) != S_IFREG || !(ip.mode & 0111))
+            return -1;
+    }
     if (inode_read(&ip, 0, &eh, sizeof(eh)) != sizeof(eh) || !elf_ok(&eh) ||
         eh.entry < USER_LOW || eh.entry >= STACK_LOW)
         return -1;
@@ -145,7 +230,7 @@ int do_exec(const char *path, uint32_t user_argv, struct interrupt_frame *frame)
     frame->user_esp = sp;
     frame->eflags = 0x202;          /* IF=1，其余标志清零 */
     frame->ebx = frame->ecx = frame->edx = frame->esi = frame->edi = frame->ebp = 0;
-    sched_set_name(path);
+    sched_set_name(name);
     sched_exec_signals();           /* 原来的处理函数在新程序里没有意义 */
     sched_set_brk(end);             /* 新程序的堆是空的，从它的 .bss 末尾开始 */
     if (first) {
