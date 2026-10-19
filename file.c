@@ -42,6 +42,46 @@ static struct file *file_alloc(int type)
  * O_CREAT（不存在就新建）、O_EXCL（和 O_CREAT 一起：已经存在就失败）、O_TRUNC（清空）、O_APPEND（接在末尾写）。
  * 文件不存在、目录要打开来写、设备不认识、文件表满了，返回 0。Linux 0.11 的 open_namei() 做的是同样的判断。
  */
+/*
+ * 打开命名管道的一头：i 节点上还没有管道就配一个（两头都关了就还掉，里面没读走的数据也就不要了）。
+ * 读的一头要等有人打开写的一头，写的一头要等有人打开读的一头，POSIX 的规定：不然 cat 管道 一打开就读到末尾。
+ * 等的是“另一头被打开过”（打开次数变了），不是“另一头现在开着”：写的一方可能已经写完关掉了，读的一方才醒来。
+ * 等的时候放开文件系统锁；被信号打断就撤销这一头，返回 0（open 失败）。调用者拿着锁，ip 已经 iget 过。
+ */
+static struct file *fifo_open(struct m_inode *ip, int writer)
+{
+    struct file *f = file_alloc(writer ? FILE_PIPE_WRITE : FILE_PIPE_READ);
+    uint32_t flags = irq_save();
+    struct pipe *p = f ? (ip->pipe ? ip->pipe : (ip->pipe = pipe_new())) : 0;
+    if (!p) {
+        if (f)
+            f->count = 0;
+        irq_restore(flags);
+        iput(ip);
+        fs_unlock();
+        return 0;
+    }
+    uint32_t seen = writer ? p->read_opens : p->write_opens;
+    if (writer)
+        p->writers++, p->write_opens++;
+    else
+        p->readers++, p->read_opens++;
+    wake_up(&p->wait);
+    fs_unlock();
+    int interrupted = 0;
+    while (!interrupted && (writer ? p->readers == 0 && p->read_opens == seen : p->writers == 0 && p->write_opens == seen))
+        interrupted = interruptible_sleep_on(&p->wait) < 0;
+    f->pipe = p;
+    f->ip = ip;
+    f->mode = writer ? O_WRONLY : O_RDONLY;
+    irq_restore(flags);
+    if (interrupted) {
+        file_put(f);                /* 撤销这一头、放开 i 节点 */
+        return 0;
+    }
+    return f;
+}
+
 struct file *file_open(const char *path, int flags)
 {
     uint32_t dev, ino;
@@ -66,6 +106,10 @@ struct file *file_open(const char *path, int flags)
             } else {
                 goto fail;          /* 没有这个设备（没有串口时的 /dev/ttyS0 也是） */
             }
+        } else if ((d.mode & S_IFMT) == S_IFIFO) {
+            if (access == O_RDWR || !(ip = iget(dev, ino)))
+                goto fail;
+            return fifo_open(ip, access == O_WRONLY);   /* 会睡着等另一头，里面放开文件系统锁 */
         } else {
             if (((d.mode & S_IFMT) == S_IFDIR && access != O_RDONLY) || (d.mode & S_IFMT) == S_IFBLK)
                 goto fail;          /* 目录只有内核能改；硬盘这样的块设备只能 mount，不能直接读写 */
@@ -141,11 +185,15 @@ void file_put(struct file *f)
     if (f->count <= 0)
         panic("trying to close a closed file");
     int last = --f->count == 0;
-    struct m_inode *ip = last && f->type == FILE_INODE ? f->ip : 0;
-    if (ip && (f->mode & O_ACCMODE) != O_RDONLY)
+    struct m_inode *ip = last ? f->ip : 0;      /* 普通文件，或者命名管道的 i 节点 */
+    if (ip && f->type == FILE_INODE && (f->mode & O_ACCMODE) != O_RDONLY)
         ip->writers--;
-    if (last && (f->type == FILE_PIPE_READ || f->type == FILE_PIPE_WRITE))
+    if (last && (f->type == FILE_PIPE_READ || f->type == FILE_PIPE_WRITE)) {
         pipe_close(f->pipe, f->type == FILE_PIPE_WRITE);   /* 最后一个拿着这一头的关掉了 */
+        if (ip && f->pipe->readers == 0 && f->pipe->writers == 0)
+            ip->pipe = 0;           /* 命名管道两头都关了：管道已经还掉了。一般下面的 iput 也放开了 i 节点，下次 iget 重新清零；
+                                       这里清掉是以防还有别人引着这个 i 节点 */
+    }
     irq_restore(flags);
     if (ip) {
         fs_lock();

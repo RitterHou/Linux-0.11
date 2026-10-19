@@ -59,7 +59,8 @@
 #define SYS_UMOUNT 44               /* umount(path)：卸下一块盘，path 是块设备或者挂载点 */
 #define SYS_SETPGID 45              /* setpgid(pid, pgid)：把自己或子进程放进进程组 pgid（0 就是它自己的号），作业控制用 */
 #define SYS_GETPGRP 46              /* getpgrp()：自己所在的进程组 */
-#define SYS_CALLS  47
+#define SYS_MKNOD  47               /* mknod(path, mode, dev)：新建命名管道（谁都能建）或设备文件（只有 root） */
+#define SYS_CALLS  48
 
 /* fsinfo 写回的内容 */
 struct fsinfo {
@@ -421,6 +422,13 @@ struct termios {
 static inline int32_t ioctl(int32_t fd, uint32_t cmd, void *arg)
 {
     return syscall3(SYS_IOCTL, (uint32_t)fd, cmd, (uint32_t)arg);
+}
+
+#define S_IFIFO    0010000          /* 文件类型：命名管道，取值与 Linux 0.11 的 include/sys/stat.h 相同 */
+
+static inline int32_t mknod(const char *path, uint32_t mode, uint32_t dev)
+{
+    return syscall3(SYS_MKNOD, (uint32_t)path, mode, dev);
 }
 
 static inline int32_t mount(const char *dev, const char *dir)

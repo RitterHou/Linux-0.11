@@ -11,7 +11,7 @@ static void print_mode(uint16_t mode)
 {
     uint32_t type = mode & 0170000;
     char s[11] = "----------";
-    s[0] = type == 0040000 ? 'd' : type == 0020000 ? 'c' : type == 0060000 ? 'b' : '-';
+    s[0] = type == 0040000 ? 'd' : type == 0020000 ? 'c' : type == 0060000 ? 'b' : type == 0010000 ? 'p' : '-';
     for (int i = 0; i < 9; i++)
         if (mode & (0400 >> i))
             s[1 + i] = "rwx"[i % 3];

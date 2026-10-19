@@ -370,6 +370,7 @@ struct m_inode *iget(uint32_t dev, uint32_t ino)
     empty->ino = ino;
     empty->count = 1;
     empty->writers = empty->execs = 0;
+    empty->pipe = 0;
     return empty;
 }
 
@@ -564,7 +565,7 @@ static void free_indirect(uint32_t dev, uint32_t zone, int depth)
 static void truncate_inode(struct m_inode *ip)
 {
     uint32_t type = ip->d.mode & S_IFMT;
-    if (type == S_IFCHR || type == S_IFBLK)     /* 设备文件的第一个块号是设备号，不是数据块 */
+    if (type == S_IFCHR || type == S_IFBLK || type == S_IFIFO)  /* 设备文件的第一个块号是设备号，不是数据块；管道没有块 */
         return;
     for (int i = 0; i < 7; i++)
         free_indirect(ip->dev, ip->d.zone[i], 0);
@@ -898,6 +899,27 @@ int fs_chown(const char *path, uint32_t uid, uint32_t gid)
     if ((ip->d.mode & S_IFMT) == S_IFREG)
         ip->d.mode &= (uint16_t)~(S_ISUID | S_ISGID);
     write_inode(ip);
+    iput(ip);
+    return 0;
+}
+
+/*
+ * mknod：新建一个特殊文件。命名管道（S_IFIFO）谁都能建；字符设备、块设备只有 root 能建，dev 记在第一个区块号里：
+ * 谁都能建设备文件的话，建一个指向硬盘的、自己能读写的设备文件，权限就形同虚设了。
+ * Linux 0.11 的 sys_mknod() 只有 root 能调用，它的管道只有 pipe 建的那种，没有命名管道。
+ */
+int fs_mknod(const char *path, uint32_t mode, uint32_t dev)
+{
+    uint32_t type = mode & S_IFMT;
+    if ((type != S_IFIFO && type != S_IFCHR && type != S_IFBLK) || (type != S_IFIFO && !suser()))
+        return -1;
+    struct m_inode *ip = create(path, (uint16_t)(type | (mode & 07777)));
+    if (!ip)
+        return -1;
+    if (type != S_IFIFO) {
+        ip->d.zone[0] = (uint16_t)dev;
+        write_inode(ip);
+    }
     iput(ip);
     return 0;
 }

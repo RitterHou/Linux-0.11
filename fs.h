@@ -17,6 +17,7 @@
 #define S_IFREG 0100000
 #define S_IFCHR 0020000             /* 字符设备：i 节点的第一个区块号存的是设备号（主设备号 << 8 | 次设备号） */
 #define S_IFBLK 0060000             /* 块设备（硬盘）：同上，mount 用它找到是哪块盘 */
+/* S_IFIFO 在 syscall.h 里：命名管道（FIFO），没有内容，打开时在内存里配一个管道 */
 #define TTY_MAJOR 4                 /* 终端：次设备号 0 是控制台（/dev/tty0），1 是第 6 行（/dev/tty1），64 是串口（/dev/ttyS0） */
 
 /* buffer.c：缓冲区缓存 */
@@ -72,6 +73,7 @@ struct m_inode {
     int count;                      /* 有几处在用：打开的文件、正在执行的操作、正在运行它的任务 */
     int writers;                    /* 有几个打开的文件能写它 */
     int execs;                      /* 有几个任务正在运行它（按需从它里面装入程序的页）：这时不让写 */
+    struct pipe *pipe;              /* 命名管道打开着时，内存里的那个管道 */
     struct minix_inode d;           /* 磁盘上那 32 字节的拷贝，改了就写回去 */
 };
 
@@ -97,6 +99,7 @@ int fs_unlink(const char *path);
 int fs_link(const char *oldpath, const char *newpath);
 int fs_chmod(const char *path, uint32_t mode);
 int fs_chown(const char *path, uint32_t uid, uint32_t gid);
+int fs_mknod(const char *path, uint32_t mode, uint32_t dev);
 int fs_utime(const char *path, uint32_t t);
 int fs_rmdir(const char *path);
 struct fsinfo;
@@ -133,6 +136,7 @@ struct pipe {
     uint8_t *buf;                   /* 一页的缓冲区 */
     uint32_t head, tail;            /* 只增不减：head - tail 是管道里的字节数 */
     int readers, writers;           /* 读、写两头各被几个打开的文件拿着 */
+    uint32_t read_opens, write_opens;   /* 命名管道：两头各被打开过几次。打开一头的等另一头被打开过 */
     struct wait_queue wait;
 };
 struct pipe *pipe_new(void);

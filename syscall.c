@@ -432,6 +432,19 @@ static int32_t sys_getpgrp(uint32_t a, uint32_t b, uint32_t c, struct interrupt_
     return sched_pgrp();
 }
 
+/* mknod(path, mode, dev)：见 fs.c 的 fs_mknod()。 */
+static int32_t sys_mknod(uint32_t path, uint32_t mode, uint32_t dev, struct interrupt_frame *frame)
+{
+    char name[PATH_MAX];
+
+    if (get_path(name, path, from_user_mode(frame)) < 0)
+        return -1;
+    fs_lock();
+    int ret = fs_mknod(name, mode, dev);
+    fs_unlock();
+    return ret;
+}
+
 /* chown(path, uid, gid)：见 fs.c 的 fs_chown()。 */
 static int32_t sys_chown(uint32_t path, uint32_t uid, uint32_t gid, struct interrupt_frame *frame)
 {
@@ -754,6 +767,7 @@ static const syscall_fn syscall_table[SYS_CALLS] = {
     [SYS_UMOUNT] = sys_umount,
     [SYS_SETPGID] = sys_setpgid,
     [SYS_GETPGRP] = sys_getpgrp,
+    [SYS_MKNOD]  = sys_mknod,
 };
 
 void syscall_dispatch(struct interrupt_frame *frame)

@@ -1467,7 +1467,7 @@ static int builtin(struct argv_buf *b, int *status)
         return 1;
     }
     if (strcmp(name, "help") == 0) {
-        print("files: ls cat echo wc grep sort rm ln mv mkdir rmdir chmod touch pwd\n");
+        print("files: ls cat echo wc grep sort rm ln mv mkdir rmdir chmod touch mkfifo pwd\n");
         print("disks: df sync mount umount\n");
         print("tasks: ps kill sleep nice date letter hello check\n");
         print("users: id su login passwd chown\n");

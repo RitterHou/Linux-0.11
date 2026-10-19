@@ -1588,6 +1588,7 @@ void user_main(void)
      *      utime 设成现在要有写权限，设成别的时间要是主人。
      *   k：kill 不了 root 的进程，能 kill 自己的；nice 调低不了（返回 -1，不变），调高可以。
      *   e：setuid 程序：/bin/id 设上 setuid 位（主人是 root），用户 100 运行它，打印 euid=0(root)。
+     *   n：mknod：用户 100 建不了设备文件，能建命名管道；root 建的字符设备 4,1（第 6 行）写得进去（写的是 !，见最后）。
      */
     struct stat st;
     int32_t fd, status = -1;
@@ -1659,11 +1660,16 @@ void user_main(void)
 
         int32_t r = run_capture("/bin/id", out, sizeof(out), &got);
         perm_put(r == 0 && same_text(out, got, "uid=100(user) gid=100(users) euid=0(root)\n"), 'e');
+        ok = mknod("/tmp/mydev", 0020000 | 0666, 0x401) < 0 && stat("/tmp/mydev", &st) < 0;
+        ok &= mknod("/tmp/myfifo", S_IFIFO | 0644, 0) == 0 && stat("/tmp/myfifo", &st) == 0 && st.mode == (S_IFIFO | 0644);
+        ok &= st.uid == 100 && unlink("/tmp/myfifo") == 0;
+        perm_put(ok, 'n');
         exit(0);
     }
     waitpid(c, &status, 0);
     /* 回到 root：root 能删用户的文件；root 也执行不了一个执行位都没有的程序，有了就能；0700 的目录 root 照样进 */
-    ok = perm_n == 8 && unlink("/tmp/mine") == 0;
+    ok = perm_n == 9 && unlink("/tmp/mine") == 0;
+    ok &= mknod("/tmp/rdev", 0020000 | 0666, 0x401) == 0 && stat("/tmp/rdev", &st) == 0 && (st.mode & 0170000) == 0020000;
     ok &= run_capture("/tmp/hx", out, sizeof(out), &got) == 42 && chmod("/tmp/hx", 0755) == 0;
     ok &= run_capture("/tmp/hx", out, sizeof(out), &got) == 0 && got > 0;
     ok &= stat("/tmp/priv/f", &st) == 0;
@@ -1672,7 +1678,8 @@ void user_main(void)
     kill(sleeper, SIGKILL);
     waitpid(sleeper, &status, 0);
     write(1, (const char *)perm_res, (uint32_t)perm_n);
-    write(1, ok ? "!" : "?", 1);
+    fd = open("/tmp/rdev", O_WRONLY);           /* 4,1 就是第 6 行：! 从这个新建的设备文件写出去 */
+    write(fd, ok ? "!" : "?", 1);
     exit(0);
 #elif SELFTEST == SELFTEST_ALL_EXIT
     write(1, "bye", 3);

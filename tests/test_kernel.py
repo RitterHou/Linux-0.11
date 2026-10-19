@@ -1218,12 +1218,14 @@ def test_permissions(_m, _elf):
     with Machine(os.path.join(d, "floppy.img")) as m:
         m.wait_for(lambda mm: message_row(mm) == "task 2 exited with code 0", timeout=15, what="init 的结束消息")
         out = task_output(m).replace("A", "")
-        expected = "urcsxmke!"
+        expected = "urcsxmken!"
         meaning = {"u": "init 是 root；setgid、setuid(100) 以后四个号都是 100，回不去", "r": "读写权限：读得了的、写不了的、O_TRUNC、0700 的目录",
                    "c": "root 的目录里建不了文件、目录、链接；/tmp 里能建，主人是 100", "s": "/tmp 的粘滞位：删不掉 root 的文件，能删自己的",
                    "x": "0644 的程序执行不了；0700 的目录里 stat 不到、进不去", "m": "chmod 只有主人能改；chown 只有 root；utime 的两种情况",
                    "k": "kill 不了 root 的进程、能 kill 自己的；nice 调低不了", "e": "setuid root 的 /bin/id 打印 euid=0(root)",
-                   "!": "回到 root：能删用户的文件；root 也执行不了没有执行位的程序，有了就能；能进 0700 的目录；chown 清掉 setuid 位"}
+                   "n": "用户建不了设备文件，能建命名管道",
+                   "!": "回到 root：能删用户的文件；root 也执行不了没有执行位的程序，有了就能；能进 0700 的目录；chown 清掉 setuid 位；"
+                        "root 用 mknod 建的字符设备 4,1 写得进去（这个 ! 就是从它写到第 6 行的）"}
         for i, ch in enumerate(expected):
             check(len(out) > i and out[i] == ch, f"第 {i + 1} 项（{meaning[ch]}）没有通过：第 6 行去掉 A 后是 {out!r}，应为 {expected!r}")
 
@@ -2441,10 +2443,45 @@ def test_job_control(m, elf):
     check(run_command(m, "jobs") == [], "外面的 shell 没有作业")
 
 
+def test_fifo(m, elf):
+    """命名管道：mkfifo；读的一头等写的一头打开，反过来也一样；和 | 一样的结果；Ctrl+C 打断等着打开的；重名报错"""
+    rows = lambda: [r for r in console(m) if r]
+    def run_all(cases):
+        for command, expected in cases:
+            out = run_command(m, command)
+            check(expected is None or out == expected, f"{command} 应输出 {expected!r}，实际是 {out!r}")
+    run_all([("mkfifo /tmp/ff", []), ("mkfifo /tmp/ff", ["mkfifo: /tmp/ff: cannot make"]), ("mkfifo", ["usage: mkfifo file..."])])
+    row = next((r for r in run_command(m, "ls -l /tmp") if r.split()[-1] == "ff"), "")
+    check(row.startswith("prw-r--r--  1") and row.split()[4] == "0", f"ls -l 里是 p，大小 0：{row!r}")
+    out = run_command(m, "cat /tmp/ff > /tmp/ffout &")
+    pid = out[0][1:-1]
+    time.sleep(0.3)
+    ps = [r.split() for r in run_command(m, "ps | grep cat")]
+    check(any(r[0] == pid and r[2] == "B" for r in ps), f"读的一头打开时等着有人打开写的一头：{ps!r}")
+    run_all([("echo through the fifo > /tmp/ff", [])])
+    m.wait_for(lambda mm: run_command(mm, "cat /tmp/ffout") == ["through the fifo"], timeout=3, what="cat 读到 echo 写的，读到末尾就结束")
+    run_all([("echo second > /tmp/ff &", None), ("cat /tmp/ff", ["second"]),       # 写的一头先打开，等读的一头
+             ("ls / > /tmp/ff &", None), ("wc < /tmp/ff", run_command(m, "ls / | wc"))])
+    wait_prompt(m)
+    type_text(m, "cat /tmp/ff\n")
+    time.sleep(0.5)
+    m.sendkeys(["ctrl-c"])
+    m.wait_for(lambda mm: rows()[-2:] == ["^C", "$"], timeout=3, what="Ctrl+C 打断等着打开的 cat")
+    run_all([("echo again > /tmp/ff &", None), ("cat /tmp/ff", ["again"])])
+    # 写的一头打开了马上关掉（: 什么也不写）：读的一头醒来时它已经关了，也要知道有人打开过，读到末尾就结束，不能一直等
+    run_all([("cat /tmp/ff > /tmp/ffout &", None), (": > /tmp/ff", [])])
+    m.wait_for(lambda mm: run_command(mm, "ps | grep cat") == [], timeout=3, what="cat 读到末尾结束了")
+    check(run_command(m, "cat /tmp/ffout") == [], "什么也没读到")
+    # 两头都关了，没读走的数据就不要了：下一次打开是一个新的、空的管道
+    # （读的一头 sleep 1 开着不读，写的一头写进去就走了，一秒后两头都关了）
+    run_all([("echo stale > /tmp/ff &", None), ("sleep 1 < /tmp/ff", []), ("echo fresh > /tmp/ff &", None), ("cat /tmp/ff", ["fresh"]),
+             ("rm /tmp/ff", []), ("rm /tmp/ffout", [])])
+
+
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_console_scroll,
                 test_idle_in_hlt, test_demand_paging, test_fork_address_spaces, test_syscall_gate, test_user_setup, test_user_task,
-                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep, test_cache, test_ln_mv, test_script, test_shell_input, test_script_edge_cases, test_clock, test_stderr, test_nice_shell, test_users, test_login, test_serial, test_mount, test_demand_loading, test_raw_tty, test_line_edit, test_shell_language, test_job_control]
+                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep, test_cache, test_ln_mv, test_script, test_shell_input, test_script_edge_cases, test_clock, test_stderr, test_nice_shell, test_users, test_login, test_serial, test_mount, test_demand_loading, test_raw_tty, test_line_edit, test_shell_language, test_job_control, test_fifo]
 SEPARATE_TESTS = [test_syscalls, test_page_alloc, test_double_free, test_hd_rw, test_early_key, test_keyboard_edge_cases, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,
                   test_big_kernel, test_user_write_kernel, test_user_privileged,
