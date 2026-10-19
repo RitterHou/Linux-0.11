@@ -75,6 +75,8 @@ struct task {
     int interruptible;              /* 睡在 interruptible_sleep_on 里：信号能叫醒它 */
     uint32_t start_brk;             /* 程序的末尾（.bss 的末尾），堆从这里开始；exec 时设好 */
     uint32_t brk;                   /* 堆的末尾：start_brk 到 brk 之间缺页时补页，再往上到栈区之间不补 */
+    int alarm_on;                   /* 定了闹钟：timer_ticks 到 alarm_at 时发 SIGALRM。fork 不继承，exec 保留 */
+    uint32_t alarm_at;
 };
 
 static struct tss tss[NR_TASKS];
@@ -302,11 +304,23 @@ static void reschedule(void)
 }
 
 /* 叫醒睡到时间的任务。用差值比较，timer_ticks 回绕到 0 后也对。 */
+static void send_signal(int n, int sig);
+
+/*
+ * 叫醒到时间的任务，给闹钟到了的任务发 SIGALRM（它要是在睡，信号也会把它叫醒）。
+ * Linux 0.11 的 schedule() 开头也是这样查一遍每个任务的 alarm。
+ */
 static void wake_sleepers(void)
 {
-    for (int n = 1; n < NR_TASKS; n++)
+    for (int n = 1; n < NR_TASKS; n++) {
         if (tasks[n].state == TASK_SLEEPING && (int32_t)(timer_ticks - tasks[n].wake_at) >= 0)
             tasks[n].state = TASK_RUNNING;
+        if (tasks[n].alarm_on && (int32_t)(timer_ticks - tasks[n].alarm_at) >= 0) {
+            tasks[n].alarm_on = 0;
+            if (tasks[n].state != TASK_ZOMBIE && tasks[n].state != TASK_UNUSED)
+                send_signal(n, SIGALRM);
+        }
+    }
 }
 
 /*
@@ -513,6 +527,44 @@ int sched_claim_tty(void)
         return 0;
     t->has_tty = 1;
     return 1;
+}
+
+/*
+ * alarm 系统调用：seconds 秒之后给自己发 SIGALRM；0 是取消。返回上一个闹钟还剩几秒（向上取整，没有就是 0）。
+ * 一个任务只有一个闹钟，新定的替掉旧的。Linux 0.11 的 sys_alarm() 一样，只是剩下的秒数向下取整。
+ */
+uint32_t sched_alarm(uint32_t seconds)
+{
+    struct task *t = &tasks[current_task];
+    uint32_t flags = irq_save();
+    uint32_t old = 0;
+
+    if (t->alarm_on) {
+        int32_t left = (int32_t)(t->alarm_at - timer_ticks);
+        old = left > 0 ? ((uint32_t)left + TIMER_HZ - 1) / TIMER_HZ : 0;
+    }
+    if (seconds > 0x7FFFFFFF / TIMER_HZ)    /* wake_sleepers() 用有符号的差值比较 */
+        seconds = 0x7FFFFFFF / TIMER_HZ;
+    t->alarm_on = seconds != 0;
+    t->alarm_at = timer_ticks + seconds * TIMER_HZ;
+    irq_restore(flags);
+    return old;
+}
+
+/*
+ * pause 系统调用：睡下，直到来了一个信号，返回 -EINTR。信号设了处理函数的，处理完 pause 才返回；
+ * 没设的，进程就此结束。和 sleep 一样是可以被信号打断的睡眠，ps 里是 S。Linux 0.11 的 sys_pause() 也是这样。
+ */
+int sched_pause(void)
+{
+    uint32_t flags = irq_save();
+    while (!tasks[current_task].signal) {
+        tasks[current_task].state = TASK_SLEEPING;
+        tasks[current_task].wake_at = timer_ticks + 0x7FFFFFFF;   /* 等于永远：只有信号能叫醒它 */
+        reschedule();
+    }
+    irq_restore(flags);
+    return -EINTR;
 }
 
 /* exec 装好新程序：堆从它的末尾开始，是空的。 */

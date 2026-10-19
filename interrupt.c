@@ -280,7 +280,7 @@ static void handle_signals(struct interrupt_frame *frame)
     line_append_dec(&line, (uint32_t)current_pid());
     line_append(&line, " killed by signal ");
     line_append_dec(&line, (uint32_t)sig);
-    line_append(&line, sig == SIGINT ? " (SIGINT)" : sig == SIGKILL ? " (SIGKILL)" : sig == SIGPIPE ? " (SIGPIPE)" :
+    line_append(&line, sig == SIGINT ? " (SIGINT)" : sig == SIGKILL ? " (SIGKILL)" : sig == SIGPIPE ? " (SIGPIPE)" : sig == SIGALRM ? " (SIGALRM)" :
                        sig == SIGTERM ? " (SIGTERM)" : "");
     line_show(&line, VGA_YELLOW, TASK_MESSAGE_ROW);
     sched_exit(EXIT_SIGNAL | (uint32_t)sig);

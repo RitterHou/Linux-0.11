@@ -139,6 +139,8 @@ int sched_is_leader(void);
 int sched_claim_tty(void);
 int sched_take_signal(uint32_t *handler, uint32_t *restorer);
 void sched_set_brk(uint32_t end);
+uint32_t sched_alarm(uint32_t seconds);
+int sched_pause(void);
 uint32_t sched_brk(uint32_t addr);
 uint32_t current_brk(void);
 void sched_exec_signals(void);

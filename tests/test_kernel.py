@@ -1132,6 +1132,23 @@ def test_brk(_m, _elf):
         check(not exception_screen(m)[0], f"不应出现异常面板：{exception_screen(m)[0]!r}")
 
 
+def test_alarm(_m, _elf):
+    """alarm 和 pause：闹钟大约 1 秒后响；剩几秒和取消；pause 等到信号；没设处理函数就被结束；fork 不继承；exec 保留"""
+    d = build_selftest("USER_ALARM")
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        m.wait_for(lambda mm: message_row(mm) == "task 2 exited with code 0", timeout=15, what="init 的结束消息")
+        out = task_output(m).replace("A", "")
+        expected = "crpkfe"
+        meaning = {"c": "alarm(1) 大约 1 秒后发 SIGALRM，处理函数接住，正在睡的 sleep 被打断",
+                   "r": "alarm 返回还剩几秒，alarm(0) 取消", "p": "pause 等到闹钟，返回 -EINTR",
+                   "k": "没设处理函数的进程被 SIGALRM 结束", "f": "fork 出的子进程没有父进程的闹钟",
+                   "e": "exec 之后闹钟还在"}
+        for i, ch in enumerate(expected):
+            check(len(out) > i and out[i] == ch, f"第 {i + 1} 项（{meaning[ch]}）没有通过：第 6 行去掉 A 后是 {out!r}，应为 {expected!r}")
+        m.wait_for(lambda mm: mm.screen(4)[3].startswith("memory: 3839/3840 pages free"), timeout=2,
+                   what="子进程的内存都收回（只剩任务 A 的内核栈）")
+
+
 def test_fs_write(_m, _elf):
     """写文件：O_EXCL、读写权限、O_TRUNC、O_APPEND、删掉开着的文件、目录的错误、同一个文件开两次共用 i 节点"""
     d = build_selftest("USER_FSWRITE")
@@ -1163,8 +1180,9 @@ def test_shell(m, elf):
     check(out == ["Hello from the Minix file system on hda!"], f"cat 应打印 /hello.txt：{out!r}")
     out = run_command(m, "help")
     progs = [p for p in bin_programs() if p != "sh"]
-    check(len(out) == 3 and out[0].startswith("/bin: ") and sorted(out[0].split()[1:]) == progs,
-          f"help 应是 3 行，每行都放得下（不折行），第一行列出 /bin 里除了 sh 的每个程序 {progs}：{out!r}")
+    listed = out[0].split()[1:] + out[1].split()[1:] if len(out) == 4 else []
+    check(len(out) == 4 and out[0].startswith("files: ") and out[1].startswith("tasks: ") and sorted(listed) == progs,
+          f"help 应是 4 行，每行都放得下（不折行），头两行合起来列出 /bin 里除了 sh 的每个程序 {progs}：{out!r}")
     free_before = m.screen(4)[3].split("/")[0]
     check(run_command(m, "nosuch") == ["sh: nosuch: not found"], "找不到的命令应报告 not found")
     check(run_command(m, "check") == ["check ok"], "check 应通过")
@@ -1340,17 +1358,38 @@ def test_sort(m, elf):
     m.wait_for(lambda mm: mm.screen(4)[3].split("/")[0] == free_before, timeout=2, what=f"sort 结束后空闲页回到 {free_before}")
 
 
+
+def test_sleep(m, elf):
+    """sleep：alarm 加 pause 睡上几秒；Ctrl+C 结束它；参数不对报用法"""
+    for command, expected in [("sleep", ["usage: sleep seconds"]), ("sleep x", ["usage: sleep seconds"]), ("sleep 0", [])]:
+        out = run_command(m, command)
+        check(out == expected, f"{command} 应输出 {expected!r}，实际是 {out!r}")
+    wait_prompt(m)
+    start = time.monotonic()
+    type_text(m, "sleep 2\n")
+    m.wait_for(lambda mm: last_line(mm) == "$" and "$ sleep 2" in console(mm), timeout=6, what="sleep 2 睡完")
+    took = time.monotonic() - start
+    check(1.5 <= took <= 4.5, f"sleep 2 应睡大约 2 秒，实际 {took:.1f} 秒")
+    check(message_row(m).strip().endswith("exited with code 0"), f"sleep 正常退出：{message_row(m)!r}")
+    wait_prompt(m)
+    type_text(m, "sleep 100\n")
+    time.sleep(0.5)
+    m.sendkeys(["ctrl-c"])
+    m.wait_for(lambda mm: [r for r in console(mm) if r][-3:] == ["$ sleep 100", "^C", "$"], timeout=2, what="Ctrl+C 结束 sleep 100")
+    check(re.fullmatch(r"task \d+ killed by signal 2 \(SIGINT\)", message_row(m).strip()), f"sleep 被 SIGINT 结束：{message_row(m)!r}")
+
+
 # 前几项共用一台正常启动的虚拟机；其余各自启动自检内核。
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_console_scroll,
                 test_idle_in_hlt, test_demand_paging, test_fork_address_spaces, test_syscall_gate, test_user_setup, test_user_task,
-                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort]
+                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep]
 SEPARATE_TESTS = [test_syscalls, test_page_alloc, test_double_free, test_hd_rw, test_early_key, test_keyboard_edge_cases, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,
                   test_big_kernel, test_user_write_kernel, test_user_privileged,
                   test_user_bad_pointer, test_user_exit, test_all_tasks_exit,
                   test_nmi_in_user_mode, test_user_write_code, test_preemption,
-                  test_deep_stack, test_wild_read, test_fork_isolation, test_waitpid, test_file_system, test_exec, test_pipe, test_fs_write, test_signal_syscalls, test_brk, test_no_disk]
+                  test_deep_stack, test_wild_read, test_fork_isolation, test_waitpid, test_file_system, test_exec, test_pipe, test_fs_write, test_signal_syscalls, test_brk, test_alarm, test_no_disk]
 
 
 def main():

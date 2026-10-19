@@ -71,6 +71,7 @@ make test
 - 写文件（自检 `USER_FSWRITE`）：`O_CREAT | O_EXCL` 遇到已经存在的文件失败；只读打开的不能写、只写打开的不能读、目录不能打开来写；从头写会覆盖，`O_TRUNC` 清空，`O_APPEND` 接在末尾；删掉一个还开着的文件，目录里看不见了，开着的描述符照样能读，关掉以后块和 i 节点才收回；已经存在的目录不能再建，非空目录、根目录和 `.` 删不掉，父目录不存在或名字太长建不了；同一个文件打开两次共用 i 节点，从一个写进去另一个马上读得到。在 shell 里：`echo hello > /tmp/a`、`>>` 追加、`wc < /tmp/a`、`mkdir`、`rmdir`（非空时失败）、`rm`；`cat /big > /tmp/big2` 复制出的文件要用到二级间接块，内容完全一样；删掉之后 `df` 回到原来的数字。
 - 当前目录：`pwd` 开始是 `/`；`cd /etc` 之后 `pwd` 打印 `/etc`，`cat issue` 读到 `/etc/issue`，`ls` 不带参数列出 `/etc`，`ls ..` 和 `ls /` 一样；`cd /bin/../etc/./` 之后是 `/etc`；`cd` 到不存在的目录或普通文件报错，当前目录不变；在 `/tmp/sub` 里 `echo rel > note` 写的是 `/tmp/sub/note`；在 `/bin` 里 `./echo`、`../bin/echo` 都能运行；`cd ../../..` 停在 `/`。shell `exit` 之后，init 拉起的新 shell 从 `/` 开始，不是上一个 shell 的 `/etc`。
 - 信号（自检 `USER_SIGNAL`）：kill 一个在 sleep 里的子进程，它马上被 SIGTERM 结束，状态是 0x200 加信号编号；忽略了 SIGTERM 的照常睡完、退出；SIGKILL 不能忽略；`kill(0, …)` 发给自己这一组，忽略随 fork 继承；`setsid` 之后自成一组，`kill(-组号, …)` 才发得到；睡在管道上的读者和写者、睡在 waitpid 里的进程都能被结束；读的一头全关了还写，写的进程被 SIGPIPE 结束，忽略了 SIGPIPE 的 write 返回 -1；kill、signal 的参数不对，或者发给内核任务和 init，都返回 -1；给僵尸发信号返回 0；子进程设了处理函数再 kill 自己，处理函数拿到信号编号，kill 照样返回 0，第二次还调用处理函数；睡在管道上被设了处理函数的信号打断，read 返回 -EINTR，程序接着运行；exec 之后，设过处理函数的信号改回默认，忽略的保持忽略；处理函数不在用户的内存里，signal 返回 `SIG_ERR`；一直在用户态空转、不做系统调用的进程也能被 kill 结束（信号在定时器中断返回用户态时处理）；处理函数打断一段汇编，eax、ecx、edx 和 DF 都原样恢复，处理函数里 DF 是 0。在 shell 里：前台的 `letter G`、等终端输入的 `cat`、`cat | wc` 的两段，按 Ctrl+C 都被 SIGINT 结束，回显 `^C`；在提示符上按 Ctrl+C 丢掉正在敲的这一行，重新打出提示符；后台的 letter 不受 Ctrl+C 影响，`kill 任务号` 用 SIGTERM 结束它，`kill -9` 发 SIGKILL；`kill 1`、`kill 2`、`kill 99`、`kill -x 5` 报错；`kill 4` 发给 shell 自己，它忽略 SIGTERM；shell 一直是原来的 4 号任务。
+- 闹钟（自检 `USER_ALARM`）：`alarm(1)` 之后一直 `sleep(5)`，大约 20 次之后 SIGALRM 来了，处理函数接住，正在睡的 sleep 被打断；alarm 返回还剩几秒（向上取整），`alarm(0)` 取消之后不再响；`pause` 等到闹钟，返回 -EINTR；没设处理函数的子进程被 SIGALRM 结束；fork 出的子进程没有闹钟；exec 之后闹钟还在。在 shell 里：`sleep 2` 睡大约 2 秒后正常退出，`sleep 100` 按 Ctrl+C 被结束，参数不对报用法。
 - 堆（自检 `USER_BRK`）：init 的堆从 `0x40000000` 开始；brk 往上挪 8 KB 能写能读；堆和栈之间没要过的地方，子进程一写就被缺页异常结束，brk 不对齐到页时它所在的那一页能用；fork 之后子进程的堆一样大、内容一样，各改各的；低于程序末尾、伸进栈区的 brk 不动；系统调用的缓冲区在没要过的地方，read 返回 -1；exec 之后堆从新程序的 `.bss` 末尾开始，`check brk` 用 malloc 要来 100 KB 能写能读；栈区最低的那个字节能用，再往下一个字节被结束，想把堆推到紧贴栈区推不上去，栈用超了被结束；跨过堆末尾的缓冲区 read 返回 -1；能缩回空堆；用管道喂给 sort 的数据里有 0、0x80、0xFF，排出来的顺序逐字节核对，`-r` 倒过来；sort 读两个文件，前一个末行没有换行也不接在一起；`check malloc` 检查空块合并、和 sbrk 混用、realloc 原地变大和搬家、随机分配和释放两千次。在 shell 里：`sort` 排两行、`ls / | sort -r` 整行倒着排、打不开的文件报错；`cat /big | sort | wc` 得到 `2401 7201 614401`（最后一行补上了换行），`cat /big /big /big | sort | wc`（1.8 MB）和 `sort /big /big | wc` 也都对，结束后空闲页回到原来的数。
 - 管道（自检 `USER_PIPE`）：`pipe` 返回最小的两个空闲描述符；写进去的字节原样读出来；子进程往管道里写 10000 个字节，比一页的缓冲区大，写满了就睡下等，父进程边读边核对，写的一头全关了之后读到 0；读的一头关了再写返回 -1；`dup` 返回最小的空闲描述符，和原来的共用读写位置；结束后管道的缓冲区页也收回。
 - exec（自检 `USER_EXEC`）：不存在的文件、没有执行权限的文件、目录，exec 都返回 -1，程序接着运行；子进程 exec `/bin/hello from exec`，打印出参数后以 0 退出；`/bin/check` 检查自己的 `.data`（有初值）、`.bss`（全是 0，跨过一页多）、`argc` 和 `argv`，都对就打印 `check ok` 并以 7 退出；`/bin/check crash` 往自己的代码里写，代码页只读，被缺页异常结束（状态 `0x10E`）；第 0 行出现 `E`；所有程序结束后内存全部收回。
@@ -243,6 +244,8 @@ DS=0x0010 ES=0x0010 FS=0x0010 GS=0x0010 CR2=0x00000000 CR3=0x00018000
 | 21 | `signal(sig, handler)` | 这个信号来了怎么办：`SIG_DFL` 结束进程，`SIG_IGN` 不理，或者调用用户的处理函数 `handler(sig)`；包装函数顺带把 `sig_restore` 的地址交给内核，见下文“信号” | 原来的处理方式；编号不对、想改 SIGKILL、处理函数不在用户的内存里时 `SIG_ERR` |
 | 22 | `setsid()` | 自己当一个新的进程组的头 | 组号，就是自己的任务号；已经当过了 -1 |
 | 23 | `brk(addr)` | 把堆的末尾挪到 `addr`，见下文“堆：brk 和 malloc” | 现在的堆末尾；挪不了就不动，返回原来的 |
+| 24 | `alarm(seconds)` | `seconds` 秒之后给自己发 SIGALRM；0 是取消，新定的替掉旧的 | 上一个闹钟还剩几秒（向上取整），没有就是 0 |
+| 25 | `pause()` | 睡到来了一个信号为止 | -EINTR（没设处理函数的信号直接结束进程，不返回） |
 | 其他 | | | -1 |
 
 调用的过程：
@@ -586,6 +589,7 @@ init（任务 B，内核映像里的 `user_main()`）先 fork 出写 C 的 `/bin
 | `ps` | 用 `taskinfo` 逐个问 16 个任务槽，列出任务号、父进程、状态（R 能运行、S 在 sleep 里、Z 僵尸、W 在 waitpid 里、B 在等待队列上）和名字。名字是内核起的（idle、task_a、init），exec 之后是程序的文件名 |
 | `letter X` | 每 2 个 tick 往 `/dev/tty1`（第 6 行）写一个 X；`letter D &` 在后台运行，第 6 行就多出 D |
 | `kill [-信号] 任务号…` | 发信号，默认是 SIGTERM；`kill -9` 发 SIGKILL。任务号是负数就发给那一组 |
+| `sleep 秒数` | 用 alarm 定闹钟，pause 等 SIGALRM；按 Ctrl+C 能提前结束它 |
 | `hello`、`check` | exec 的测试程序 |
 
 每个程序结束时，内核照旧在第 7 行写出 `task N exited with code M`。
@@ -603,12 +607,13 @@ shell 运行 `ls /bin | grep e | wc` 时，先建第一个管道，fork 出 ls�
 
 ## 信号
 
-信号是内核通知进程“出了某件事”的办法：按了 Ctrl+C、别的进程用 `kill` 叫它结束、往没人读的管道里写。每个任务记着收到、还没处理的信号（`struct task` 的 `signal`，第 sig − 1 位）和每个信号的处理方式（`action[]`：默认、忽略，或者用户的处理函数）。编号与 Linux 0.11 相同：SIGINT 2、SIGKILL 9、SIGPIPE 13、SIGTERM 15。
+信号是内核通知进程“出了某件事”的办法：按了 Ctrl+C、别的进程用 `kill` 叫它结束、往没人读的管道里写。每个任务记着收到、还没处理的信号（`struct task` 的 `signal`，第 sig − 1 位）和每个信号的处理方式（`action[]`：默认、忽略，或者用户的处理函数）。编号与 Linux 0.11 相同：SIGINT 2、SIGKILL 9、SIGPIPE 13、SIGALRM 14、SIGTERM 15。
 
 - **发信号**（`sched_kill()`）：`kill(pid, sig)` 的 `pid` 大于 0 发给那个任务，为 0 发给自己所在的进程组（自己也收到），小于 -1 发给 `-pid` 那一组。目标忽略这个信号，就直接丢掉；SIGKILL 不能忽略。任务 0、A 和 init 收不到信号：前两个是内核任务，从不回到用户态，信号永远处理不了；init 要收养孤儿、拉起 shell，不能结束。
 - **什么时候处理**：从用户态进来的中断（系统调用、定时器、键盘……）处理完、回到用户态之前，`interrupt_dispatch()` 取出编号最小的信号。没设处理函数的，默认动作是在第 7 行写出 `task N killed by signal S`，结束进程，留给父进程的状态是 0x200 加信号编号。Linux 0.11 在 `system_call.s` 的 `ret_from_sys_call` 里做同样的检查，再交给 `do_signal()`；没设处理函数的信号，默认动作就是 `do_exit()`。
 - **处理函数**：`signal(sig, handler)` 设了处理函数的，内核让进程“先去调用它一下”：在用户栈上压 7 个字，从低地址往高依次是 `sig_restore` 的地址（处理函数的返回地址）、信号编号（处理函数的参数）、eax、ecx、edx、EFLAGS、原来要回去的 EIP，再把中断返回的 EIP 改成处理函数。iret 落到处理函数里，它是普通的 C 函数，返回时 ret 到 `sig_restore`；`sig_restore`（`user/ulib.c` 里的几行汇编）跳过信号编号，弹回 eax、ecx、edx、EFLAGS，再 ret 到原来的地方，程序接着往下走。eax 里是被打断的系统调用的返回值，所以 read 在处理函数运行之后返回 -EINTR；ebx、esi、edi、ebp 由处理函数自己按 C 的约定保存。进入处理函数时清掉 DF 和 TF：C 函数要求进来时 DF 是 0。这和 Linux 0.11 的 `do_signal()` 摆的一模一样，`sig_restore` 就是它 libc 里的 `__sig_restore`。不同的是 Linux 0.11 的 `signal()` 设的处理函数只管一次（`SA_ONESHOT`），这里一直有效。
 - **睡着的任务**：睡在 sleep、waitpid、终端和管道上的任务，不知道要等多久，信号会把它叫醒（`send_signal()` 把它改回能运行），系统调用返回 -EINTR，回到用户态之前再处理信号：`cat` 等着敲字时，按 Ctrl+C 能马上结束它。等硬盘、等缓冲区、等文件系统锁很快就有结果，半途放弃还会留下改到一半的数据，所以不能被打断，信号要等它们做完。Linux 0.11 也分 `TASK_INTERRUPTIBLE` 和 `TASK_UNINTERRUPTIBLE` 两种睡眠。
+- **闹钟**：`alarm(秒数)` 记下到期的 tick，定时器中断里 `wake_sleepers()` 查到闹钟到了，就给它发 SIGALRM，它要是正睡着也被叫醒；`pause()` 睡到来了一个信号为止。fork 出的子进程没有父进程的闹钟，exec 之后闹钟还在。`/bin/sleep` 就是用这两个写的：给 SIGALRM 设一个处理函数，定好闹钟，pause 等它，早年 Unix 的 C 库里的 `sleep()` 也是这样。Linux 0.11 的 `sys_alarm()`、`sys_pause()` 相同，`schedule()` 开头查闹钟；只是它返回的剩余秒数向下取整。
 - **进程组和 Ctrl+C**：每个任务属于一个进程组（`pgrp`），fork 时继承。init 拉起 shell 时，子进程先 `setsid()` 自成一组，再打开 `/dev/tty0`：进程组的头第一次打开控制台，它就成了控制终端，这一组就成了终端的前台进程组；进程组的头结束时清掉。按 Ctrl+C，终端丢掉正在编辑的这一行，回显 `^C`，给前台进程组的每个任务发 SIGINT：shell 和它 fork 出的程序都在这一组，init 和写 C 的 letter 不在。Linux 0.11 的 `init()` 也是先 `setsid()` 再打开终端，`copy_to_cooked()` 遇到 Ctrl+C 就调用 `tty_intr()`；它不回显，也不丢掉这一行。
 - **shell 怎么用**：shell 忽略 SIGTERM（`kill 0` 发给这一组，也不会把它自己结束），给 SIGINT 设了一个什么也不做的处理函数，作用只是打断它正睡着的系统调用：在提示符上按 Ctrl+C，read 返回 -EINTR，shell 重新打出提示符；前台程序运行时按，waitpid 返回 -EINTR，shell 接着等。fork 出的子进程在 exec 之前把 SIGTERM 改回默认，SIGINT 也改回默认（前台），就被 Ctrl+C 结束；或者改成忽略（`&` 的后台程序）。exec 换了程序，原来的处理函数没有意义了，改回默认；忽略的信号 exec 之后仍然忽略，所以 Ctrl+C 停不了后台程序，要用 `kill`。Linux 0.11 的 `do_execve()` 把 32 个信号的处理方式全改回默认，连忽略的也改回来；这里照 POSIX 的规定，忽略的保持忽略。shell 不报告被 SIGINT 和 SIGPIPE 结束的程序，被别的信号结束的报告 `sh: … killed by signal N`。
 

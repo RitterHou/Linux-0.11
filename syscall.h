@@ -36,7 +36,9 @@
 #define SYS_SIGNAL 21               /* signal(sig, handler, restorer)：这个信号来了怎么办：结束进程、不理，或者调用 handler */
 #define SYS_SETSID 22               /* setsid()：自己当一个新的进程组的头，返回组号 */
 #define SYS_BRK    23               /* brk(addr)：把堆的末尾挪到 addr，返回现在的堆末尾；brk(0) 只是问一下 */
-#define SYS_CALLS  24
+#define SYS_ALARM  24               /* alarm(seconds)：几秒之后给自己发 SIGALRM；0 是取消 */
+#define SYS_PAUSE  25               /* pause()：睡到来了一个信号为止 */
+#define SYS_CALLS  26
 
 /* fsinfo 写回的内容 */
 struct fsinfo {
@@ -67,6 +69,7 @@ struct taskinfo {
 #define SIGINT     2                /* 终端上按了 Ctrl+C */
 #define SIGKILL    9                /* 不能忽略 */
 #define SIGPIPE    13               /* 往读的一头全关了的管道里写 */
+#define SIGALRM    14               /* alarm 定的闹钟到了 */
 #define SIGTERM    15               /* kill 命令默认发的信号 */
 typedef void (*sighandler_t)(int);
 #define SIG_DFL    ((sighandler_t)0)    /* 默认动作：结束进程 */
@@ -207,6 +210,16 @@ static inline sighandler_t signal(int32_t sig, sighandler_t handler)
 static inline uint32_t brk(uint32_t addr)
 {
     return (uint32_t)syscall3(SYS_BRK, addr, 0, 0);
+}
+
+static inline uint32_t alarm(uint32_t seconds)
+{
+    return (uint32_t)syscall3(SYS_ALARM, seconds, 0, 0);
+}
+
+static inline int32_t pause(void)
+{
+    return syscall3(SYS_PAUSE, 0, 0, 0);
 }
 
 static inline int32_t setsid(void)

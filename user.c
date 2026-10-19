@@ -102,6 +102,15 @@ static void put_file(const char *path, const char *text, uint32_t n)
 }
 #endif
 
+#if defined(SELFTEST) && SELFTEST == SELFTEST_USER_ALARM
+static volatile int32_t rang;       /* 内核映像里的全局变量，init 和子进程共用：只在 init 里用 */
+
+static void on_alarm(int sig)
+{
+    rang = sig;
+}
+#endif
+
 #if defined(SELFTEST) && SELFTEST == SELFTEST_USER_WRITE_KERNEL
 extern volatile uint32_t timer_ticks;   /* 内核的变量，所在的页没有用户位 */
 #endif
@@ -859,6 +868,80 @@ void user_main(void)
     }
     ok = waitpid(c, &st, 0) == c && st == 0;
     write(1, ok ? "m" : "M", 1);
+    exit(0);
+#elif SELFTEST == SELFTEST_USER_ALARM
+    /*
+     * 每一项通过就写一个字母，期望第 6 行（去掉任务 A 的 A）是 crpkfe：
+     *   c：alarm(1) 之后一直 sleep(5)：大约 20 次之后 SIGALRM 来了，处理函数接住，正在睡的 sleep 被打断。
+     *   r：alarm 返回上一个闹钟还剩几秒（向上取整）：没有就是 0，刚定了 3 秒就是 3，过了半秒还是 3；alarm(0) 取消，之后睡 1.5 秒也不响。
+     *   p：pause 睡到闹钟响，处理函数运行之后返回 -EINTR。
+     *   k：没设处理函数的子进程，闹钟一响就被 SIGALRM 结束（状态 0x20E）。
+     *   f：fork 出的子进程没有父进程的闹钟。
+     *   e：exec 之后闹钟还在：子进程定了闹钟再换成 cat（在没人写的管道上等），1 秒后被 SIGALRM 结束。
+     * 整个检查要好几秒，第 6 行早被任务 A 的 A 绕回来盖过了：结果先攒着，最后一次写出去。
+     */
+    char res[8];
+    int nres = 0;
+    int32_t st = 0, c;
+    signal(SIGALRM, on_alarm);
+    rang = 0;
+    alarm(1);
+    int k = 0;
+    while (!rang && k < 100) {
+        sleep(5);
+        k++;
+    }
+    int ok = rang == SIGALRM && k >= 15 && k <= 25;
+    res[nres++] = ok ? 'c' : 'C';
+
+    rang = 0;
+    ok = alarm(3) == 0 && alarm(3) == 3;
+    sleep(50);                              /* 还剩 2.5 秒左右：向上取整是 3 */
+    ok &= alarm(0) == 3 && alarm(0) == 0;
+    sleep(150);
+    ok &= rang == 0;
+    res[nres++] = ok ? 'r' : 'R';
+
+    alarm(1);
+    ok = pause() == -EINTR && rang == SIGALRM;
+    res[nres++] = ok ? 'p' : 'P';
+
+    c = fork();
+    if (c == 0) {
+        signal(SIGALRM, SIG_DFL);
+        alarm(1);
+        pause();
+        exit(1);
+    }
+    ok = waitpid(c, &st, 0) == c && st == (0x200 | SIGALRM);
+    res[nres++] = ok ? 'k' : 'K';
+
+    alarm(5);
+    c = fork();
+    if (c == 0)
+        exit(alarm(0) == 0 ? 0 : 1);
+    ok = waitpid(c, &st, 0) == c && st == 0 && alarm(0) >= 4;
+    res[nres++] = ok ? 'f' : 'F';
+
+    int32_t q[2];
+    pipe(q);
+    c = fork();
+    if (c == 0) {
+        signal(SIGALRM, SIG_DFL);
+        alarm(1);
+        if (q[0] != 0) {
+            close(0);
+            dup(q[0]);
+        }
+        char *argv[] = { "cat", 0 };
+        execv("/bin/cat", argv);
+        exit(9);
+    }
+    ok = waitpid(c, &st, 0) == c && st == (0x200 | SIGALRM);
+    close(q[0]);
+    close(q[1]);
+    res[nres++] = ok ? 'e' : 'E';
+    write(1, res, (uint32_t)nres);
     exit(0);
 #elif SELFTEST == SELFTEST_ALL_EXIT
     write(1, "bye", 3);
