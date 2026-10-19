@@ -565,14 +565,14 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
   <div class="hero-main">
     <div>
       <div class="monitor"><pre class="vga" id="hero-vga" tabindex="0" aria-label="内核运行时的屏幕，点击后可以在 shell 里敲命令"></pre></div>
-      <div class="monitor-note"><span>在浏览器里重现的内核屏幕，硬盘上的文件取自真实的镜像，shell 照着 user/sh.c 写。开机完成后点一下屏幕就能敲命令：ls -l /bin | grep s、for i in 1 2 3; do echo $i; done、sleep 100 再按 Ctrl+Z 然后 jobs、bg、fg，su user 以后 cat /etc/shadow，mount /dev/hdb /mnt。方向键改这一行、翻历史；Ctrl+C 结束前台程序；直接运行 cat 时按 Ctrl+D 结束输入。</span><button type="button" id="hero-replay">重新开机</button></div>
+      <div class="monitor-note"><span>在浏览器里重现的内核屏幕，硬盘上的文件取自真实的镜像，shell 照着 user/sh.c 写。开机完成后点一下屏幕就能敲命令：ls -l /bin | grep s、for i in 1 2 3; do echo $i; done、sleep 100 再按 Ctrl+Z 然后 jobs、bg、fg，su user 以后 cat /etc/shadow，mount /dev/hdb /mnt。方向键改这一行、翻历史；Ctrl+C 结束前台程序；直接运行 cat 时按 Ctrl+D 结束输入。想看真内核开机：在仓库里运行 make web，浏览器里用 v86 运行同样的镜像。</span><button type="button" id="hero-replay">重新开机</button></div>
     </div>
     <ol class="milestones" id="milestones" aria-label="第一行每个字母代表的里程碑"></ol>
   </div>
   <div class="stats">
-    <span><b data-fact="loc">13,369</b>行汇编与 C</span>
+    <span><b data-fact="loc">13,395</b>行汇编与 C</span>
     <span><b data-fact="kernelKB">60 KB</b>内核</span>
-    <span><b data-fact="commits">82</b>个提交</span>
+    <span><b data-fact="commits">85</b>个提交</span>
     <span><b data-fact="tests">81</b>项自动化测试</span>
   </div>
 </header>
@@ -875,7 +875,7 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
     </div>
     <details class="more"><summary>展开细节</summary><ul>
       <li>穿过门时 CPU 要换栈：用户栈不可信，CPU 从任务 B 的 TSS 取出 <code>ss0:esp0</code>，换到它的内核栈，再压入用户态的 SS、ESP、EFLAGS、CS、EIP。返回时 <code>iret</code> 看见 CS 的低 2 位是 3，就把这几项弹回去，回到用户态。</li>
-      <li>调用约定和 Linux 0.11 一样：EAX 是调用号，EBX、ECX、EDX 是参数，返回值放回 EAX。现在有 write、getpid、sleep、exit 四个调用。</li>
+      <li>调用约定和 Linux 0.11 一样：EAX 是调用号，EBX、ECX、EDX 是参数，返回值放回 EAX。一开始只有 write、getpid、sleep、exit 四个，现在一共 48 个，编号和用法见 <code>syscall.h</code>。</li>
       <li>用户程序出错只结束它自己：内核在第 7 行写一行黄字，把任务标记为已结束，切到下一个任务。NMI、双重错误、机器检查来自硬件，不算用户程序的错，照样显示红色异常面板。</li>
       <li>Linux 0.11 不逐个检查用户指针：内核通过用户数据段（FS）读用户内存，越界由段界限挡住。这里所有段都是平坦的，只能显式检查。</li>
     </ul></details>
@@ -898,7 +898,8 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
     <div class="cap" id="cow-cap" aria-live="polite"></div>
     <div class="controls" data-stepper><button type="button" class="primary" data-play>播放</button><button type="button" data-prev>上一步</button><div class="dots" data-dots></div><button type="button" data-next>下一步</button></div>
     <details class="more"><summary>展开细节</summary><ul>
-      <li>子进程的 TSS 直接用父进程进入系统调用时栈上保存的寄存器：EIP 是 <code>int 0x80</code> 的下一条指令，只把 EAX 改成 0。子进程第一次被调度时，硬件任务切换直接把它放回用户态，好像 fork 刚返回 0。Linux 0.11 的 <code>copy_process()</code> 也是这样。</li>
+      <li>父进程进入系统调用时栈上保存的寄存器原样复制到子进程的内核栈顶，只把 EAX 改成 0：EIP 是 <code>int 0x80</code> 的下一条指令。子进程的 TSS 里是特权级 0 的现场，EIP 指向中断返回的那一段 <code>isr_return</code>；它第一次被调度时弹出这些寄存器，<code>iretd</code> 回到用户态，好像 fork 刚返回 0。</li>
+      <li>Linux 0.11 的 <code>copy_process()</code> 把用户态的寄存器直接填进子进程的 TSS，任务切换时 CPU 直接进入特权级 3。真 CPU 这样没问题，可浏览器里的模拟器 v86 在任务切换的中途就先把特权级换成 3，再去读只有内核能访问的 TSS 和 GDT，就停了。所以这里每次任务切换都在特权级 0 之间进行，后来的 Linux 也是这样（<code>ret_from_fork</code>）。</li>
       <li>写时复制的记号是页表项的第 9 位：CPU 不用这一位，留给操作系统。本来就只读的页（程序的代码）不打记号，写它仍是错误，程序会被结束。</li>
       <li>内核替用户写内存时（例如 waitpid 把退出码写回父进程的变量）也可能碰上共享的只读页。内核打开了 CR0 的 WP 位，特权级 0 写只读页同样会缺页，走同一条复制的路。386 没有这一位，所以 Linux 0.11 要先调用 <code>verify_area()</code>。</li>
       <li>任务表有 16 个槽。去掉任务 0、A 和 init，测试里正好能 fork 13 次，第 14 次返回 -1。</li>
@@ -1160,7 +1161,7 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
   <div class="big3">
     <div><b data-fact="tests">81</b><span>项测试，一条 <code>make test</code> 全部跑完</span></div>
     <div><b data-fact="selftests">40</b><span>个自检内核：除零、越权、坏指针、重复释放、fork、waitpid、读写文件、exec、管道、信号、堆、权限、作业控制、交换……</span></div>
-    <div><b data-fact="commits">82</b><span>个提交：每加一个机制，测试通过后单独提交</span></div>
+    <div><b data-fact="commits">85</b><span>个提交：每加一个机制，测试通过后单独提交</span></div>
   </div>
   <p style="color: var(--ink-2); max-width: 70ch">新加的测试都先在临时副本里把代码故意改坏，确认测试真的会失败，再改回来。</p>
   <h3 style="margin-top: 8px">代码审查发现的问题（节选）</h3>
@@ -1173,14 +1174,14 @@ footer { color: var(--ink-3); font-size: 13px; max-width: 80ch; }
   <details><summary>全部提交</summary><ol class="commits" id="commits"></ol></details>
 </section>
 
-<footer>源码在仓库的 <code>learning</code> 分支，<code>main</code> 分支是 Linux 0.11 原始源码。页面里的地址取自提交 <span class="mono" data-fact="head">d2b7c39</span> 构建出的 kernel.elf。在仓库里运行 <code>make run</code> 可以在 QEMU 中看到真实的屏幕。</footer>
+<footer>源码在仓库的 <code>learning</code> 分支，<code>main</code> 分支是 Linux 0.11 原始源码。页面里的地址取自提交 <span class="mono" data-fact="head">5032459</span> 构建出的 kernel.elf。在仓库里运行 <code>make run</code> 可以在 QEMU 中看到真实的屏幕。</footer>
 </main>
 
 <script>
 /* ===================== 构建事实：来自 objdump -h / -t build/kernel.elf ===================== */
 const FACTS = {
-  head: "d2b7c39", loc: "13,369", kernelKB: "60 KB", kernelSectors: 120, commits: 82, tests: 81,
-  text: 0x10000, rodata: 0x1ce40, data: 0x1d6f4, user: 0x1e000, userData: 0x1f000, userEnd: 0x1f000,
+  head: "5032459", loc: "13,395", kernelKB: "60 KB", kernelSectors: 120, commits: 85, tests: 81,
+  text: 0x10000, rodata: 0x1d090, data: 0x1d968, user: 0x1e000, userData: 0x1f000, userEnd: 0x1f000,
   bss: 0x1f000, bssEnd: 0x2fd20, stackTop: 0x20000, gdt: 0x20018, idt: 0x200e8,
   identity: 0x21000, pageDir: 0x25000, alias: 0x26000, ticks: 0x2d6ac, tss: 0x2f67c,
   userMain: 0x1e010, kmain: 0x101c0, selftests: 40,
@@ -1188,7 +1189,7 @@ const FACTS = {
 /* 硬盘镜像里的 i 节点号、块号，sh 和 check 里的地址：也由 tools/tour_data.py 回填，各章只引用它 */
 const DISK = {"firstData":8,"itable":[4,7],"imap":2,"zmap":3,"ino":{"bin":3,"dev":37,"etc":43,"issue":45,"hello":48,"tmp":52,"big":2},"blk":{"root":8,"bin":612,"etc":1202,"issue":1204,"tmp":1211,"big":[9,611]},"root":[[".",1],["..",1],["big",2],["bin",3],["dev",37],["etc",43],["hello.txt",48],["home",49],["mnt",51],["tmp",52]],"etc":[[".",43],["..",1],["group",44],["issue",45],["passwd",46],["shadow",47]],"issueSize":27,"tmpSize":32,"newIno":53,"newInoBlock":5,"newBit":1205,"newBlock":1212,"owners":[[1207,"/hello.txt"],[1208,"/home"],[1209,"/home/user"],[1210,"/mnt"],[1211,"/tmp"]],"df":{"blocks":4088,"used":1204,"inodes":128,"inodesUsed":52},"lsBin":["d     560   3  .","d     160   1  ..","-   13532   4  cat","-   83380   5  check","-   13532   6  chmod","-   13532   7  chown","-   13532   8  date","-   13528   9  df","-   13532  10  echo","-   13576  11  grep","-   13532  12  hello","-   13528  13  id","-   13532  14  kill","-   13532  15  letter","-   13528  16  ln","-   13532  17  login","-   13528  18  ls","-   13532  19  mkdir","-   13532  20  mkfifo","-   13532  21  mount","-   13528  22  mv","-   13532  23  nice","-   13556  24  passwd","-   13556  25  ps","-   13532  26  pwd","-   13528  27  rm","-   13532  28  rmdir","-   39504  29  sh","-   13580  30  sleep","-   13724  31  sort","-   13528  32  su","-   13532  33  sync","-   13532  34  touch","-   13532  35  umount","-   13596  36  wc"],"swap":{"start":8192,"pages":1024},"sortEnd":"0x40002824","onIntr":"0x40000EC0","sigRestore":"0x400050B0","readRet":"0x40000343","crashEip":"0x4000011C","check":{"segs":[[1073741824,8921,8921,"r-x"],[1073750748,65776,65776,"r--"],[1073819648,8,7320,"rw-"]],"table":"0x400023C0","mine":"0x40013004","end":"0x40014C98"}};
 /* 头图里模拟的 shell 用的文件系统快照：FS0 是 build/hd.img，FS1 是 build/hdb.img（tools/tour_data.py 回填） */
-const FS0 = {"ninodes":128,"blocks":4088,"nFreeBlocks":2884,"inodes":{"1":["d",160,493,0,0,1792400030,8],"2":["-",614400,420,0,0,1792400030,1],"3":["d",560,493,0,0,1792400030,2],"4":["-",13532,493,0,0,1792400029,1],"5":["-",83380,493,0,0,1792400029,1],"6":["-",13532,493,0,0,1792400029,1],"7":["-",13532,493,0,0,1792400029,1],"8":["-",13532,493,0,0,1792400029,1],"9":["-",13528,493,0,0,1792400029,1],"10":["-",13532,493,0,0,1792400029,1],"11":["-",13576,493,0,0,1792400029,1],"12":["-",13532,493,0,0,1792400029,1],"13":["-",13528,493,0,0,1792400029,1],"14":["-",13532,493,0,0,1792400029,1],"15":["-",13532,493,0,0,1792400029,1],"16":["-",13528,493,0,0,1792400029,1],"17":["-",13532,493,0,0,1792400029,1],"18":["-",13528,493,0,0,1792400029,1],"19":["-",13532,493,0,0,1792400029,1],"20":["-",13532,493,0,0,1792400029,1],"21":["-",13532,493,0,0,1792400029,1],"22":["-",13528,493,0,0,1792400029,1],"23":["-",13532,493,0,0,1792400029,1],"24":["-",13556,2541,0,0,1792400029,1],"25":["-",13556,493,0,0,1792400029,1],"26":["-",13532,493,0,0,1792400029,1],"27":["-",13528,493,0,0,1792400029,1],"28":["-",13532,493,0,0,1792400029,1],"29":["-",39504,493,0,0,1792400029,1],"30":["-",13580,493,0,0,1792400029,1],"31":["-",13724,493,0,0,1792400029,1],"32":["-",13528,2541,0,0,1792400029,1],"33":["-",13532,493,0,0,1792400029,1],"34":["-",13532,493,0,0,1792400029,1],"35":["-",13532,493,0,0,1792400029,1],"36":["-",13596,493,0,0,1792400029,1],"37":["d",112,493,0,0,1792400030,2],"38":["b",0,384,0,0,1792400030,1],"39":["b",0,384,0,0,1792400030,1],"40":["c",0,438,0,0,1792400030,1],"41":["c",0,438,0,0,1792400030,1],"42":["c",0,438,0,0,1792400030,1],"43":["d",96,493,0,0,1792400030,2],"44":["-",27,420,0,0,1792400029,1],"45":["-",27,420,0,0,1792400029,1],"46":["-",74,420,0,0,1792400029,1],"47":["-",44,384,0,0,1792400030,1],"48":["-",41,420,0,0,1792400029,1],"49":["d",48,493,0,0,1792400030,3],"50":["d",32,493,100,100,1792400030,2],"51":["d",32,493,0,0,1792400030,2],"52":["d",32,1023,0,0,1792400030,2]},"dirs":{"1":[[".",1],["..",1],["big",2],["bin",3],["dev",37],["etc",43],["hello.txt",48],["home",49],["mnt",51],["tmp",52]],"3":[[".",3],["..",1],["cat",4],["check",5],["chmod",6],["chown",7],["date",8],["df",9],["echo",10],["grep",11],["hello",12],["id",13],["kill",14],["letter",15],["ln",16],["login",17],["ls",18],["mkdir",19],["mkfifo",20],["mount",21],["mv",22],["nice",23],["passwd",24],["ps",25],["pwd",26],["rm",27],["rmdir",28],["sh",29],["sleep",30],["sort",31],["su",32],["sync",33],["touch",34],["umount",35],["wc",36]],"37":[[".",37],["..",1],["hda",38],["hdb",39],["tty0",40],["tty1",41],["ttyS0",42]],"43":[[".",43],["..",1],["group",44],["issue",45],["passwd",46],["shadow",47]],"49":[[".",49],["..",1],["user",50]],"50":[[".",50],["..",49]],"51":[[".",51],["..",1]],"52":[[".",52],["..",1]]},"texts":{"44":"root:x:0:\nusers:x:100:user\n","45":"Linux 0.11 learning kernel\n","46":"root:x:0:0:root:/:/bin/sh\nuser:x:100:100:a normal user:/home/user:/bin/sh\n","47":"root:5384451100c88de5\nuser:5d2f244d15acc715\n","48":"Hello from the Minix file system on hda!\n"}};
+const FS0 = {"ninodes":128,"blocks":4088,"nFreeBlocks":2884,"inodes":{"1":["d",160,493,0,0,1792403987,8],"2":["-",614400,420,0,0,1792403987,1],"3":["d",560,493,0,0,1792403987,2],"4":["-",13532,493,0,0,1792403986,1],"5":["-",83380,493,0,0,1792403986,1],"6":["-",13532,493,0,0,1792403986,1],"7":["-",13532,493,0,0,1792403986,1],"8":["-",13532,493,0,0,1792403986,1],"9":["-",13528,493,0,0,1792403986,1],"10":["-",13532,493,0,0,1792403986,1],"11":["-",13576,493,0,0,1792403986,1],"12":["-",13532,493,0,0,1792403986,1],"13":["-",13528,493,0,0,1792403986,1],"14":["-",13532,493,0,0,1792403986,1],"15":["-",13532,493,0,0,1792403986,1],"16":["-",13528,493,0,0,1792403986,1],"17":["-",13532,493,0,0,1792403986,1],"18":["-",13528,493,0,0,1792403986,1],"19":["-",13532,493,0,0,1792403986,1],"20":["-",13532,493,0,0,1792403986,1],"21":["-",13532,493,0,0,1792403986,1],"22":["-",13528,493,0,0,1792403986,1],"23":["-",13532,493,0,0,1792403986,1],"24":["-",13556,2541,0,0,1792403986,1],"25":["-",13556,493,0,0,1792403986,1],"26":["-",13532,493,0,0,1792403986,1],"27":["-",13528,493,0,0,1792403986,1],"28":["-",13532,493,0,0,1792403986,1],"29":["-",39504,493,0,0,1792403986,1],"30":["-",13580,493,0,0,1792403986,1],"31":["-",13724,493,0,0,1792403986,1],"32":["-",13528,2541,0,0,1792403986,1],"33":["-",13532,493,0,0,1792403986,1],"34":["-",13532,493,0,0,1792403986,1],"35":["-",13532,493,0,0,1792403986,1],"36":["-",13596,493,0,0,1792403986,1],"37":["d",112,493,0,0,1792403987,2],"38":["b",0,384,0,0,1792403987,1],"39":["b",0,384,0,0,1792403987,1],"40":["c",0,438,0,0,1792403987,1],"41":["c",0,438,0,0,1792403987,1],"42":["c",0,438,0,0,1792403987,1],"43":["d",96,493,0,0,1792403987,2],"44":["-",27,420,0,0,1792403986,1],"45":["-",27,420,0,0,1792403986,1],"46":["-",74,420,0,0,1792403986,1],"47":["-",44,384,0,0,1792403987,1],"48":["-",41,420,0,0,1792403986,1],"49":["d",48,493,0,0,1792403987,3],"50":["d",32,493,100,100,1792403987,2],"51":["d",32,493,0,0,1792403987,2],"52":["d",32,1023,0,0,1792403987,2]},"dirs":{"1":[[".",1],["..",1],["big",2],["bin",3],["dev",37],["etc",43],["hello.txt",48],["home",49],["mnt",51],["tmp",52]],"3":[[".",3],["..",1],["cat",4],["check",5],["chmod",6],["chown",7],["date",8],["df",9],["echo",10],["grep",11],["hello",12],["id",13],["kill",14],["letter",15],["ln",16],["login",17],["ls",18],["mkdir",19],["mkfifo",20],["mount",21],["mv",22],["nice",23],["passwd",24],["ps",25],["pwd",26],["rm",27],["rmdir",28],["sh",29],["sleep",30],["sort",31],["su",32],["sync",33],["touch",34],["umount",35],["wc",36]],"37":[[".",37],["..",1],["hda",38],["hdb",39],["tty0",40],["tty1",41],["ttyS0",42]],"43":[[".",43],["..",1],["group",44],["issue",45],["passwd",46],["shadow",47]],"49":[[".",49],["..",1],["user",50]],"50":[[".",50],["..",49]],"51":[[".",51],["..",1]],"52":[[".",52],["..",1]]},"texts":{"44":"root:x:0:\nusers:x:100:user\n","45":"Linux 0.11 learning kernel\n","46":"root:x:0:0:root:/:/bin/sh\nuser:x:100:100:a normal user:/home/user:/bin/sh\n","47":"root:5384451100c88de5\nuser:5d2f244d15acc715\n","48":"Hello from the Minix file system on hda!\n"}};
 const FS1 = {"ninodes":128,"blocks":1016,"nFreeBlocks":1014,"inodes":{"1":["d",48,493,0,0,1792388145,2],"2":["-",39,420,0,0,1792388141,1]},"dirs":{"1":[[".",1],["..",1],["readme",2]]},"texts":{"2":"This file is on the second disk (hdb).\n"}};
 const $ = id => document.getElementById(id);
 const hex = (n, w = 5) => "0x" + (n >>> 0).toString(16).toUpperCase().padStart(w, "0");
@@ -3843,7 +3844,7 @@ const FILES = [
   ["boot.asm", "第一阶段：读入 loader", "boot/bootsect.s"],
   ["loader.asm", "第二阶段：读内核、开 A20、进保护模式", "boot/bootsect.s、boot/setup.s"],
   ["entry.asm", "内核入口：换栈、清零 .bss", "boot/head.s"],
-  ["isr.asm", "中断入口、系统调用入口", "kernel/asm.s、kernel/system_call.s"],
+  ["isr.asm", "中断入口、系统调用入口；新的用户任务也从中断返回的那一段 isr_return 进入用户态", "kernel/asm.s、kernel/system_call.s"],
   ["kernel.c", "kmain()：按顺序初始化", "init/main.c"],
   ["gdt.c", "内核 GDT：内核段、TSS、用户段", "boot/head.s"],
   ["interrupt.c", "IDT、8259、分发、异常面板，回到用户态之前处理信号", "kernel/traps.c、kernel/system_call.s、kernel/signal.c"],
@@ -3864,6 +3865,7 @@ const FILES = [
   ["user.c", "init：内核映像里的第一个用户程序，拉起 letter、控制台上的 shell、串口上的 login，每 5 秒 sync", "init/main.c 中的 init()"],
   ["timer.c · keyboard.c · vga.c", "定时器、键盘、显存输出", "kernel/sched.c、kernel/chr_drv/"],
   ["string.c", "memset、memcpy：编译器会把大结构体的赋值和清零编译成对它们的调用", "include/string.h"],
+  ["web/index.html", "浏览器里的真机：make web 用 v86 运行同样的镜像", "无"],
   ["tests/test_kernel.py", "make test", "无"],
 ];
 $("file-map").innerHTML = FILES.map(([f, w, l]) => `<tr><td><code>${f}</code></td><td>${w}</td><td class="mono" style="font-size: 13px">${l}</td></tr>`).join("");
@@ -3895,7 +3897,8 @@ const COMMITS = [
   ["b585dda", "程序的页按需装入、共用"], ["26f875a", "终端的原始模式、方向键、转义序列"], ["7f25e47", "shell 的行编辑和历史"],
   ["51849e1", "测试：行编辑不假定历史是空的"], ["ae1b0f7", "shell 的引号、变量、if、while、for"], ["2065b11", "作业控制：Ctrl+Z、fg、bg"],
   ["f4d2938", "README：作业控制"], ["724b158", "命名管道和 mknod"], ["6b1fa8b", "交换：把页换到硬盘的尾部"],
-  ["d2b7c39", "审查：$$ 是 shell 自己的号"],
+  ["d2b7c39", "审查：$$ 是 shell 自己的号"], ["765c693", "网页：作业控制、权限、交换"],
+  ["d6aab14", "新任务先在内核态起步，再 iret 进用户态"], ["5032459", "浏览器里的真机：make web"],
 ];
 $("commits").innerHTML = COMMITS.map(([h, s]) => `<li><span class="h">${h}</span><span>${s}</span></li>`).join("");
 </script>
