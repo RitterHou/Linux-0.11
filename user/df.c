@@ -32,5 +32,10 @@ int main(int argc, char **argv)
     print(" buffers dirty; ");
     print_num(info.written);
     print(" blocks written since boot\n");
+    print("swap: ");                        /* 交换区：物理页不够时，写过的用户页换到这里 */
+    print_num(info.swap_used);
+    print(" of ");
+    print_num(info.swap_total);
+    print(" pages used\n");
     return 0;
 }

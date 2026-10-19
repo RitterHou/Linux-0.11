@@ -46,6 +46,7 @@
 #define SELFTEST_USER_NICE         42   /* nice 和 times：nice 值、继承、按 nice 分 CPU、utime 和 stime、cutime */
 #define SELFTEST_USER_PERM         43   /* 用户和权限：用户号、读写执行、新建和删除、粘滞位、chmod、chown、kill、setuid 程序 */
 #define SELFTEST_USER_STOP         44   /* 作业控制：停下、WUNTRACED、SIGCONT、拦不住的 SIGSTOP、孤儿进程组、setpgid */
+#define SELFTEST_USER_SWAP         45   /* 交换：只留 300 页空闲物理页，用 2 MB 的堆、fork、两个一起用、exec，换出去的页读回来都对 */
 
 #define SELFTEST_IN_USER(n) ((n) >= 20)
 

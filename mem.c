@@ -10,6 +10,7 @@
  */
 #include "io.h"
 #include "kernel.h"
+#include "selftest.h"
 
 #define PAGING_PAGES ((HIGH_MEM - LOW_MEM) / PAGE_SIZE)     /* 3840 页 */
 #define MAP_NR(addr) (((addr) - LOW_MEM) / PAGE_SIZE)
@@ -41,6 +42,12 @@ void mem_show(void)
 void mem_init(void)
 {
     free_pages = PAGING_PAGES;
+#if defined(SELFTEST) && SELFTEST == SELFTEST_USER_SWAP
+    /* 交换的自检：只留最后 300 页空闲，前面的都当成用掉了，不用写几十 MB 就能把物理页用光 */
+    for (uint32_t i = 0; i < PAGING_PAGES - 300; i++)
+        mem_map[i] = 1;
+    free_pages = 300;
+#endif
     mem_show();
 }
 

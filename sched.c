@@ -801,6 +801,19 @@ void sched_stop(int sig)
     irq_restore(flags);
 }
 
+/* 第 n 个任务的用户页表（给交换的时钟用）：没有用户空间返回 0；*is_current 说明它是不是当前任务（改了要刷新 TLB） */
+uint32_t *sched_user_table(int n, int *is_current)
+{
+    struct task *t = &tasks[n];
+    if (t->state == TASK_UNUSED || t->state == TASK_ZOMBIE || !t->page_dir || t->page_dir == kernel_page_dir())
+        return 0;
+    uint32_t pde = ((uint32_t *)t->page_dir)[USER_LOW >> 22];
+    if (!(pde & 1))
+        return 0;
+    *is_current = n == current_task;
+    return (uint32_t *)(pde & ~0xFFFu);
+}
+
 /* 当前任务有没有挂着、还没处理的信号 */
 int sched_signal_pending(void)
 {

@@ -210,6 +210,49 @@ static void on_tstp(int sig)
 }
 #endif
 
+#if defined(SELFTEST) && SELFTEST == SELFTEST_USER_SWAP
+/* 从 base 起的 pages 页，每页的头上写 seed 加页号，尾上写它取反 */
+static void swap_fill(uint32_t base, uint32_t pages, uint32_t seed)
+{
+    for (uint32_t i = 0; i < pages; i++) {
+        volatile uint32_t *p = (volatile uint32_t *)(base + i * 4096);
+        p[0] = seed + i;
+        p[1023] = ~(seed + i);
+    }
+}
+
+/* 读回来核对。volatile：不让 clang 看出刚写过、直接把结果算出来 */
+static int swap_check(uint32_t base, uint32_t pages, uint32_t seed)
+{
+    int ok = 1;
+    for (uint32_t i = 0; i < pages; i++) {
+        volatile uint32_t *p = (volatile uint32_t *)(base + i * 4096);
+        ok &= p[0] == seed + i && p[1023] == ~(seed + i);
+    }
+    return ok;
+}
+
+/* 把堆挪大 pages 页，返回原来的末尾；挪不了返回 0 */
+static uint32_t swap_grow(uint32_t pages)
+{
+    uint32_t base = brk(0);
+    return brk(base + pages * 4096) == base + pages * 4096 ? base : 0;
+}
+
+/* 两个子进程一起用：各自写三遍、每遍睡一下让对方接着挤，每遍都核对 */
+static int swap_churn(uint32_t pages, uint32_t seed)
+{
+    uint32_t base = swap_grow(pages);
+    int ok = base != 0;
+    for (uint32_t round = 0; ok && round < 3; round++) {
+        swap_fill(base, pages, seed + round * 10000);
+        sleep(2);
+        ok &= swap_check(base, pages, seed + round * 10000);
+    }
+    return ok;
+}
+#endif
+
 #if defined(SELFTEST) && SELFTEST == SELFTEST_USER_WRITE_KERNEL
 extern volatile uint32_t timer_ticks;   /* 内核的变量，所在的页没有用户位 */
 #endif
@@ -1573,6 +1616,91 @@ void user_main(void)
     }
     ok = waitpid(c, &st, 0) == c && st == 0;
     res[nres++] = ok ? 'p' : 'P';
+    write(1, res, (uint32_t)nres);
+    exit(0);
+#elif SELFTEST == SELFTEST_USER_SWAP
+    /*
+     * 内核只留了 300 页空闲物理页（mem.c 的 mem_init），交换区有 1024 页。每一项通过就记一个字母，期望第 6 行是 hkfcxr：
+     *   h：子进程把堆挪大 2 MB（512 页，比空闲页还多），每页写上记号，再从头读一遍都对；交换区用上了。
+     *   k：最早写的那几页早换出去了：把它们交给 write、read，内核读写换出去的用户内存要先读回来，读写的内容都对。
+     *   f：这个子进程再 fork：孙子读到的堆和它一样；孙子改写前一半，它自己的还是原样（换出去的页父子各读回一份）。
+     *   c：两个子进程一起各用 1 MB，轮流睡、来回写三遍，每遍核对都对。
+     *   x：一个子进程占着 1.5 MB，它的孩子 exec 磁盘上的 check swap：只读的页扔掉以后从程序文件读回来，
+     *      写过的 .data、.bss 从交换区读回来（要是当成没写过扔掉，再从文件读就是原来的值）；它自己的 1.5 MB 也都对。
+     *   r：都结束以后，交换区一页也没用，空闲的物理页和开始时一样多。
+     * 结果先攒着，最后一次写出去。
+     */
+    char res[8];
+    int nres = 0, ok;
+    int32_t st = -1, c, d;
+    struct fsinfo info;
+    ok = fsinfo(&info) == 0 && info.swap_total == 1024 && info.swap_used == 0;
+    uint32_t free_before = info.free_pages;
+
+    c = fork();
+    if (c == 0) {
+        uint32_t base = swap_grow(512);
+        int good = base != 0;
+        swap_fill(base, 512, 1000);
+        good &= swap_check(base, 512, 1000);
+        struct fsinfo fi;
+        good &= fsinfo(&fi) == 0 && fi.swap_used > 0;
+
+        int32_t fds[2];
+        int kgood = pipe(fds) == 0;
+        kgood &= write(fds[1], (const void *)base, 8) == 8;             /* 第 0 页的头 8 个字节：1000 和 0 */
+        kgood &= read(fds[0], (void *)(base + 4096 + 8), 8) == 8;       /* 读到第 1 页的第 2、3 个字里 */
+        volatile uint32_t *p1 = (volatile uint32_t *)(base + 4096);
+        kgood &= p1[0] == 1001 && p1[2] == 1000 && p1[3] == 0;
+        p1[2] = p1[3] = 0;
+
+        int32_t g = fork();
+        if (g == 0) {
+            int gg = swap_check(base, 512, 1000);
+            swap_fill(base, 256, 5000);
+            gg &= swap_check(base, 256, 5000) && swap_check(base + 256 * 4096, 256, 1256);
+            exit(gg ? 0 : 1);
+        }
+        int32_t gs = -1;
+        int fgood = g > 0 && waitpid(g, &gs, 0) == g && gs == 0 && swap_check(base, 512, 1000);
+        exit((good ? 1 : 0) | (kgood ? 2 : 0) | (fgood ? 4 : 0));
+    }
+    ok &= waitpid(c, &st, 0) == c;
+    res[nres++] = ok && (st & 1) ? 'h' : 'H';
+    res[nres++] = ok && (st & 2) ? 'k' : 'K';
+    res[nres++] = ok && (st & 4) ? 'f' : 'F';
+
+    c = fork();
+    if (c == 0)
+        exit(swap_churn(256, 2000) ? 0 : 1);
+    d = fork();
+    if (d == 0)
+        exit(swap_churn(256, 3000) ? 0 : 1);
+    ok = waitpid(c, &st, 0) == c && st == 0;
+    ok &= waitpid(d, &st, 0) == d && st == 0;
+    res[nres++] = ok ? 'c' : 'C';
+
+    c = fork();
+    if (c == 0) {
+        uint32_t base = swap_grow(384);
+        int good = base != 0;
+        swap_fill(base, 384, 7000);
+        int32_t g = fork();
+        if (g == 0) {
+            char *argv[] = { "check", "swap", "200", 0 };
+            close(1);                   /* 它打印的 swap ok 不要落在第 6 行上：只看退出码 */
+            execv("/bin/check", argv);
+            exit(9);
+        }
+        int32_t gs = -1;
+        good &= g > 0 && waitpid(g, &gs, 0) == g && gs == 0 && swap_check(base, 384, 7000);
+        exit(good ? 0 : 1);
+    }
+    ok = waitpid(c, &st, 0) == c && st == 0;
+    res[nres++] = ok ? 'x' : 'X';
+
+    ok = fsinfo(&info) == 0 && info.swap_used == 0 && info.free_pages == free_before;
+    res[nres++] = ok ? 'r' : 'R';
     write(1, res, (uint32_t)nres);
     exit(0);
 #elif SELFTEST == SELFTEST_USER_PERM

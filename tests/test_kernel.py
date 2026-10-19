@@ -390,7 +390,7 @@ def test_boot_screen(m, elf):
     m.wait_for(lambda mm: mm.screen(1)[0] == "ABPKCVITUFWE", timeout=2, what="第 0 行的 ABPKCVITUFWE")
     wait_prompt(m)
     rows = m.screen(10)
-    check(rows[1] == "disk: 8192 sectors (4096 KB), QEMU HARDDISK   minix fs: 128 inodes, 4096 blocks",
+    check(rows[1] == "disk: 16384 sectors (8192 KB), QEMU HARDDISK  minix fs: 128 inodes, 4096 blocks",
           f"第 1 行应显示硬盘的扇区数和型号，以及挂载的文件系统：{rows[1]!r}")
     check(rows[2] == "Hello from kmain() in C!", f"第 2 行不对：{rows[2]!r}")
     # 写时复制的次数取决于 fork 之后谁先写栈，不卡死；用掉的页数是 A 的内核栈，init、letter、sh、串口上的 login 各自的
@@ -933,8 +933,8 @@ def test_hd_rw(_m, _elf):
         row = m.screen(8)[7]
         f = dict(re.findall(r"(\w+)=([0-9A-F]+)", row))
         check(f.get("first") == "1", f"第 0 扇区应是 mkfs 写的说明，第 2 扇区应有 Minix 的魔数 0x137F：{row!r}")
-        check(f.get("last") == "1", f"最后一个扇区（第 8191 个）应能读：{row!r}")
-        check(f.get("beyond") == "FFFFFFFF", f"读第 8192 扇区（超出硬盘）应返回 -1：{row!r}")
+        check(f.get("last") == "1", f"最后一个扇区（第 16383 个）应能读：{row!r}")
+        check(f.get("beyond") == "FFFFFFFF", f"读第 16384 扇区（超出硬盘）应返回 -1：{row!r}")
         check(f.get("write") == "1", f"写进第 8000 扇区的内容应能原样读回：{row!r}")
         check(f.get("many") == "1", f"连续读 64 个扇区都应成功：{row!r}")
         # 中断叫醒任务后 CPU 正闲着就马上切过去；要是等下一个定时器中断，每个扇区就要多花 10 ms
@@ -1244,6 +1244,21 @@ def test_stop_signals(_m, _elf):
             check(len(out) > i and out[i] == ch, f"第 {i + 1} 项（{meaning[ch]}）没有通过：第 6 行去掉 A 后是 {out!r}，应为 {expected!r}")
 
 
+def test_swap(_m, _elf):
+    """交换：只留 300 页空闲物理页，2 MB 的堆、fork、两个进程一起用、exec 的程序被挤出去，换出去的页读回来都对；最后交换区空了，物理页一页不少"""
+    d = build_selftest("USER_SWAP")
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        m.wait_for(lambda mm: message_row(mm) == "task 2 exited with code 0", timeout=120, what="init 的结束消息")
+        out = task_output(m).replace("A", "")
+        expected = "hkfcxr"
+        meaning = {"h": "2 MB 的堆写满再读回来都对，交换区用上了", "k": "write、read 用换出去的缓冲区",
+                   "f": "fork 以后父子各读回一份，孙子改的不影响父亲", "c": "两个进程一起用、轮流写三遍",
+                   "x": "exec 的 check swap：只读页从文件读回来，写过的 .data、.bss 从交换区读回来",
+                   "r": "都结束以后交换区一页也没用，空闲物理页和开始时一样多"}
+        for i, ch in enumerate(expected):
+            check(len(out) > i and out[i] == ch, f"第 {i + 1} 项（{meaning[ch]}）没有通过：第 6 行去掉 A 后是 {out!r}，应为 {expected!r}")
+
+
 def test_no_disk(_m, _elf):
     """不接硬盘开机：第 1 行显示 disk: none；exec 不了 /bin/letter，任务 3 用内核映像里的代码写 C；init 隔一会儿才重试 shell"""
     tmp = tempfile.mkdtemp(prefix="kernel-nodisk-")
@@ -1487,7 +1502,8 @@ def test_shell(m, elf):
                what=f"管道和命令都结束后空闲页回到 {free_before}")
 
     df = run_command(m, "df")
-    check(len(df) == 2 and df[0].startswith("/: blocks: ") and df[1].startswith("cache: "), f"df 的输出不对：{df!r}")
+    check(len(df) == 3 and df[0].startswith("/: blocks: ") and df[1].startswith("cache: ") and df[2] == "swap: 0 of 1024 pages used",
+          f"df 的输出不对：{df!r}")
     df = df[0]                      # 第二行是缓冲区缓存的数字，随时在变
     for command, expected in [("echo hello > /tmp/a", []), ("echo world >> /tmp/a", []), ("cat /tmp/a", ["hello", "world"]),
                               ("wc < /tmp/a", ["2 2 12"]), ("mkdir /tmp/d", []), ("echo x > /tmp/d/f", []),
@@ -1648,7 +1664,7 @@ def test_sleep(m, elf):
 def test_cache(m, elf):
     """缓冲区缓存：写文件后 df 显示脏块，sync 之前一块也不写盘；不 sync，init 每隔大约 5 秒也写回，写回的正好是那些块"""
     def df():
-        out = run_command(m, "df")[-1]
+        out = run_command(m, "df")[-2]
         g = re.fullmatch(r"cache: (\d+) of 16 buffers dirty; (\d+) blocks written since boot", out)
         check(g, f"df 的第二行：{out!r}")
         return int(g.group(1)), int(g.group(2))
@@ -2118,7 +2134,7 @@ def test_mount(m, elf):
     rows = {r.split()[-1]: r.split() for r in run_command(m, "ls /mnt")}
     check(rows["."][2] == "1" and rows["readme"][2] == "2" and rows[".."][2] == "1", f"/mnt 是 hdb 的根目录（1 号 i 节点），i 节点号是 hdb 上的：{rows!r}")
     df = run_command(m, "df")
-    check(len(df) == 3 and df[0].startswith("/: ") and re.fullmatch(r"/mnt: blocks: \d+ used, \d+ free; inodes: 3 used, 125 free", df[1]),
+    check(len(df) == 4 and df[0].startswith("/: ") and re.fullmatch(r"/mnt: blocks: \d+ used, \d+ free; inodes: 3 used, 125 free", df[1]),
           f"df 每块盘一行，hdb 有 128 个 i 节点，用了 3 个（根目录、readme、new）：{df!r}")
     check(entry_row(m, "/dev", "hdb").startswith("brw------- "), "/dev/hdb 是块设备，只有 root 能用")
 
@@ -2487,7 +2503,7 @@ SEPARATE_TESTS = [test_syscalls, test_page_alloc, test_double_free, test_hd_rw, 
                   test_big_kernel, test_user_write_kernel, test_user_privileged,
                   test_user_bad_pointer, test_user_exit, test_all_tasks_exit,
                   test_nmi_in_user_mode, test_user_write_code, test_preemption,
-                  test_deep_stack, test_wild_read, test_fork_isolation, test_waitpid, test_file_system, test_exec, test_pipe, test_fs_write, test_signal_syscalls, test_brk, test_alarm, test_sync, test_sync_to_disk, test_link, test_time_syscalls, test_fcntl, test_nice, test_permissions, test_stop_signals, test_no_disk]
+                  test_deep_stack, test_wild_read, test_fork_isolation, test_waitpid, test_file_system, test_exec, test_pipe, test_fs_write, test_signal_syscalls, test_brk, test_alarm, test_sync, test_sync_to_disk, test_link, test_time_syscalls, test_fcntl, test_nice, test_permissions, test_stop_signals, test_swap, test_no_disk]
 
 
 def main():
