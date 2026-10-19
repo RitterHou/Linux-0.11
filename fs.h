@@ -24,13 +24,17 @@ struct buffer {
     uint8_t valid;                  /* 内容已经从硬盘读进来了 */
     uint8_t locked;                 /* 正在从硬盘读，别人要等 */
     uint16_t count;                 /* 有几个人正在用它；为 0 时可以换成别的块 */
+    uint8_t dirty;                  /* 改过了，还没写回硬盘 */
     uint32_t last_used;             /* 最近一次被用到的时刻，换块时挑最久没用的 */
     uint8_t data[BLOCK_SIZE];
 };
 #define NO_BLOCK 0xFFFFFFFFu
+#define NR_BUFFERS 16               /* 缓冲区缓存有几个缓冲区 */
 struct buffer *bread(uint32_t block);
 struct buffer *bget(uint32_t block);
-int bwrite(struct buffer *b);
+void bdirty(struct buffer *b);
+int bsync(void);
+uint32_t buffer_dirty(void);
 void brelse(struct buffer *b);
 extern uint32_t buffer_hits, buffer_misses, buffer_writes;
 

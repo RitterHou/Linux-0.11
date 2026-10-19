@@ -38,12 +38,15 @@
 #define SYS_BRK    23               /* brk(addr)：把堆的末尾挪到 addr，返回现在的堆末尾；brk(0) 只是问一下 */
 #define SYS_ALARM  24               /* alarm(seconds)：几秒之后给自己发 SIGALRM；0 是取消 */
 #define SYS_PAUSE  25               /* pause()：睡到来了一个信号为止 */
-#define SYS_CALLS  26
+#define SYS_SYNC   26               /* sync()：把缓冲区缓存里所有改过的块写回硬盘 */
+#define SYS_CALLS  27
 
 /* fsinfo 写回的内容 */
 struct fsinfo {
     uint32_t blocks, free_blocks;   /* 数据块 */
     uint32_t inodes, free_inodes;
+    uint32_t dirty, buffers;        /* 缓冲区缓存：有几个缓冲区改过了还没写回硬盘，一共几个 */
+    uint32_t written;               /* 开机以来写回硬盘的块数 */
 };
 
 /* stat 写回的内容：取自磁盘上的 i 节点 */
@@ -215,6 +218,11 @@ static inline uint32_t brk(uint32_t addr)
 static inline uint32_t alarm(uint32_t seconds)
 {
     return (uint32_t)syscall3(SYS_ALARM, seconds, 0, 0);
+}
+
+static inline int32_t sync(void)
+{
+    return syscall3(SYS_SYNC, 0, 0, 0);
 }
 
 static inline int32_t pause(void)

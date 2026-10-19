@@ -429,6 +429,16 @@ static int32_t sys_pause(uint32_t a, uint32_t b, uint32_t c, struct interrupt_fr
     return sched_pause();
 }
 
+/* sync()：把所有脏块写回硬盘。Linux 0.11 的 sys_sync() 先把 i 节点写进缓冲区再写回脏块；这里 i 节点改了就进缓冲区了。 */
+static int32_t sys_sync(uint32_t a, uint32_t b, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)a, (void)b, (void)c, (void)frame;
+    fs_lock();
+    int ret = bsync();
+    fs_unlock();
+    return ret;
+}
+
 static const syscall_fn syscall_table[SYS_CALLS] = {
     [SYS_WRITE]  = sys_write,
     [SYS_GETPID] = sys_getpid,
@@ -456,6 +466,7 @@ static const syscall_fn syscall_table[SYS_CALLS] = {
     [SYS_BRK]    = sys_brk,
     [SYS_ALARM]  = sys_alarm,
     [SYS_PAUSE]  = sys_pause,
+    [SYS_SYNC]   = sys_sync,
 };
 
 void syscall_dispatch(struct interrupt_frame *frame)

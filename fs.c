@@ -239,9 +239,9 @@ static int write_inode(struct m_inode *ip)
     const uint8_t *src = (const uint8_t *)&ip->d;
     for (uint32_t i = 0; i < sizeof(ip->d); i++)
         dst[i] = src[i];
-    int ok = bwrite(b);
+    bdirty(b);
     brelse(b);
-    return ok;
+    return 0;
 }
 
 /* 取第 ino 个 i 节点：表里已经有就共用，引用次数加一；没有就从磁盘读进一个空项。失败返回 0。 */
@@ -297,9 +297,9 @@ static uint32_t alloc_bit(uint32_t first_block, uint32_t nblocks, uint32_t limit
                 continue;
             if (!(b->data[i / 8] & (1 << (i % 8)))) {
                 b->data[i / 8] |= (uint8_t)(1 << (i % 8));
-                int ok = bwrite(b);
+                bdirty(b);
                 brelse(b);
-                return ok == 0 ? bit : 0;
+                return bit;
             }
         }
         brelse(b);
@@ -314,7 +314,7 @@ static void free_bit(uint32_t first_block, uint32_t bit)
         return;
     uint32_t i = bit % (BLOCK_SIZE * 8);
     b->data[i / 8] &= (uint8_t)~(1 << (i % 8));
-    bwrite(b);
+    bdirty(b);
     brelse(b);
 }
 
@@ -328,7 +328,7 @@ static uint32_t alloc_block(void)
     struct buffer *b = bget(block);
     if (!b)
         return 0;
-    bwrite(b);
+    bdirty(b);                      /* 清零了的新块：以后写回去，免得硬盘上留着这一块原来的内容 */
     brelse(b);
     return block;
 }
@@ -353,7 +353,7 @@ static uint32_t indirect_slot(uint32_t zone, uint32_t i, int create)
         value = alloc_block();
         if (value) {
             slots[i] = (uint16_t)value;
-            bwrite(b);
+            bdirty(b);
         }
     }
     brelse(b);
@@ -411,10 +411,8 @@ int32_t inode_write(struct m_inode *ip, uint32_t pos, const void *src, uint32_t 
             break;
         for (uint32_t i = 0; i < chunk; i++)
             b->data[off + i] = in[done + i];
-        int ok = bwrite(b);
+        bdirty(b);
         brelse(b);
-        if (ok < 0)
-            break;
         done += chunk;
     }
     if (pos + done > ip->d.size) {
@@ -687,5 +685,8 @@ int fs_info(struct fsinfo *info)
     if (count_free(2 + sb.imap_blocks, sb.zmap_blocks, info->blocks, &info->free_blocks) < 0 ||
         count_free(2, sb.imap_blocks, info->inodes, &info->free_inodes) < 0)
         return -1;
+    info->dirty = buffer_dirty();
+    info->buffers = NR_BUFFERS;
+    info->written = buffer_writes;
     return 0;
 }
