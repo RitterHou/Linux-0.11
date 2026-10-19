@@ -1166,15 +1166,18 @@ def test_sync(_m, _elf):
 
 
 def test_link(_m, _elf):
-    """硬链接：两个名字一个 i 节点、链接数 2；从一个名字写另一个马上读得到；删一个名字不收回；开着的文件删光名字也能读；错误情况"""
+    """硬链接：两个名字一个 i 节点、链接数 2；从一个名字写另一个马上读得到；删一个名字不收回；开着的文件删光名字也能读；错误情况；链接数上限；末尾的 /；mv 的长名字"""
     d = build_selftest("USER_LINK")
     with Machine(os.path.join(d, "floppy.img")) as m:
         m.wait_for(lambda mm: message_row(mm) == "task 2 exited with code 0", timeout=10, what="init 的结束消息")
         out = task_output(m).replace("A", "")
-        expected = "lwuoe"
+        expected = "lwuoemtv"
         meaning = {"l": "link 之后同一个 i 节点、链接数 2、内容一样", "w": "从一个名字写，另一个名字马上读得到",
                    "u": "删掉一个名字不收回，链接数变回 1；两个都删了才收回", "o": "开着的文件删光名字也能读，关掉才收回",
-                   "e": "目录、已经存在的名字、不存在的源和目录、太长的名字都不行"}
+                   "e": "目录、已经存在的名字（包括 . 和 ..）、不存在的源和目录、太长的名字都不行",
+                   "m": "一个文件最多 250 个名字，再 link 返回 -1，链接数不回绕",
+                   "t": "文件名后面加 / 打不开、删不掉、不能新建和链接；目录末尾带 / 照常可以",
+                   "v": "mv 拼出来的名字太长时报错，不截短、不删掉别的文件"}
         for i, ch in enumerate(expected):
             check(len(out) > i and out[i] == ch, f"第 {i + 1} 项（{meaning[ch]}）没有通过：第 6 行去掉 A 后是 {out!r}，应为 {expected!r}")
 

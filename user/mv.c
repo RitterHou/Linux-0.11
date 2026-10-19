@@ -3,6 +3,8 @@
  * 先 link 一个新名字，再 unlink 旧的：文件的内容一个字节也不用搬，只是目录里换了一项。
  * 新名字已经是一个文件，先把它删掉；新名字就是这个文件本身（同一个 i 节点），什么也不做。
  * 目录搬不了：还得改它里面的 ..，那要 rename 才行。
+ * 这不是一步完成的：已经删掉了原来的新名字，link 却失败了（比如内存里的 i 节点表满了），新名字就没了。
+ * 早年的 Unix 也是这样，后来才有了一步完成的 rename 系统调用。
  */
 #include "ulib.h"
 
@@ -34,12 +36,21 @@ int main(int argc, char **argv)
         for (const char *p = argv[1]; *p; p++)
             if (*p == '/' && p[1])
                 base = p + 1;
-        uint32_t n = 0;
-        for (const char *p = dst; *p && n < sizeof(path) - 1; p++)
+        uint32_t n = 0, need = strlen(dst) + 1;
+        for (const char *p = base; *p && *p != '/'; p++)
+            need++;
+        if (need > sizeof(path) - 1) {
+            /* 截短了就成了另一个名字：可能正好是目录里别的文件，下面会把它删掉 */
+            eprint("mv: ");
+            eprint(dst);
+            eprint(": name too long\n");
+            return 1;
+        }
+        for (const char *p = dst; *p; p++)
             path[n++] = *p;
-        if (n && path[n - 1] != '/' && n < sizeof(path) - 1)
+        if (n && path[n - 1] != '/')
             path[n++] = '/';
-        for (const char *p = base; *p && *p != '/' && n < sizeof(path) - 1; p++)
+        for (const char *p = base; *p && *p != '/'; p++)
             path[n++] = *p;
         path[n] = '\0';
         dst = path;
