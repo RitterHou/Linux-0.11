@@ -2239,10 +2239,21 @@ def test_line_edit(m, elf):
     edit(["cho x", ["home"], "e", ["end"], "y"], "$ echo xy", "xy")
     edit(["echo ab", ["left", "left", "left", "right"], "-"], "$ echo -ab", "-ab")      # 左移三格到空格前，右移一格到 a 前
     edit(["xx", ["backspace", "backspace", "backspace", "left", "right"], "echo ok"], "$ echo ok", "ok")
+    # 前面的测试也在这个 shell 里敲过命令：历史里不止这几条，往上翻过了 echo hello 还有更早的
     for keys, shown in [(["up"], "$ echo ok"), (["up"], "$ echo -ab"), (["up", "up", "up"], "$ echo hello"),
-                        (["up"], "$ echo hello"), (["down"], "$ echo abc"), (["down", "down", "down"], "$ echo ok")]:
+                        (["down"], "$ echo abc"), (["down", "down", "down"], "$ echo ok")]:
         m.sendkeys(keys)
         m.wait_for(lambda mm: rows()[-1:] == [shown], timeout=3, what=f"翻历史：{keys} 以后显示 {shown!r}")
+    m.sendkeys(["up"] * 20)             # 最多记 16 条：翻到最早的一条就不动了
+    time.sleep(0.5)
+    oldest = rows()[-1]
+    m.sendkeys(["up"])
+    time.sleep(0.3)
+    check(rows()[-1] == oldest and oldest != "$ echo ok", f"翻到最早的一条再往上翻，不动：{oldest!r}，之后 {rows()[-1]!r}")
+    m.sendkeys(["down"] * 20)
+    m.wait_for(lambda mm: rows()[-1:] == ["$"], timeout=3, what="一直往下翻，回到正在敲的空行")
+    m.sendkeys(["up"])
+    m.wait_for(lambda mm: rows()[-1:] == ["$ echo ok"], timeout=3, what="再往上一条是最近的 echo ok")
     m.sendkeys(["down"])
     m.wait_for(lambda mm: rows()[-1:] == ["$"], timeout=3, what="翻到最下面是正在敲的空行")
     type_text(m, "echo new")
