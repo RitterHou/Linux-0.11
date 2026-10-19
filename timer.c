@@ -109,11 +109,12 @@ void timer_init(uint32_t hz)
     outb(PIT_CHANNEL0, latch >> 8);
 }
 
-void timer_handle(void)
+/* user：中断打断的是用户态的代码。记 CPU 时间时分开算用户态和内核态。 */
+void timer_handle(int user)
 {
     char buf[12];
 
     timer_ticks++;
     vga_write_at(TICKS_ROW, TICKS_COL, format_uint(timer_ticks, 10, buf), VGA_GRAY);
-    schedule();                     /* 叫醒到时间的任务，必要时切换。Linux 0.11 的 do_timer() 在内核态时不切换，这里任何时候都可能切换 */
+    schedule(user);                 /* 叫醒到时间的任务，必要时切换。Linux 0.11 的 do_timer() 在内核态时不切换，这里任何时候都可能切换 */
 }

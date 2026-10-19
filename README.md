@@ -86,12 +86,13 @@ make test
 - 用户程序写内核变量或执行 `cli` 时，只有任务 B 被结束：第 7 行给出 `#PF`（错误码 7：页存在、写操作、来自用户态）或 `#GP` 以及出错指令的 EIP，不出现异常面板，定时器照常走，第 6 行很快只剩 A，TR 不再出现任务 B 的 `0x60`，任务 B 的内核栈、页目录、栈区页表和栈页全部收回（第 3 行回到 3839 页空闲）；用户程序调用 `exit(7)` 时同样只剩任务 A，第 7 行为 `task 2 exited with code 7`；把内核地址交给 `write` 得到 -1。
 - 用户代码页只读：用户程序改写自己的代码（自检 `USER_WRITE_CODE`）时只结束任务 B，错误码 7。
 - 任务 B 在用户态空转时注入 NMI（自检 `USER_SPIN`，先用监视器的 `stop` 暂停、确认 CS 为 `0x33` 再注入）：显示异常面板而不是结束任务 B，面板上的 SS、ESP 是用户态的值。
-- 任务 A、B 都结束后切回任务 0：定时器照常走，TR 为 `0x50`，CPU 停在 `kmain()` 的 `hlt` 上，CR3 是内核的页目录，3840 页全部空闲；第 6 行为 `AbyeAAAA`（A 写一个字母就去睡，B 趁机写完 `bye` 结束，A 再写完剩下的 4 个）。
+- 任务 A、B 都结束后切回任务 0：定时器照常走，TR 为 `0x50`，CPU 停在 `kmain()` 的 `hlt` 上，CR3 是内核的页目录，3840 页全部空闲；第 6 行为 `byeAAAAA`（A、B 这一轮的 counter 一样多，先挑任务号大的 B，和 Linux 0.11 一样；B 写完 `bye` 就结束，A 再写 5 个）。
 - IDT 第 `0x80` 项是指向 `isr_syscall` 的 DPL 3 陷阱门；`getpid`、`write`、`sleep` 和未知调用号的返回值正确，`write` 的内容出现在第 6 行。
 - 任务写一个字母就去睡、把 CPU 让给别人：第 6 行 A、B、C 逐个轮流（一行 73 格不是 3 的倍数，写满一圈后新旧字母的交界处有一次两个相同的字母）；用监视器暂停虚拟机，读出输出位置和 `timer_ticks`，三个任务合计约每个 tick 写 1.5 个字母。
 - waitpid（自检 `USER_WAIT`）：返回子进程号，把退出码 42 写回父进程的变量；那个变量所在的页 fork 之后由三个进程共用，内核写它时也会先复制，另一个进程看到的仍是原值；16 个任务槽去掉任务 0、A、B 正好能 fork 13 次，第 14 次返回 -1；`waitpid(-1)` 把它们一个个收走；`WNOHANG` 在子进程还没结束时立刻返回 0，等别人的子进程返回 -1；被缺页异常结束的子进程，状态是 `0x10E`。所有子进程收走后内存回到只剩任务 A 的内核栈。
 - fork：任务 3 有自己的页目录和内核栈；父子都写过栈之后，栈顶映射到不同的物理页，页表项都已改回可写；用户代码那一页父子共用。自检 `USER_FORK`：子进程把栈上的变量改成 99，父进程看到的仍是 7；`fork()` 在父进程返回 3、在子进程返回 0；父进程不等子进程就结束时，已经结束的子进程也被收走，内存全部收回。
-- 抢占（自检 `USER_SPIN`，用户程序一直空转、从不睡眠）：任务 A 只能在任务 B 的时间片用完后运行，约每 20 个 tick 写一个字母；空闲比例降到 10% 以下。
+- 抢占（自检 `USER_SPIN`，用户程序一直空转、从不睡眠）：任务 A 只能等任务 B 这一轮的 20 个 tick 用完才运行，约每 20 个 tick 写一个字母；空闲比例降到 10% 以下。
+- nice 和 CPU 时间（自检 `USER_NICE`）：`nice` 返回新的 nice 值，停在 -20～19，`taskinfo` 读到的 priority 是 20 - nice；fork 出的子进程继承 nice 值，exec 成 sleep 以后也不变；一个 nice 0、一个 nice 19 的子进程一起空转 2 秒，nice 0 的至少分到 8 倍（量出来是 190:10，算法是 20:1），nice 19 的也没饿死；两个 nice 0 的分得差不多（100:100）；用户态空转的时间记在 utime，一直调用 stat 的记在 stime；收走的子进程用的时间正好加进父进程的 cutime、cstime。在 shell 里（`test_nice_shell`）：`nice` 打印 0，`nice -n 3 nice` 打印 3，`nice nice` 打印 10，超出范围的停在 -20 和 19，参数不对报用法；后台的 `nice -n 5 sleep 3` 在 `ps -l` 里是 PRI 15、NI 5；`ps -l` 每行的格式对，空闲任务的 TIME 是 0.00；`time sleep 1` 过了 1 秒左右、CPU 几乎没用，`time check spin` 半秒几乎都记在 user。
 - 寄存器设为已知值后执行 `ud2`：异常面板显示 `#UD`，EAX～EBP、EIP（`ud2` 的地址）、各段寄存器、CR3 都与预期一致，ESP 落在内核栈内，EFLAGS 的 IF 为 1。
 - 除以零显示 `#DE`，EIP 正好指向 `div` 指令；触发未填写的 IDT 表项显示 `#GP`，错误码为 `0x182`。
 - 读未映射的 `0xD0000000` 显示 `#PF`，错误码 0，CR2 为该地址；写空指针显示 `#PF`，错误码 2（写操作），CR2 为 0。
@@ -239,7 +240,7 @@ DS=0x0010 ES=0x0010 FS=0x0010 GS=0x0010 CR2=0x00000000 CR3=0x00018000
 | 8 | `close(fd)` | 关闭文件描述符 | 0；`fd` 没打开时 -1 |
 | 9 | `execv(path, argv)` | 把当前任务换成硬盘上的程序，`argv` 是以 0 结尾的参数数组，见下文“exec” | 成功时不返回，从新程序的入口开始执行；文件不存在、不能执行、不是 ELF 或内存不够时 -1，原程序不受影响 |
 | 10 | `stat(path, &st)` | 取文件的类型和权限、链接数、大小、i 节点号、主人和组、修改时间 | 0；文件不存在或 `st` 不在用户可写的内存里时 -1 |
-| 11 | `taskinfo(pid, &info)` | 取任务的状态、父进程和名字，给 `ps` 用 | 0；空槽时 -1 |
+| 11 | `taskinfo(pid, &info)` | 取任务的状态、父进程、nice 值、每轮几个 tick、用了多少 CPU 时间和名字，给 `ps` 用 | 0；空槽时 -1 |
 | 12 | `pipe(fd)` | 建一个管道，`fd[0]` 是读的一头，`fd[1]` 是写的一头，见下文“管道” | 0；描述符、文件表或内存不够时 -1 |
 | 13 | `dup(fd)` | 最小的空闲描述符也指向 `fd` 指向的那个打开的文件，两者共用读写位置 | 新的描述符；`fd` 没打开或描述符用光时 -1 |
 | 14 | `unlink(path)` | 删掉文件；还开着的文件，最后一个关掉时才真正收回 | 0；不存在或是目录时 -1 |
@@ -261,6 +262,8 @@ DS=0x0010 ES=0x0010 FS=0x0010 GS=0x0010 CR2=0x00000000 CR3=0x00018000
 | 30 | `utime(path, t)` | 把文件的修改时间设成 `t`，`t` 为 0 就是现在 | 0；文件不存在时 -1 |
 | 31 | `dup2(old, new)` | 让描述符 `new` 也指向 `old` 打开的文件；`new` 原来开着的先关掉；两者一样时什么也不做 | `new`；`old` 没打开或 `new` 不在 0～7 时 -1 |
 | 32 | `fcntl(fd, cmd, arg)` | `F_DUPFD` 复制到不小于 `arg` 的最小空闲描述符；`F_GETFD`、`F_SETFD` 取、设 close-on-exec（exec 时关掉这个描述符）；`F_GETFL`、`F_SETFL` 取打开方式、改 `O_APPEND`。取值与 Linux 0.11 相同 | 看命令；描述符没打开或命令不认识时 -1 |
+| 33 | `nice(inc)` | nice 值加上 `inc`，停在 -20～19；nice 越大，调度时每轮补的 tick 越少，见上文“任务切换” | 新的 nice 值 |
+| 34 | `times(&tms)` | 写回自己和收走的子进程在用户态、内核态用了多少个 tick；`tms` 可以是 0 | 开机以来的 tick 数；`tms` 不在用户可写的内存里时 -1 |
 | 其他 | | | -1 |
 
 调用的过程：
@@ -326,15 +329,18 @@ x86 有 4 个特权级，这里只用 0（内核态）和 3（用户态）。当
 
 ## 任务切换
 
-`sched.c` 用 x86 的硬件任务切换让任务 A、B 轮流运行，与 Linux 0.11 的做法相同。
+`sched.c` 用 x86 的硬件任务切换让任务轮流运行，挑任务的办法和 Linux 0.11 一样，也是按 counter 和 priority。
 
 - 每个任务有一个 TSS（任务状态段，104 字节），里面存着这个任务的全部寄存器：EIP、ESP、EFLAGS、通用寄存器、段寄存器和 CR3。切换时 CPU 保存前几类寄存器，但 CR3 只从新 TSS 装入、不保存回旧 TSS，所以每个 TSS 的 CR3 都要预先填好，包括任务 0 的。GDT 从第 10 项起每个任务槽一个 TSS 描述符，任务 n 的选择子是 `(10 + n) × 8`：任务 0、A、B 分别是 `0x50`、`0x58`、`0x60`。
 - 任务表有 16 个槽，槽号就是任务号，与 Linux 0.11 的 `task[NR_TASKS]` 相同（它有 64 个）。除任务 0 外，每个任务的内核栈是从分配器拿来的一页；用户任务还有自己的页目录：`new_page_dir()` 分一页，照抄内核的页目录，内核部分的项指向同一批页表，用户空间那一项各管各的。TSS 里的 CR3 就是这个页目录，硬件任务切换装入 TSS 时 CR3 跟着换，换任务就换了地址空间。内核任务 A 和任务 0 用内核的页目录。Linux 0.11 不换页目录，所有进程共用一份，靠每个进程的段基址（进程号 × 64 MB）把各自的线性地址错开。
 - 任务 0 就是 `kmain()` 自己。`sched_init()` 用 `ltr 0x50` 把它登记为当前任务，CPU 第一次切换时才知道把当前寄存器存到哪里。任务 A、B 的 TSS 预先填好入口地址、各自内核栈的栈顶、`EFLAGS = 0x202`（IF=1）、内核段选择子和当前的 CR3。
 - `switch_to(n)` 执行一条远跳转 `ljmp` 到任务 n 的 TSS 选择子。CPU 把当前寄存器存进当前任务的 TSS，再从目标 TSS 装入全部寄存器，于是目标任务从它上次被切走的地方接着运行；第一次运行的任务从入口开始。Linux 0.11 的 `switch_to` 宏也是一条 `ljmp`。
-- 定时器中断每次调用 `schedule()`：先叫醒睡到时间的任务；此刻运行的是空闲的任务 0，就马上切到能运行的任务；否则当前任务用完时间片（20 个 tick）才按 1 → 2 → 1 … 的顺序切到下一个能运行的任务。后一种是抢占：一直不睡的任务也会被切走，别的任务照样有机会运行。Linux 0.11 的 `do_timer()` 也调用 `schedule()`，但先有一句 `if (!cpl) return;`：中断发生在内核态时不切换，内核代码从不被抢占。这里不同，任务 A 本身在内核态运行，系统调用又经陷阱门开着中断执行，内核代码随时可能被切走，所以共享数据要像 `task_write_char()` 那样关中断保护。下一个任务就是自己时不切换：远跳转到自己的 TSS 会因为它处于“忙”状态而触发 `#GP`。
+- 定时器中断每次调用 `schedule()`：先给此刻在运行的任务记一个 tick 的 CPU 时间（中断打断的是用户态就记 utime，否则记 stime），叫醒睡到时间的任务；此刻运行的是空闲的任务 0，就马上切到能运行的任务；否则当前任务这一轮的 `counter` 减一，减到 0 才换人。后一种是抢占：一直不睡的任务也会被切走，别的任务照样有机会运行。Linux 0.11 的 `do_timer()` 也调用 `schedule()`，但先有一句 `if (!cpl) return;`：中断发生在内核态时不切换，内核代码从不被抢占。这里不同，任务 A 本身在内核态运行，系统调用又经陷阱门开着中断执行，内核代码随时可能被切走，所以共享数据要像 `task_write_char()` 那样关中断保护。下一个任务就是自己时不切换：远跳转到自己的 TSS 会因为它处于“忙”状态而触发 `#GP`。
+- **换给谁**（`pick_next()`）：与 Linux 0.11 的 `schedule()` 一模一样。每个任务有 `counter`（这一轮还能运行几个 tick）和 `priority`（每轮补多少）。能运行的任务里挑 `counter` 最大的，一样多时挑任务号大的；能运行的都用完了（`counter` 都是 0），就开始新的一轮：每个任务，睡着的也算，`counter = counter / 2 + priority`，再挑一次。所以一直要 CPU 的任务一轮只能运行 `priority` 个 tick；睡着的任务没用完的留一半再加上补的，最多攒到两倍 `priority`，醒来时排在前面：常常睡的（等键盘的 shell）反应快，又不会攒得太多。被叫醒的任务 `counter` 再大，也要等当前任务这一轮用完或者睡下，不马上抢。
+- **nice**：`priority = 20 - nice`，nice 在 -20～19 之间，默认 0，就是每轮 20 个 tick（200 ms；Linux 0.11 是 15）。`nice(inc)` 把 nice 值加上 `inc`，返回新的值；fork 出的子进程继承，exec 也不改它，所以 `nice -n 5 命令` 就是 nice 程序先调好自己，再 exec 那个命令。nice 19 的任务每轮只有 1 个 tick：它和一个 nice 0 的任务一起空转时，一轮是 20 + 1 个 tick，它分到 1/21，自检 `USER_NICE` 量出来是 190:10。改了 nice 值，这一轮剩下的 `counter` 不变，下一轮才按新的补：刚 fork 出来的子进程 `counter` 是父进程的 `priority`。Linux 0.11 的 `sys_nice()` 直接从 `priority` 里减，返回 0，谁都能调高自己的优先级；这里返回新的 nice 值（POSIX 的规定），还没有用户，暂时也是谁都能调。
+- **CPU 时间**：`times(&tms)` 返回开机以来的 tick 数，并写回 `utime`、`stime`（自己在用户态、内核态运行了多少个 tick）和 `cutime`、`cstime`（`waitpid` 收走的子进程用的，连同它们收走的子进程；Linux 0.11 只加子进程自己的）。这是抽样：一个 tick 里运行过好几个任务，只记给中断时的那一个。在 QEMU 里一次系统调用比上千圈空循环还慢，所以用户态的循环要隔很久才调用一次系统调用，时间才主要记在 utime。`ps -l` 显示每个任务的 PRI（每轮几个 tick）、NI 和 TIME（utime 加 stime，秒），shell 的内建命令 `time 命令…` 用前后两次 `times` 的差算出过了多久（real）和子进程用的 user、sys。任务 0 的时间单独记成第 4 行的空闲比例。
 - `sleep(ticks)` 调用 `sched_sleep()`：把当前任务标为睡眠、记下醒来的时刻，立刻切到下一个能运行的任务，没有就切回任务 0。到时间后，定时器中断里的 `schedule()` 把它改回能运行，轮到它时从切走的地方接着执行，系统调用随之返回。标记和切走之间关中断，免得定时器中断插进来。Linux 0.11 的 `sleep_on()` 也是先改 `current->state`，再调用 `schedule()`；它的 `schedule()` 每次先检查各进程的 `alarm` 是否到期，到期就发 `SIGALRM` 把它叫醒，与这里每个 tick 检查醒来时刻类似。
-- 任务 0 是空闲任务，不睡也不结束：任务 A、B 都在睡眠或都已结束时切回它，它从上次被切走的定时器中断里返回，停在 `kmain()` 的 `hlt` 循环中，等下一个定时器中断。测试 `ALL_EXIT` 让任务 A、B 都调用 `exit`，检查此时 TR 为 `0x18`、CR3 仍是页目录、定时器照常工作。Linux 0.11 的 `main()` 最后是 `for(;;) pause();`，任务 0 也只在没有别的进程能运行时才被调度。
+- 任务 0 是空闲任务，不睡也不结束：任务 A、B 都在睡眠或都已结束时切回它，它从上次被切走的定时器中断里返回，停在 `kmain()` 的 `hlt` 循环中，等下一个定时器中断。测试 `ALL_EXIT` 让任务 A、B 都调用 `exit`，检查此时 TR 为 `0x50`、CR3 仍是页目录、定时器照常工作。Linux 0.11 的 `main()` 最后是 `for(;;) pause();`，任务 0 也只在没有别的进程能运行时才被调度。
 - 每个 tick，`schedule()` 看一眼此刻是谁在运行，是任务 0 就记一次空闲，每秒在第 4 行显示一次空闲比例。正常运行时接近 100%：两个任务每 2 个 tick 才醒来写一个字母，其余时间 CPU 都停在 `hlt` 上。Linux 0.11 的 `do_timer()` 用同样的抽样办法，按中断发生在用户态还是内核态，给当前进程的 `utime` 或 `stime` 加 1。
 - 任务 A 运行内核里的 `task_main()`，任务 B 运行用户程序 `user.c` 里的 `user_main()`，两者做同样的事：用 `getpid()` 得到任务号，任务 1 写 `A`、任务 2 写 `B`，每写一个字母 `sleep(2)`。任务 B 先 `fork` 出任务 3，它写 `C`。一个睡下，另一个马上运行，所以第 6 行逐个轮流。它们只通过系统调用输出和等待，见上文“系统调用”和下文“用户态”。
 - 两个任务共用输出位置。`task_write_char()` 写之前关中断、写完恢复原来的中断状态，保证“读位置、写字符、位置加一”不被切换打断。
@@ -438,7 +444,7 @@ Linux 0.11 读的是 a.out 格式，exec 时并不把程序读进内存：程序
 | --- | --- |
 | `letter X` | 每 2 个 tick 写一个字母 X。开机时任务 3 exec 它，第 6 行的 C 就是它写的 |
 | `hello 参数…` | 打印 `hello` 和参数 |
-| `check` | 检查 exec 把自己装对了：`.data`、`.bss`、`argc`、`argv`；`check fds` 打印开着的描述符 |
+| `check` | 检查 exec 把自己装对了：`.data`、`.bss`、`argc`、`argv`；`check fds` 打印开着的描述符；`check spin` 在用户态空转半秒 |
 
 `check.c` 里的全局变量都加了 `volatile`：否则 clang 看出它们从没被改过，直接把值算出来，`.data` 和 `.bss` 根本不会生成，也就测不到 exec 有没有装对。
 
@@ -592,7 +598,7 @@ loader 进入保护模式时用的是写在 `loader.bin` 里的 GDT。进入内�
 
 init（任务 B，内核映像里的 `user_main()`）先 fork 出写 C 的 `/bin/letter`，再拉起 shell：子进程关掉继承来的 1 号描述符（第 6 行），把 `/dev/tty0` 打开三次，正好得到 0、1、2 号描述符，再 exec `/bin/sh`。之后 init 一边写 B，一边用 `waitpid(-1, 0, WNOHANG)` 收走结束了的子进程，shell 退出了就再拉起一个；shell 一下子就退出了（比如没有硬盘），就隔 1 秒再试，免得一刻不停地 fork。写 C 的子进程 exec 失败时，用内核映像里的代码接着写 C，不会往下走去拉起第二个 shell。Linux 0.11 的 `init()` 也是打开 `/dev/tty0`、`dup` 两次，再 fork 出 `/bin/sh`，在循环里 `wait` 并重新拉起它。自检内核不拉起 shell：它们要用控制台窗口检查键盘回显。
 
-`user/sh.c` 是一个很小的 shell：打印 `$ `，`read(0)` 读一行，按空格切成参数，命令名里没有 `/` 的到 `/bin` 下找；fork 一个子进程去 exec，`waitpid` 等它结束，被异常结束的报告异常号。用 `|` 隔开的几段，每段一个子进程，相邻两段之间一个管道，见下文“管道”。每一段还可以带 `> 文件`（清空后写）、`>> 文件`（接在末尾写）、`< 文件`（从文件读标准输入）：还有 `2> 文件`、`2>> 文件`（标准错误写进文件）和 `2>&1`（标准错误也接到标准输出那里）。子进程在 exec 之前打开那个文件，用 `dup2` 接到 0、1 或 2 号描述符上。程序出错的消息都写到标准错误（`eprint()`），所以 `nosuch | wc` 里 wc 读到的是空的，消息直接出现在屏幕上；`cat /nothing 2>&1 | wc` 才把它也送进管道。在空行上按 Ctrl+D 和 `exit` 一样退出；在一行字后面按 Ctrl+D，终端交来的是不带换行的半行，shell 先留着，接上后面敲的字（dash 这些不带行编辑的 shell 也是这样）；这时按 Ctrl+C，留着的半行就丢掉。`sh 脚本` 从文件里一行行读命令来执行，不打提示符，`#` 开头的行是注释，读完就退出；参数之间可以是空格或 Tab，行尾的回车不算，超过 127 个字节的行报错跳过，不截短了去执行；脚本的描述符设了 close-on-exec，它运行的命令拿不到；sh 不认识任何选项，`sh -x` 报错，`sh 目录` 也报错；运行脚本的 sh 不接住 Ctrl+C，它和它正在运行的程序一起被结束。后台运行的脚本（`sh 脚本 &`）一开始 SIGINT 就是忽略的，它就一直忽略，它运行的每条命令也跟着忽略：这些命令和前台的 shell 在同一个进程组里，不然在提示符上按 Ctrl+C 会把它们结束。POSIX 也规定启动时就被忽略的信号要保持忽略。最后一个参数是 `&` 的在后台运行，不等它，每次读命令之前收走已经结束的后台程序。内建命令有 `cd`（不带参数回到 `/`，为什么必须内建见上文“当前目录”）、`exit [退出码]` 和 `help`。命令名加上 `/bin/` 超过 127 个字节就报 `name too long`，不截短（截短了可能是另一个程序）。数字参数（`sleep`、`chmod`、`kill`、`exit`）超出范围时报错，不回绕。
+`user/sh.c` 是一个很小的 shell：打印 `$ `，`read(0)` 读一行，按空格切成参数，命令名里没有 `/` 的到 `/bin` 下找；fork 一个子进程去 exec，`waitpid` 等它结束，被异常结束的报告异常号。用 `|` 隔开的几段，每段一个子进程，相邻两段之间一个管道，见下文“管道”。每一段还可以带 `> 文件`（清空后写）、`>> 文件`（接在末尾写）、`< 文件`（从文件读标准输入）：还有 `2> 文件`、`2>> 文件`（标准错误写进文件）和 `2>&1`（标准错误也接到标准输出那里）。子进程在 exec 之前打开那个文件，用 `dup2` 接到 0、1 或 2 号描述符上。程序出错的消息都写到标准错误（`eprint()`），所以 `nosuch | wc` 里 wc 读到的是空的，消息直接出现在屏幕上；`cat /nothing 2>&1 | wc` 才把它也送进管道。在空行上按 Ctrl+D 和 `exit` 一样退出；在一行字后面按 Ctrl+D，终端交来的是不带换行的半行，shell 先留着，接上后面敲的字（dash 这些不带行编辑的 shell 也是这样）；这时按 Ctrl+C，留着的半行就丢掉。`sh 脚本` 从文件里一行行读命令来执行，不打提示符，`#` 开头的行是注释，读完就退出；参数之间可以是空格或 Tab，行尾的回车不算，超过 127 个字节的行报错跳过，不截短了去执行；脚本的描述符设了 close-on-exec，它运行的命令拿不到；sh 不认识任何选项，`sh -x` 报错，`sh 目录` 也报错；运行脚本的 sh 不接住 Ctrl+C，它和它正在运行的程序一起被结束。后台运行的脚本（`sh 脚本 &`）一开始 SIGINT 就是忽略的，它就一直忽略，它运行的每条命令也跟着忽略：这些命令和前台的 shell 在同一个进程组里，不然在提示符上按 Ctrl+C 会把它们结束。POSIX 也规定启动时就被忽略的信号要保持忽略。最后一个参数是 `&` 的在后台运行，不等它，每次读命令之前收走已经结束的后台程序。内建命令有 `cd`（不带参数回到 `/`，为什么必须内建见上文“当前目录”）、`exit [退出码]`、`time 命令…`（运行完在标准错误上打印 `real 1.00 user 0.00 sys 0.00`）和 `help`。命令名加上 `/bin/` 超过 127 个字节就报 `name too long`，不截短（截短了可能是另一个程序）。数字参数（`sleep`、`chmod`、`kill`、`exit`）超出范围时报错，不回绕。
 
 | 命令 | 作用 |
 | --- | --- |
@@ -612,7 +618,8 @@ init（任务 B，内核映像里的 `user_main()`）先 fork 出写 C 的 `/bin
 | `grep 文字 [文件…]` | 打印含有这段文字的行；没有给文件就读标准输入 |
 | `sort [-r] [文件…]` | 把所有的行读进 malloc 来的堆，排好序再打印，按字节比较；`-r` 倒着排 |
 | `echo [-n] [-e] 文字…` | 打印参数；`-n` 不换行，`-e` 把 `\n`、`\t`、`\r`、`\\` 换成换行、Tab、回车、反斜杠（键盘上敲不出 Tab 和回车） |
-| `ps` | 用 `taskinfo` 逐个问 16 个任务槽，列出任务号、父进程、状态（R 能运行、S 在 sleep 里、Z 僵尸、W 在 waitpid 里、B 在等待队列上）和名字。名字是内核起的（idle、task_a、init），exec 之后是程序的文件名 |
+| `ps [-l]` | 用 `taskinfo` 逐个问 16 个任务槽，列出任务号、父进程、状态（R 能运行、S 在 sleep 里、Z 僵尸、W 在 waitpid 里、B 在等待队列上）和名字。名字是内核起的（idle、task_a、init），exec 之后是程序的文件名。`-l` 再加上 PRI（每轮几个 tick）、NI（nice 值）和 TIME（用了多少 CPU 时间，秒） |
+| `nice [-n 增量] [命令…]` | 把 nice 值加上增量（不给就是 10）再 exec 那个命令；不带命令就打印现在的 nice 值 |
 | `letter X` | 每 2 个 tick 往 `/dev/tty1`（第 6 行）写一个 X；`letter D &` 在后台运行，第 6 行就多出 D |
 | `kill [-信号] 任务号…` | 发信号，默认是 SIGTERM；`kill -9` 发 SIGKILL。任务号是负数就发给那一组 |
 | `sleep 秒数` | 用 alarm 定闹钟，pause 等 SIGALRM；按 Ctrl+C 能提前结束它 |
@@ -675,7 +682,7 @@ shell 运行 `ls /bin | grep e | wc` 时，先建第一个管道，fork 出 ls�
 - 若要观察三重错误，将 `loader.asm` 中 `protected_mode` 后面的 `mov ax, DATA_SEL` 暂时改成 `mov ax, 0x18`。GDT 只有 3 项，`0x18` 超出界限，装入段寄存器时触发一般保护异常（13 号）；此时还没有 IDT，处理异常再次出错变成双重错误（8 号），最终三重错误。Makefile 带有 `-no-reboot`，QEMU 窗口会直接关闭。用 `make run QEMU_FLAGS="-d int,cpu_reset -D qemu.log"` 运行，可在 `qemu.log` 中看到 `new 0xd`、`new 0x8` 和 `Triple fault`。实验后改回。
 - 若要观察忘记发 EOI 的后果，将 `interrupt.c` 中 `interrupt_dispatch()` 里的 `pic_send_eoi(vector);` 暂时注释掉。`ticks` 停在 1，键盘也没有反应：8259 一直等着 CPU 回复，不再送来定时器和优先级更低的键盘中断。实验后改回。
 - 若要改变控制台窗口的位置和大小，修改 `kernel.c` 中的 `CONSOLE_TOP` 和 `CONSOLE_BOTTOM`。窗口不要覆盖第 0～6 行，否则滚动时会把这些固定内容一起移走。
-- 若要观察抢占，运行 `make run BUILD=build/selftest/user_spin SELFTEST=USER_SPIN`。用户程序写一个 `s` 后一直空转、从不睡眠，任务 A 只能等它的时间片用完才运行，第 6 行约每 0.2 秒多一个 `A`，第 4 行的空闲比例为 0%。把 `sched.c` 中的 `TASK_SLICE` 改成 4，`A` 就快了 5 倍。正常构建中两个任务都睡得很勤，改 `TASK_SLICE` 看不出区别。
+- 若要观察抢占，运行 `make run BUILD=build/selftest/user_spin SELFTEST=USER_SPIN`。用户程序写一个 `s` 后一直空转、从不睡眠，任务 A 只能等它这一轮的 20 个 tick 用完才运行，第 6 行约每 0.2 秒多一个 `A`，第 4 行的空闲比例为 0%。把 `sched.c` 中的 `DEF_PRIORITY` 改成 4，`A` 就快了 5 倍。正常构建中两个任务都睡得很勤，改 `DEF_PRIORITY` 看不出区别。
 - 若要看用户栈按需增长，运行 `make run BUILD=build/selftest/user_deep_stack SELFTEST=USER_DEEP_STACK`。用户程序用掉 5 页栈后 `exit(3)`，第 3 行的 `page faults` 变多，任务结束后空闲页回到 3840。
 - 若要看没有缺页处理会怎样，把 `interrupt.c` 中 `interrupt_dispatch()` 里调用 `handle_page_fault()` 的那个 `if` 整段注释掉。任务 B 执行第一条指令就被结束：第 7 行是 `task 2 killed by #PF page fault: … error=0x00000006`，第 0 行停在 `ABPKCVIT`（B 连第一个系统调用都没来得及做，所以也没有 `U`），第 6 行只剩 A。实验后改回。
 - 若要对比睡眠时不让出 CPU 的样子，把 `sched.c` 中 `sched_sleep()` 末尾标记睡眠、切走的 5 行换成 `while (timer_ticks - start < ticks) __asm__ volatile("sti; hlt");`。第 6 行变回每段约 10 个字母，空闲比例变成 0%：CPU 一直被睡着的任务占着。实验后改回。
@@ -711,7 +718,7 @@ shell 运行 `ls /bin | grep e | wc` 时，先建第一个管道，fork 出 ls�
 | `timer.c` | 8253 定时器，CMOS 实时时钟和现在的时间 | `kernel/sched.c` 中的 `sched_init()`、`do_timer()`，`init/main.c` 中的 `time_init()`，`kernel/mktime.c` |
 | `syscall.c`、`syscall.h` | 系统调用：内核一侧的分发表，调用方使用的编号和包装函数 | `kernel/system_call.s`、`include/unistd.h` |
 | `user.c` | 用户程序：任务 B 在用户态运行的 `user_main()`，它 `fork` 出任务 3 | 无（Linux 0.11 的用户程序是磁盘上的可执行文件） |
-| `sched.c` | 任务表、TSS、硬件任务切换、睡眠与唤醒、等待队列、fork、exit、waitpid、信号和进程组、当前目录 | `kernel/sched.c` 中的 `schedule()`、`sleep_on()`，`kernel/fork.c` 中的 `copy_process()`，`kernel/exit.c` 中的 `do_exit()`、`sys_waitpid()`、`sys_kill()`，`kernel/signal.c`，`include/linux/sched.h` 中的 `switch_to` |
+| `sched.c` | 任务表、TSS、硬件任务切换、按 counter 和 priority 挑任务、nice、CPU 时间、睡眠与唤醒、等待队列、fork、exit、waitpid、信号和进程组、当前目录 | `kernel/sched.c` 中的 `schedule()`、`sleep_on()`，`kernel/fork.c` 中的 `copy_process()`，`kernel/exit.c` 中的 `do_exit()`、`sys_waitpid()`、`sys_kill()`，`kernel/signal.c`，`include/linux/sched.h` 中的 `switch_to` |
 | `hd.c` | ATA 硬盘驱动：IDENTIFY、按 LBA 读写扇区、IRQ14 | `kernel/blk_drv/hd.c`、`ll_rw_blk.c` |
 | `buffer.c` | 缓冲区缓存：`bread()`、`bget()`、`bdirty()`、`brelse()`，延迟写回和 `sync` | `fs/buffer.c` |
 | `fs.c`、`fs.h` | Minix v1 文件系统：超级块、i 节点表、位图、`bmap()`、`namei()`、写文件、目录的增删、文件系统锁 | `fs/super.c`、`fs/inode.c`、`fs/namei.c`、`fs/bitmap.c`、`fs/truncate.c`、`include/linux/fs.h` |

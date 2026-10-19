@@ -357,6 +357,27 @@ static int32_t path_op(uint32_t path, struct interrupt_frame *frame, int (*op)(c
     return ret;
 }
 
+/* nice(inc)：见 sched_nice()。 */
+static int32_t sys_nice(uint32_t inc, uint32_t b, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)b, (void)c, (void)frame;
+    return sched_nice((int32_t)inc);
+}
+
+/* times(&tms)：buf 为 0 时只返回 tick 数。buf 不在用户可写的内存里返回 -1。 */
+static int32_t sys_times(uint32_t buf, uint32_t b, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)b, (void)c;
+    struct tms tmp;
+
+    if (buf && from_user_mode(frame) && !user_write_ok(buf, sizeof(tmp)))
+        return -1;
+    uint32_t now = sched_times(&tmp);
+    if (buf)
+        *(struct tms *)buf = tmp;
+    return (int32_t)now;
+}
+
 /* time()：现在的时间。Linux 0.11 的 sys_time() 还可以顺便写进用户给的变量。 */
 static int32_t sys_time(uint32_t a, uint32_t b, uint32_t c, struct interrupt_frame *frame)
 {
@@ -607,6 +628,8 @@ static const syscall_fn syscall_table[SYS_CALLS] = {
     [SYS_UTIME]  = sys_utime,
     [SYS_DUP2]   = sys_dup2,
     [SYS_FCNTL]  = sys_fcntl,
+    [SYS_NICE]   = sys_nice,
+    [SYS_TIMES]  = sys_times,
 };
 
 void syscall_dispatch(struct interrupt_frame *frame)

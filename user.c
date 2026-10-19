@@ -111,6 +111,39 @@ static void on_alarm(int sig)
 }
 #endif
 
+#if defined(SELFTEST) && SELFTEST == SELFTEST_USER_NICE
+/* 子进程把自己用的 CPU 时间写在这里：内核映像里的全局变量，所有任务共用，fork 时不复制 */
+static volatile uint32_t spent_user[2], spent_sys[2], whole[2];
+
+/*
+ * fork 一个子进程：它先 nice(inc)，然后一直空转，把 tick 数从 from 到 until 这一段用的 CPU 时间记进 spent_*[k]，
+ * 一共用的记进 whole[k]，再退出。from 之前的那一段不算：子进程刚 fork 出来时 counter 是父进程的 priority，
+ * nice 要到下一轮才起作用。in_kernel 为 1 时空转的是 stat 系统调用（时间多花在内核里），否则是用户态的循环。
+ */
+static int32_t spinner(int k, int32_t inc, uint32_t from, uint32_t until, int in_kernel)
+{
+    int32_t pid = fork();
+    if (pid != 0)
+        return pid;
+    nice(inc);
+    struct tms t0, t;
+    struct stat st;
+    for (int measuring = 0; measuring < 2; measuring++) {
+        while (times(measuring ? &t : &t0) < (measuring ? until : from)) {
+            if (in_kernel)
+                stat("/bin/sh", &st);
+            else                    /* 每转 10 万圈才问一次 times：在 QEMU 里，一次系统调用比上千圈空循环还慢 */
+                for (volatile int i = 0; i < 100000; i++)
+                    ;
+        }
+    }
+    spent_user[k] = t.tms_utime - t0.tms_utime;
+    spent_sys[k] = t.tms_stime - t0.tms_stime;
+    whole[k] = t.tms_utime + t.tms_stime;
+    exit(0);
+}
+#endif
+
 #if defined(SELFTEST) && SELFTEST == SELFTEST_USER_WRITE_KERNEL
 extern volatile uint32_t timer_ticks;   /* 内核的变量，所在的页没有用户位 */
 #endif
@@ -1280,6 +1313,82 @@ void user_main(void)
     ok &= fcntl(fd, 99, 0) == -1 && fcntl(fd, F_DUPFD, 8) == -1;
     close(fd);
     write(1, ok ? "e" : "E", 1);
+    exit(0);
+#elif SELFTEST == SELFTEST_USER_NICE
+    /*
+     * 每一项通过就记一个字母，期望第 6 行（去掉任务 A 的 A）是 nidfts：
+     *   n：nice 返回新的 nice 值：nice(0) 是 0，加 5 是 5，减 3 是 2，加 100 停在 19，减 100 停在 -20；
+     *      taskinfo 读到的 nice 和 priority（20 - nice）对得上。
+     *   i：fork 出的子进程继承 nice 值；exec 之后也不变（nice 7 时 fork 出的子进程换成 sleep，taskinfo 看到 nice 7、priority 13）。
+     *   d：两个一直空转的子进程，一个 nice 0、一个 nice 19，抢 2 秒 CPU：nice 0 的至少分到另一个的 8 倍（按算法是 20 倍），
+     *      nice 19 的也没饿死。
+     *   f：两个 nice 0 的子进程抢 2 秒：分得差不多（少的至少是多的一半）。
+     *   t：用户态空转的子进程，时间几乎都记在 utime；一直调用 stat 的，大半记在 stime。
+     *   s：收走的子进程用的时间都加进了父进程的 cutime、cstime，和子进程自己记下的对得上。
+     * 整个检查要七八秒：结果先攒着，最后一次写出去。
+     */
+    char res[8];
+    int nres = 0;
+    struct taskinfo info;
+    int32_t st = -1;
+    int ok = nice(0) == 0 && nice(5) == 5 && nice(-3) == 2 && nice(100) == 19 && nice(-100) == -20;
+    ok &= taskinfo(getpid(), &info) == 0 && info.nice == -20 && info.priority == 40;
+    ok &= nice(20) == 0 && taskinfo(getpid(), &info) == 0 && info.nice == 0 && info.priority == 20;
+    res[nres++] = ok ? 'n' : 'N';
+
+    ok = nice(7) == 7;
+    int32_t c = fork();
+    if (c == 0)
+        exit(nice(0) == 7 ? 0 : 1);
+    ok &= waitpid(c, &st, 0) == c && st == 0;
+    char *sleep_argv[] = { "sleep", "1", 0 };
+    c = fork();
+    if (c == 0) {
+        execv("/bin/sleep", sleep_argv);
+        exit(9);
+    }
+    sleep(30);
+    ok &= taskinfo(c, &info) == 0 && info.name[0] == 's' && info.name[1] == 'l' && info.nice == 7 && info.priority == 13;
+    ok &= waitpid(c, &st, 0) == c && st == 0 && nice(-7) == 0;
+    res[nres++] = ok ? 'i' : 'I';
+
+    struct tms before, after;
+    uint32_t sum = 0;
+    times(&before);
+    uint32_t from = times(0) + 50;
+    int32_t p0 = spinner(0, 0, from, from + 200, 0), p1 = spinner(1, 19, from, from + 200, 0);
+    waitpid(p0, &st, 0);
+    waitpid(p1, &st, 0);
+    uint32_t hi = spent_user[0] + spent_sys[0], lo = spent_user[1] + spent_sys[1];
+    sum += whole[0] + whole[1];
+    ok = hi >= 8 * lo && lo >= 2 && hi + lo >= 150;
+    res[nres++] = ok ? 'd' : 'D';
+
+    from = times(0) + 50;
+    p0 = spinner(0, 0, from, from + 200, 0);
+    p1 = spinner(1, 0, from, from + 200, 0);
+    waitpid(p0, &st, 0);
+    waitpid(p1, &st, 0);
+    uint32_t x = spent_user[0] + spent_sys[0], y = spent_user[1] + spent_sys[1];
+    sum += whole[0] + whole[1];
+    ok = x + y >= 150 && 2 * (x < y ? x : y) >= (x > y ? x : y);
+    res[nres++] = ok ? 'f' : 'F';
+
+    from = times(0) + 5;
+    p0 = spinner(0, 0, from, from + 50, 0);
+    waitpid(p0, &st, 0);
+    from = times(0) + 5;
+    p1 = spinner(1, 0, from, from + 50, 1);
+    waitpid(p1, &st, 0);
+    sum += whole[0] + whole[1];
+    ok = spent_user[0] >= 35 && spent_sys[0] * 4 <= spent_user[0] && spent_sys[1] > spent_user[1] && spent_sys[1] >= 25;
+    res[nres++] = ok ? 't' : 'T';
+
+    times(&after);
+    uint32_t got = (after.tms_cutime - before.tms_cutime) + (after.tms_cstime - before.tms_cstime);
+    ok = got >= sum && got <= sum + 10 && after.tms_cutime - before.tms_cutime >= spent_user[0];
+    res[nres++] = ok ? 's' : 'S';
+    write(1, res, (uint32_t)nres);
     exit(0);
 #elif SELFTEST == SELFTEST_ALL_EXIT
     write(1, "bye", 3);

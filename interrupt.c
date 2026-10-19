@@ -315,7 +315,7 @@ static void dispatch(struct interrupt_frame *frame)
     pic_send_eoi(vector);
 
     if (vector == IRQ_TIMER) {
-        timer_handle();
+        timer_handle(from_user_mode(frame));
         return;
     }
     if (vector == IRQ_KEYBOARD)

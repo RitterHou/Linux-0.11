@@ -16,8 +16,14 @@
  *
  * 什么时候切换：
  *   - 任务调用 sleep：立刻把 CPU 让给别的任务，没有就让给任务 0（sched_sleep）。
- *   - 定时器中断：先叫醒到时间的任务；任务 0 在运行就马上让给它，否则当前任务用完时间片才切换（schedule）。
+ *   - 定时器中断：先叫醒到时间的任务；任务 0 在运行就马上让给它，否则当前任务用完这一轮的 tick 才切换（schedule）。
  * 第二条是抢占：一直不睡的任务也会被切走，别的任务照样有机会运行。
+ *
+ * 切给谁：与 Linux 0.11 的 schedule() 相同，每个任务有 counter（这一轮还能运行几个 tick）和 priority（每轮补多少）。
+ * 能运行的任务里挑 counter 最大的；都用完了，就给每个任务补上：counter = counter / 2 + priority。
+ * priority 由 nice 值定：20 - nice。nice 19 的任务一轮只有 1 个 tick，和一个 nice 0 的任务抢 CPU 时只分到 1/21。
+ * 睡着的任务没用完的 counter 留一半再加上补的，醒来时排在前面：常常睡的（等键盘的 shell）反应快。
+ * 每个 tick 还看一眼此刻谁在运行、在用户态还是内核态，记进它的 utime 或 stime，times 和 ps -l 读出来。
  */
 #include "io.h"
 #include "kernel.h"
@@ -26,7 +32,9 @@
 #include "syscall.h"
 
 #define TSS_ACCESS     0x89         /* 存在、DPL 0、类型 9：32 位可用 TSS */
-#define TASK_SLICE     20           /* 不睡的任务最多连续运行 20 个 tick（200 ms）就被切走 */
+#define DEF_PRIORITY   20           /* nice 为 0 的任务每轮能运行 20 个 tick（200 ms）；Linux 0.11 是 15 */
+#define NICE_MIN       (-20)
+#define NICE_MAX       19
 
 #define TASK_UNUSED    0            /* 空槽，或者任务已经结束 */
 #define TASK_RUNNING   1            /* 能运行：正在运行，或者等着轮到它 */
@@ -78,6 +86,10 @@ struct task {
     uint32_t brk;                   /* 堆的末尾：start_brk 到 brk 之间缺页时补页，再往上到栈区之间不补 */
     int alarm_on;                   /* 定了闹钟：timer_ticks 到 alarm_at 时发 SIGALRM。fork 不继承，exec 保留 */
     uint32_t alarm_at;
+    int counter;                    /* 这一轮还能运行几个 tick：每个 tick 减一，到 0 就让出 CPU */
+    int priority;                   /* 每一轮补多少个 tick：DEF_PRIORITY - nice，1～40。fork 继承，exec 保留 */
+    uint32_t utime, stime;          /* 在用户态、内核态运行了多少个 tick */
+    uint32_t cutime, cstime;        /* waitpid 收走的子进程（连同它们收走的子进程）用了多少 */
 };
 
 static struct tss tss[NR_TASKS];
@@ -85,7 +97,6 @@ static struct task tasks[NR_TASKS];
 
 static int current_task;            /* 当前任务号，起始为 0 */
 static int scheduling;              /* sched_start() 之后才开始切换 */
-static uint32_t slice_left;         /* 当前任务还剩几个 tick 的时间片 */
 static int output_pos;              /* 各任务共用的输出位置 */
 
 /*
@@ -158,9 +169,42 @@ int sched_taskinfo(int pid, struct taskinfo *info)
         return -1;
     info->state = t.state;
     info->parent = t.parent;
+    info->nice = DEF_PRIORITY - t.priority;
+    info->priority = t.priority;
+    info->ticks = t.utime + t.stime;
     for (int i = 0; i < TASK_NAME_LEN; i++)
         info->name[i] = t.name[i];
     return 0;
+}
+
+/*
+ * nice 系统调用：自己的 nice 值加上 inc（可以是负数），限制在 -20～19，返回新的 nice 值。
+ * nice 越大越谦让：每一轮补的 tick（priority = 20 - nice）越少。这一轮剩下的 counter 不动，下一轮才按新的补。
+ * Linux 0.11 的 sys_nice() 直接从 priority 里减掉 inc（减完还大于 0 才减），返回 0；
+ * 返回新的 nice 值是 POSIX 的规定。谁都能调低自己的 nice 值（多要 CPU）：还没有用户，下一步才限制只有 root 可以。
+ */
+int sched_nice(int inc)
+{
+    struct task *t = &tasks[current_task];
+    if (inc > NICE_MAX - NICE_MIN)  /* 先限制一下，加起来才不会溢出 */
+        inc = NICE_MAX - NICE_MIN;
+    if (inc < NICE_MIN - NICE_MAX)
+        inc = NICE_MIN - NICE_MAX;
+    int nice = DEF_PRIORITY - t->priority + inc;
+    nice = nice < NICE_MIN ? NICE_MIN : nice > NICE_MAX ? NICE_MAX : nice;
+    t->priority = DEF_PRIORITY - nice;
+    return nice;
+}
+
+/* times 系统调用：自己和收走的子进程用了多少 CPU 时间，返回开机以来的 tick 数。Linux 0.11 的 sys_times() 也返回 jiffies。 */
+uint32_t sched_times(struct tms *buf)
+{
+    uint32_t flags = irq_save();        /* 定时器中断随时在加：四个数要是同一时刻的 */
+    struct task *t = &tasks[current_task];
+    *buf = (struct tms){ t->utime, t->stime, t->cutime, t->cstime };
+    uint32_t now = timer_ticks;
+    irq_restore(flags);
+    return now;
 }
 
 /* 内核建的任务开始时只有 1 号描述符：第 6 行的任务输出区。 */
@@ -203,7 +247,8 @@ static int setup_task(int n, void (*entry)(void), uint32_t cr3)
 
     if (kstack == 0)
         return 0;
-    tasks[n] = (struct task){ .state = TASK_RUNNING, .page_dir = cr3, .kstack = kstack, .cwd = "/", .pgrp = n };
+    tasks[n] = (struct task){ .state = TASK_RUNNING, .page_dir = cr3, .kstack = kstack, .cwd = "/", .pgrp = n,
+                              .counter = DEF_PRIORITY, .priority = DEF_PRIORITY };
     tss[n] = (struct tss){ .eip = (uint32_t)entry, .eflags = 0x202, .cr3 = cr3,
                            .iomap_base = sizeof(struct tss) };   /* 没有 I/O 权限位图 */
     give_tasks_row(n);
@@ -251,7 +296,7 @@ void sched_init(void)
      */
     tss[0].cr3 = kernel_page_dir();
     tss[0].iomap_base = sizeof(struct tss);
-    tasks[0] = (struct task){ .state = TASK_RUNNING, .page_dir = kernel_page_dir(), .cwd = "/" };
+    tasks[0] = (struct task){ .state = TASK_RUNNING, .page_dir = kernel_page_dir(), .cwd = "/", .priority = DEF_PRIORITY };
     give_tasks_row(0);              /* 自检会在开始调度前从 kmain 调用 write */
     set_name(0, "idle");
     for (int n = 0; n < NR_TASKS; n++)
@@ -268,7 +313,7 @@ void sched_init(void)
 
 void sched_start(void)
 {
-    scheduling = 1;                 /* 此刻运行的是任务 0，下一个 tick 就让给任务 A */
+    scheduling = 1;                 /* 此刻运行的是任务 0，下一个 tick 就切走：A、B 的 counter 一样多，先挑任务号大的 B */
 }
 
 /* 远跳转到 TSS 选择子：偏移被忽略，CPU 执行任务切换。 */
@@ -285,27 +330,31 @@ static void switch_to(int next)
 }
 
 /*
- * 从当前任务的下一个槽起，按 1、2、…、NR_TASKS - 1 的顺序转一圈，找第一个能运行的任务
- * （可能就是当前任务自己）。一个都没有时返回 0：任务 0 是 kmain 的 hlt 循环，正好当空闲任务。
+ * 挑下一个任务：能运行的任务里，这一轮剩下的 tick（counter）最多的那个，一样多时挑任务号大的（可能就是当前任务自己）。
+ * 能运行的都用完了，就开始新的一轮：每个任务（睡着的也算）的 counter 变成 counter / 2 + priority，再挑一次。
+ * 睡着的任务最多攒到两倍 priority 左右。一个能运行的都没有时返回 0：任务 0 是 kmain 的 hlt 循环，正好当空闲任务。
+ * Linux 0.11 的 schedule() 一模一样：从任务表的末尾往前找 counter 最大的，c 为 0 时重新算一遍所有任务的 counter。
  */
 static int pick_next(void)
 {
-    int n = current_task;
-
-    for (int k = 0; k < NR_TASKS - 1; k++) {
-        n = n % (NR_TASKS - 1) + 1;
-        if (tasks[n].state == TASK_RUNNING)
-            return n;
+    for (;;) {
+        int next = 0, c = -1;
+        for (int n = NR_TASKS - 1; n > 0; n--)
+            if (tasks[n].state == TASK_RUNNING && tasks[n].counter > c)
+                c = tasks[n].counter, next = n;
+        if (c != 0)                 /* 找到了（c > 0），或者一个能运行的都没有（c 为 -1） */
+            return next;
+        for (int n = 1; n < NR_TASKS; n++)
+            if (tasks[n].state != TASK_UNUSED)
+                tasks[n].counter = tasks[n].counter / 2 + tasks[n].priority;
     }
-    return 0;
 }
 
-/* 切到下一个能运行的任务，并给它一个完整的时间片。 */
+/* 切到下一个能运行的任务。 */
 static void reschedule(void)
 {
     int next = pick_next();
 
-    slice_left = TASK_SLICE;
     if (next != current_task)       /* 跳到自己的 TSS 会因为它“忙”而触发 #GP */
         switch_to(next);
 }
@@ -330,16 +379,21 @@ static void wake_sleepers(void)
 }
 
 /*
- * 每个 tick 看一眼此刻谁占着 CPU，是任务 0 就记一次空闲；每秒在第 4 行显示一次空闲比例。
- * Linux 0.11 的 do_timer() 用同样的抽样办法，给当前进程记一个 tick 的 utime 或 stime。
+ * 每个 tick 看一眼此刻谁占着 CPU：是任务 0 就记一次空闲，否则给它记一个 tick 的 utime（打断的是用户态）或 stime。
+ * 每秒在第 4 行显示一次空闲比例。抽样难免有误差：一个 tick 里运行过好几个任务，只记给中断时的那一个。
+ * Linux 0.11 的 do_timer() 用同样的抽样办法：cpl 不为 0 记 utime，否则记 stime。
  */
-static void account_idle(void)
+static void account(int user)
 {
     static uint32_t idle, total;
     char buf[12];
 
     if (current_task == 0)
         idle++;
+    else if (user)
+        tasks[current_task].utime++;
+    else
+        tasks[current_task].stime++;
     if (++total < TIMER_HZ)
         return;
     const char *digits = format_uint(idle * 100 / total, 10, buf);
@@ -352,15 +406,22 @@ static void account_idle(void)
     idle = total = 0;
 }
 
-/* 由定时器中断调用：记空闲、叫醒到时间的任务，再决定要不要切换。 */
-void schedule(void)
+/*
+ * 由定时器中断调用：记 CPU 时间、叫醒到时间的任务，再决定要不要切换：空闲的任务 0 在运行就马上看看有没有别人能运行，
+ * 否则当前任务的 counter 减一，减到 0 才切换。叫醒的任务 counter 再大也要等当前任务用完，与 Linux 0.11 相同。
+ */
+void schedule(int user)
 {
     if (!scheduling)
         return;
-    account_idle();
+    account(user);
     wake_sleepers();
-    if (current_task == 0 || --slice_left == 0)
+    if (current_task == 0) {
         reschedule();
+    } else if (--tasks[current_task].counter <= 0) {
+        tasks[current_task].counter = 0;
+        reschedule();
+    }
 }
 
 /*
@@ -699,7 +760,8 @@ int sched_fork(const struct interrupt_frame *frame)
     tasks[n] = (struct task){ .state = TASK_RUNNING, .page_dir = dir, .kstack = kstack, .parent = current_task,
                               .restorer = tasks[current_task].restorer, .pgrp = tasks[current_task].pgrp,   /* 收到的信号不继承 */
                               .start_brk = tasks[current_task].start_brk, .brk = tasks[current_task].brk,
-                              .cloexec = tasks[current_task].cloexec };
+                              .cloexec = tasks[current_task].cloexec,
+                              .priority = tasks[current_task].priority, .counter = tasks[current_task].priority };
     for (int i = 0; i < 32; i++)
         tasks[n].action[i] = tasks[current_task].action[i];
     set_name(n, tasks[current_task].name);
@@ -758,6 +820,9 @@ int sched_waitpid(int pid, uint32_t *status, int options)
             have_child = 1;
             if (tasks[n].state == TASK_ZOMBIE) {
                 uint32_t st = tasks[n].status;
+                /* 子进程用的 CPU 时间算到父进程的 cutime、cstime 里。Linux 0.11 只加子进程自己的，不加孙子进程的 */
+                tasks[current_task].cutime += tasks[n].utime + tasks[n].cutime;
+                tasks[current_task].cstime += tasks[n].stime + tasks[n].cstime;
                 release(n);
                 irq_restore(flags);
                 if (status)

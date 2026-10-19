@@ -6,6 +6,7 @@
  * check badptr：把自己代码页的地址交给要写用户内存的系统调用，内核应当逐个返回 -1，自己照常运行，
  * 最后打印 badptr ok。内核要是等到写的时候才发现那一页是只读的，就只能停机了。
  * check fds：打印开着的描述符，例如 fds: 0 1 2。看 exec 之后还留着哪些描述符（close-on-exec 关掉了哪些）。
+ * check spin：在用户态空转半秒（50 个 tick），给 time 和 nice 一个一直要 CPU 的程序。
  */
 #include "ulib.h"
 
@@ -109,6 +110,13 @@ int main(int argc, char **argv)
             }
         }
         print("\n");
+        return 0;
+    }
+    if (argc == 2 && strcmp(argv[1], "spin") == 0) {
+        uint32_t until = times(0) + 50;
+        while (times(0) < until)
+            for (volatile int i = 0; i < 100000; i++)   /* 隔一阵才问一次：系统调用在 QEMU 里很慢，问得勤了时间都记在内核态 */
+                ;
         return 0;
     }
     if (argc == 2 && strcmp(argv[1], "malloc") == 0)
