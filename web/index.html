@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>真机：在浏览器里开机</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700;900&family=VT323&display=swap">
+<style>
+/*
+ * 版式：左边一台显示器（v86 跑的真内核），右边是它的串口终端和几个按钮；颜色和介绍网页（tour.html）用同一套：
+ * 磁盘琥珀、CPU 靛蓝、内核青、用户程序橙；VGA 屏幕永远是黑底灰字。没联网时字体退回系统字体，页面照样能用。
+ */
+:root {
+  --bg: #f4f6f9; --surface: #ffffff; --sunken: #eef1f5;
+  --ink: #111827; --ink-2: #4a5464; --ink-3: #8b95a5; --line: #dde2ea;
+  --disk: #b45309; --disk-bg: #fdf0d5; --kern: #0d7a70; --kern-bg: #d3f3ee;
+  --user: #c2410c; --user-bg: #ffe7d6; --bad: #d92d20; --bad-bg: #fde4e1; --ok: #157f3c; --ok-bg: #daf5e3;
+  --vga-bg: #000000; --vga-fg: #aaaaaa; --bezel: #1b1f26; --bezel-2: #3a414c;
+  --font-body: "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --font-vga: "VT323", ui-monospace, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0c1016; --surface: #141a22; --sunken: #1a212b; --ink: #e8edf3; --ink-2: #a2adbb; --ink-3: #6f7a89; --line: #27313d;
+    --disk: #f5a524; --disk-bg: #362509; --kern: #3fd2c3; --kern-bg: #0b3531; --user: #ff9a5c; --user-bg: #3d1e0c;
+    --bad: #ff6b5e; --bad-bg: #3d1513; --ok: #4fd383; --ok-bg: #0e301c; --bezel: #232a34; --bezel-2: #47505d;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0c1016; --surface: #141a22; --sunken: #1a212b; --ink: #e8edf3; --ink-2: #a2adbb; --ink-3: #6f7a89; --line: #27313d;
+  --disk: #f5a524; --disk-bg: #362509; --kern: #3fd2c3; --kern-bg: #0b3531; --user: #ff9a5c; --user-bg: #3d1e0c;
+  --bad: #ff6b5e; --bad-bg: #3d1513; --ok: #4fd383; --ok-bg: #0e301c; --bezel: #232a34; --bezel-2: #47505d;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 16px; line-height: 1.7;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+main { max-width: 1180px; margin: 0 auto; padding-block: 40px 72px; display: flex; flex-direction: column; gap: 28px; }
+h1, h2 { margin: 0; line-height: 1.25; text-wrap: balance; }
+h1 { font-size: clamp(32px, 6vw, 56px); font-weight: 900; }
+h2 { font-size: 20px; font-weight: 700; }
+a { color: var(--kern); }
+code, .mono { font-family: var(--font-mono); font-size: .92em; }
+.kicker { font-size: 13px; letter-spacing: .08em; color: var(--ink-3); }
+.lede { color: var(--ink-2); max-width: 68ch; margin: 10px 0 0; }
+.top { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: end; justify-content: space-between; }
+.top nav { font-size: 14px; }
+
+.bench { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr); gap: 20px; align-items: start; }
+@media (max-width: 900px) { .bench { grid-template-columns: minmax(0, 1fr); } }
+
+/* 显示器：v86 往 #screen 里的第一个 div 写文本模式的 25 行，图形模式时才用 canvas */
+.monitor { background: var(--bezel); border: 1px solid var(--bezel-2); border-radius: 18px; padding: 14px; min-width: 0; }
+#screen { background: var(--vga-bg); color: var(--vga-fg); border-radius: 8px; padding: 10px 12px; overflow: hidden; outline: none; position: relative; min-height: 12em; }
+#screen:focus-visible, #screen.focused { box-shadow: 0 0 0 3px var(--kern); }
+#screen > div { font-family: var(--font-vga); white-space: pre; line-height: 1.05; font-size: 16px; }
+#screen > canvas { max-width: 100%; image-rendering: pixelated; }
+.hint { position: absolute; inset: auto 12px 10px auto; font-size: 12px; color: #c9ced6; background: rgba(0, 0, 0, .65); border: 1px solid #3a414c; padding: 2px 10px; border-radius: 999px; pointer-events: none; font-family: var(--font-body); }
+#screen.focused .hint { display: none; }
+.monitor-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 12px; }
+
+button { font: inherit; font-size: 14px; border-radius: 999px; padding: 6px 14px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); cursor: pointer; }
+button:hover { border-color: var(--ink-3); }
+button:focus-visible { outline: 3px solid var(--kern); outline-offset: 2px; }
+button.primary { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+button:disabled { opacity: .45; cursor: default; }
+.monitor-bar button { background: transparent; color: #d6dbe2; border-color: #47505d; }
+.monitor-bar button:hover { border-color: #8b95a5; }
+.status { margin-left: auto; font-size: 13px; color: #c9ced6; font-variant-numeric: tabular-nums; }
+
+/* 第 0 行的 12 个字母：v86 写出一个，这里就点亮一个 */
+.milestones { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 4px; margin-top: 12px; }
+.milestones span { text-align: center; font-family: var(--font-mono); font-size: 13px; padding: 3px 0; border-radius: 6px; border: 1px dashed #47505d; color: #6f7a89; transition: background .3s, color .3s; }
+.milestones span.on { border-style: solid; border-color: var(--kern); background: var(--kern-bg); color: var(--kern); font-weight: 600; }
+
+.side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 16px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.card p { margin: 0; color: var(--ink-2); font-size: 14px; }
+#serial { background: var(--vga-bg); color: var(--vga-fg); font-family: var(--font-vga); font-size: 18px; line-height: 1.1; border-radius: 8px; padding: 8px 10px; margin: 0; height: 15em; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; outline: none; }
+#serial:focus-visible, #serial.focused { box-shadow: 0 0 0 3px var(--user); }
+#serial .cur { background: transparent; }
+#serial.focused .cur { background: var(--vga-fg); color: var(--vga-bg); }
+.keys { display: flex; flex-wrap: wrap; gap: 6px; }
+.tips { margin: 0; padding-left: 1.2em; color: var(--ink-2); font-size: 14px; display: flex; flex-direction: column; gap: 4px; }
+.tips code { color: var(--ink); }
+
+.notes { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+.notes .card h2 { font-size: 16px; }
+.err { background: var(--bad-bg); color: var(--bad); border-radius: 10px; padding: 10px 14px; font-size: 14px; }
+.err[hidden] { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <header class="top">
+    <div>
+      <span class="kicker">learning 分支 · 真机</span>
+      <h1>在浏览器里开机</h1>
+      <p class="lede">这一页没有动画，也没有模拟：v86（一个用 JavaScript 和 WebAssembly 写的 x86 模拟器）加载的就是 <code>make</code> 生成的 <code>floppy.img</code>、<code>hd.img</code>、<code>hdb.img</code>，从软盘的第 0 个扇区开始，一条条执行这个内核的指令。屏幕、硬盘、串口都和 QEMU 里一样。</p>
+    </div>
+    <nav><a href="tour.html">介绍网页：每一章讲一个机制 →</a></nav>
+  </header>
+
+  <p class="err" id="err" hidden></p>
+
+  <section class="bench" aria-label="模拟器">
+    <div class="monitor">
+      <div id="screen" tabindex="0" aria-label="内核的控制台屏幕：点一下以后键盘就交给它">
+        <div></div>
+        <canvas style="display: none"></canvas>
+        <span class="hint">点一下屏幕，键盘就交给内核</span>
+      </div>
+      <div class="milestones" id="milestones" aria-label="第 0 行的里程碑"></div>
+      <div class="monitor-bar">
+        <button type="button" id="restart">重新开机</button>
+        <button type="button" id="pause">暂停</button>
+        <button type="button" data-ctrl="c" aria-label="给控制台发 Ctrl+C">Ctrl+C</button>
+        <button type="button" data-ctrl="z" aria-label="给控制台发 Ctrl+Z">Ctrl+Z</button>
+        <button type="button" data-ctrl="d" aria-label="给控制台发 Ctrl+D">Ctrl+D</button>
+        <span class="status" id="status" aria-live="polite">准备中</span>
+      </div>
+    </div>
+
+    <div class="side">
+      <div class="card">
+        <h2>串口 COM1</h2>
+        <p>init 在串口上运行 login，和控制台上的 shell 互不相干。点一下黑框再敲：用户名 <code>user</code>、密码 <code>user</code>，或者 <code>root</code> / <code>root</code>。</p>
+        <pre id="serial" tabindex="0" aria-label="串口终端：点一下以后敲的字发给串口"></pre>
+        <div class="keys">
+          <button type="button" data-code="3">Ctrl+C</button>
+          <button type="button" data-code="26">Ctrl+Z</button>
+          <button type="button" data-code="4">Ctrl+D</button>
+        </div>
+      </div>
+      <div class="card">
+        <h2>可以试试</h2>
+        <ul class="tips">
+          <li><code>ls -l /bin</code>、<code>ps -l</code>、<code>df</code></li>
+          <li><code>sleep 100</code> 按 Ctrl+Z，再 <code>jobs</code>、<code>bg</code>、<code>fg</code></li>
+          <li><code>su user</code> 以后 <code>cat /etc/shadow</code></li>
+          <li><code>mount /dev/hdb /mnt; cat /mnt/readme</code></li>
+          <li><code>for i in 1 2 3; do echo $i; sleep 1; done</code></li>
+          <li><code>letter D &amp;</code> 看第 6 行，<code>kill %1</code></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="notes" aria-label="说明">
+    <div class="card">
+      <h2>和 QEMU 有什么不同</h2>
+      <p>硬件是 v86 模拟的，第 1 行的硬盘型号是它报给内核的名字。CPU 的速度、定时器的节奏和 QEMU 不一样，开机和 <code>ps</code> 里的数字会略有出入。写硬盘只写在浏览器的内存里，重新开机就回到 <code>make</code> 生成时的样子。</p>
+    </div>
+    <div class="card">
+      <h2>和介绍网页有什么不同</h2>
+      <p>介绍网页的屏幕是 JavaScript 写的模型：文件系统取自镜像，shell 照着 <code>user/sh.c</code> 用 JavaScript 重写了一遍，没有执行内核的指令。这一页执行的是内核本身，模型里省掉的东西这里都有，比如内存的数字会变、真的会缺页和写时复制。</p>
+    </div>
+    <div class="card">
+      <h2>怎么打开这一页</h2>
+      <p>在仓库里运行 <code>make web</code>：它先构建镜像，下载固定版本的 v86（核对 sha256），把它们和这一页、介绍网页放进 <code>build/web/</code>，再起一个本地服务器。浏览器打开它打印的地址。直接双击 html 文件打不开：浏览器不让 file:// 页面读取镜像。</p>
+    </div>
+  </section>
+</main>
+
+<script src="v86/libv86.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const LETTERS = "ABPKCVITUFWE";
+const status = text => { $("status").textContent = text; };
+function fail(text) { const e = $("err"); e.textContent = text; e.hidden = false; status("没有运行"); }
+
+/* 第 0 行的里程碑：记下 v86 往第 0 行写的字，开头和 ABPKCVITUFWE 对上几个就点亮几个（SeaBIOS 也写第 0 行，清屏以后才是内核的） */
+$("milestones").innerHTML = [...LETTERS].map(c => `<span>${c}</span>`).join("");
+const row0 = Array(80).fill(" ");
+function lightMilestones() {
+  let n = 0;
+  while (n < LETTERS.length && row0[n] === LETTERS[n]) n++;
+  [...$("milestones").children].forEach((el, i) => el.classList.toggle("on", i < n));
+  if (n === LETTERS.length) status("运行中");
+}
+
+/* 让 80 列正好铺满屏幕的宽度 */
+function fitScreen() {
+  const box = $("screen"), text = box.firstElementChild;
+  const probe = document.createElement("span");
+  probe.textContent = "M".repeat(80);
+  probe.style.cssText = "position:absolute;visibility:hidden;white-space:pre;font-family:var(--font-vga);font-size:20px";
+  document.body.appendChild(probe);
+  const w = probe.getBoundingClientRect().width;
+  probe.remove();
+  const cs = getComputedStyle(box), inner = box.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+  if (w > 0 && inner > 0) text.style.fontSize = (20 * inner / w * 0.995) + "px";
+}
+
+/*
+ * 串口终端：照着一个最简单的终端画。内核的串口驱动把 \n 送成 \r\n，回显退格送成 \b 空格 \b；
+ * shell 的行编辑用 ESC [ n D 往左挪、ESC [ n C 往右挪、ESC [ K 擦到行尾。只留最近的 400 行。
+ */
+const term = { lines: [""], col: 0, esc: 0, num: 0 };
+function serialByte(b) {
+  const t = term, last = t.lines.length - 1;
+  if (t.esc === 1) { t.esc = b === 0x5b ? 2 : 0; t.num = 0; return; }
+  if (t.esc === 2) {
+    if (b >= 0x30 && b <= 0x39) { t.num = t.num * 10 + b - 0x30; return; }
+    t.esc = 0;
+    const n = t.num || 1, c = String.fromCharCode(b);
+    if (c === "D") t.col = Math.max(0, t.col - n);
+    else if (c === "C") t.col += n;
+    else if (c === "K") t.lines[last] = t.lines[last].slice(0, t.col);
+    return drawSerial();
+  }
+  if (b === 0x1b) { t.esc = 1; return; }
+  if (b === 0x0d) { t.col = 0; return; }
+  if (b === 0x0a) {
+    t.lines.push(""); t.col = 0;
+    if (t.lines.length > 400) t.lines.splice(0, t.lines.length - 400);
+    return drawSerial();
+  }
+  if (b === 0x08) { t.col = Math.max(0, t.col - 1); return drawSerial(); }
+  if (b < 0x20) return;
+  const line = t.lines[last].padEnd(t.col);
+  t.lines[last] = line.slice(0, t.col) + String.fromCharCode(b) + line.slice(t.col + 1);
+  t.col++;
+  drawSerial();
+}
+const escHtml = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+function drawSerial() {
+  const pre = $("serial"), t = term;
+  const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 4;
+  const last = t.lines.at(-1).padEnd(t.col + 1);
+  pre.innerHTML = escHtml(t.lines.slice(0, -1).join("\n") + (t.lines.length > 1 ? "\n" : "") + last.slice(0, t.col)) +
+    `<span class="cur">${escHtml(last[t.col])}</span>` + escHtml(last.slice(t.col + 1));
+  if (atBottom) pre.scrollTop = pre.scrollHeight;
+}
+
+if (location.protocol === "file:") {
+  fail("这一页要从本地服务器打开：在仓库里运行 make web，再打开它打印的地址。浏览器不让 file:// 页面读取镜像文件。");
+} else if (typeof V86 === "undefined") {
+  fail("没有找到 v86/libv86.js：请用 make web 准备这一页，它会下载 v86。");
+} else {
+  start();
+}
+
+function start() {
+  const emulator = new V86({
+    wasm_path: "v86/v86.wasm",
+    memory_size: 16 * 1024 * 1024,         /* 和 QEMU 的 -m 16M 一样：内核只管前 16 MB */
+    vga_memory_size: 2 * 1024 * 1024,
+    screen_container: $("screen"),
+    bios: { url: "v86/seabios.bin" },
+    vga_bios: { url: "v86/vgabios.bin" },
+    fda: { url: "floppy.img" },            /* 有软盘就从软盘启动：第 0 个扇区是 boot.asm */
+    hda: { url: "hd.img" },                /* 主 IDE 通道的主盘：根文件系统和交换区 */
+    hdb: { url: "hdb.img" },               /* 主盘的从盘：mount /dev/hdb /mnt */
+    autostart: true,
+    disable_mouse: true,
+  });
+  window.emulator = emulator;              /* 方便在开发者工具里看 */
+  emulator.keyboard_set_enabled(false);    /* 点了屏幕才把键盘交给它 */
+
+  emulator.add_listener("download-progress", e => {
+    const pct = e.lengthComputable && e.total ? ` ${Math.floor(e.loaded / e.total * 100)}%` : "";
+    status(`下载 ${e.file_name.split("/").pop()}${pct}（${e.file_index + 1}/${e.file_count}）`);
+  });
+  emulator.add_listener("download-error", e => fail(`下载 ${e.file_name} 失败：重新运行 make web 试试。`));
+  emulator.add_listener("emulator-ready", () => { status("开机中"); fitScreen(); });
+  emulator.add_listener("screen-put-char", ([row, col, chr]) => {
+    if (row !== 0) return;
+    row0[col] = String.fromCharCode(chr);
+    lightMilestones();
+  });
+  emulator.add_listener("serial0-output-byte", serialByte);
+
+  /* 键盘交给谁：点屏幕交给控制台（v86 的键盘），点串口框交给串口 */
+  const screen = $("screen"), serial = $("serial");
+  screen.addEventListener("focus", () => { emulator.keyboard_set_enabled(true); screen.classList.add("focused"); });
+  screen.addEventListener("blur", () => { emulator.keyboard_set_enabled(false); screen.classList.remove("focused"); });
+  screen.addEventListener("mousedown", () => setTimeout(() => screen.focus()));
+  serial.addEventListener("focus", () => serial.classList.add("focused"));
+  serial.addEventListener("blur", () => serial.classList.remove("focused"));
+  serial.addEventListener("keydown", e => {
+    if (e.metaKey || e.altKey) return;
+    const k = e.key;
+    const arrows = { ArrowUp: "A", ArrowDown: "B", ArrowRight: "C", ArrowLeft: "D", Home: "H", End: "F" };
+    let out = null;
+    if (e.ctrlKey && k.length === 1 && /[a-z]/i.test(k)) out = String.fromCharCode(k.toUpperCase().charCodeAt(0) - 64);
+    else if (k === "Enter") out = "\r";
+    else if (k === "Backspace") out = "\x7f";
+    else if (arrows[k]) out = "\x1b[" + arrows[k];
+    else if (k.length === 1) out = k;
+    if (out === null) return;
+    e.preventDefault();
+    emulator.serial0_send(out);
+  });
+
+  /* Ctrl+C、Ctrl+Z、Ctrl+D 按钮：控制台送扫描码（左 Ctrl 按下、字母按下松开、Ctrl 松开），串口直接送控制字符 */
+  const SCAN = { c: 0x2e, z: 0x2c, d: 0x20 };
+  document.querySelectorAll("[data-ctrl]").forEach(b => b.addEventListener("click", () => {
+    const s = SCAN[b.dataset.ctrl];
+    emulator.keyboard_send_scancodes([0x1d, s, s | 0x80, 0x9d]);
+    screen.focus();
+  }));
+  document.querySelectorAll("[data-code]").forEach(b => b.addEventListener("click", () => {
+    emulator.serial0_send(String.fromCharCode(+b.dataset.code));
+    serial.focus();
+  }));
+
+  $("restart").addEventListener("click", () => {
+    row0.fill(" "); lightMilestones(); Object.assign(term, { lines: [""], col: 0, esc: 0 }); drawSerial();
+    emulator.restart();                    /* 镜像回到下载时的样子：写过的扇区只在内存里 */
+    status("开机中");
+    if (!emulator.is_running()) { emulator.run(); $("pause").textContent = "暂停"; }
+    screen.focus();
+  });
+  $("pause").addEventListener("click", async () => {
+    if (emulator.is_running()) { await emulator.stop(); $("pause").textContent = "继续"; status("已暂停"); }
+    else { await emulator.run(); $("pause").textContent = "暂停"; status("运行中"); }
+  });
+
+  fitScreen();
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(fitScreen);
+  window.addEventListener("resize", fitScreen);
+}
+</script>
+</body>
+</html>
