@@ -11,7 +11,9 @@ make test：在无头 QEMU 中启动内核，检查启动输出、定时器、�
 import datetime
 import os
 import re
+import shutil
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -35,15 +37,16 @@ def check(condition, message):
 class Machine:
     """一台无头 QEMU 虚拟机，用监视器命令观察和操作它。"""
 
-    def __init__(self, image):
+    def __init__(self, image, snapshot=True):
         tmp = tempfile.mkdtemp(prefix="kernel-test-")
         self.sock_path = os.path.join(tmp, "monitor.sock")
         self.log_path = os.path.join(tmp, "qemu.log")
         self.sock = None
         # QEMU 的错误输出写进文件：用管道却不读，输出多了会把 QEMU 卡住
-        # 同一目录下的 hd.img 接在主 IDE 通道上；snapshot=on 让写入只留在临时文件里，镜像本身不变
+        # 同一目录下的 hd.img 接在主 IDE 通道上；snapshot=on 让写入只留在临时文件里，镜像本身不变。
+        # snapshot=False 时写进镜像本身：只用在复制出来的镜像上，事后读它核对
         hd = os.path.join(os.path.dirname(image), "hd.img")
-        disk = ["-drive", f"file={hd},format=raw,if=ide,index=0,snapshot=on"] if os.path.exists(hd) else []
+        disk = ["-drive", f"file={hd},format=raw,if=ide,index=0" + (",snapshot=on" if snapshot else "")] if os.path.exists(hd) else []
         with open(self.log_path, "w") as log:
             self.proc = subprocess.Popen(
                 [QEMU, "-machine", "pc", "-accel", "tcg", "-m", "16M",
@@ -188,6 +191,62 @@ class Machine:
 
     def __exit__(self, *exc):
         self.close()
+
+
+class MinixImage:
+    """从宿主机这边读 Minix v1 的硬盘镜像，和内核读到的应当一样：超级块、两张位图、i 节点、目录、文件内容。"""
+
+    def __init__(self, path):
+        self.img = open(path, "rb").read()
+        self.ninodes, self.nzones, self.imap, self.zmap, self.firstdata, _, _, magic = struct.unpack_from("<HHHHHHIH", self.block(1))
+        check(magic == 0x137F, f"{path} 不是 Minix v1 文件系统")
+
+    def block(self, n):
+        return self.img[n * 1024:(n + 1) * 1024]
+
+    def free_bits(self, first, count, limit):
+        data = b"".join(self.block(first + i) for i in range(count))
+        return sum(1 for b in range(1, limit + 1) if not data[b // 8] & (1 << (b % 8)))
+
+    def free_inodes(self):
+        return self.free_bits(2, self.imap, self.ninodes)
+
+    def free_blocks(self):
+        return self.free_bits(2 + self.imap, self.zmap, self.nzones - self.firstdata)
+
+    def inode(self, n):
+        off = (n - 1) * 32
+        b = self.block(2 + self.imap + self.zmap + off // 1024)
+        mode, _, size = struct.unpack_from("<HHI", b, off % 1024)
+        return mode, size, struct.unpack_from("<9H", b, off % 1024 + 14)
+
+    def data(self, n):
+        """i 节点 n 的内容：直接块、一级间接块、二级间接块，按顺序拼起来，截到文件大小。没分配的块是 0。"""
+        mode, size, zones = self.inode(n)
+        blocks = list(zones[:7])
+        if zones[7]:
+            blocks += struct.unpack_from("<512H", self.block(zones[7]))
+        if zones[8]:
+            for ind in struct.unpack_from("<512H", self.block(zones[8])):
+                blocks += struct.unpack_from("<512H", self.block(ind)) if ind else [0] * 512
+        out = b"".join(self.block(z) if z else bytes(1024) for z in blocks[:(size + 1023) // 1024])
+        return out[:size]
+
+    def lookup(self, path):
+        """按路径找 i 节点号，找不到返回 None。"""
+        n = 1
+        for name in [p for p in path.split("/") if p]:
+            data = self.data(n)
+            entries = {data[i + 2:i + 16].rstrip(b"\0").decode(): struct.unpack_from("<H", data, i)[0]
+                       for i in range(0, len(data), 16) if struct.unpack_from("<H", data, i)[0]}
+            if name not in entries:
+                return None
+            n = entries[name]
+        return n
+
+    def read(self, path):
+        n = self.lookup(path)
+        return None if n is None else self.data(n)
 
 
 def symbols(elf):
@@ -1184,6 +1243,31 @@ def test_sync(_m, _elf):
             check(len(out) > i and out[i] == ch, f"第 {i + 1} 项（{meaning[ch]}）没有通过：第 6 行去掉 A 后是 {out!r}，应为 {expected!r}")
 
 
+def test_sync_to_disk(_m, _elf):
+    """sync 真的写到了硬盘上：在镜像的副本上运行，sync 之后直接杀掉 QEMU，从宿主机读镜像，文件内容、目录、空闲块数都对"""
+    d = tempfile.mkdtemp(prefix="kernel-disk-")
+    for f in ("floppy.img", "hd.img"):
+        shutil.copy(os.path.join(BUILD, f), d)
+    text = "persisted on disk"
+    with Machine(os.path.join(d, "floppy.img"), snapshot=False) as m:
+        m.wait_for(boot_ready, what="开机")
+        for command in ("mkdir /tmp/keep", f"echo {text} > /tmp/keep/a", "cat /hello.txt /big > /tmp/keep/big", "sync"):
+            check(run_command(m, command) == [], f"{command} 不打印东西")
+        used = run_command(m, "df")[0]
+        m.proc.kill()               # 不让 QEMU 好好退出、也不让 init 再 sync：镜像里有的，就是 sync 写下去的
+        m.proc.wait()
+    img = MinixImage(os.path.join(d, "hd.img"))
+    check(img.read("/tmp/keep/a") == (text + "\n").encode(), f"镜像里 /tmp/keep/a 的内容：{img.read('/tmp/keep/a')!r}")
+    big = img.read("/tmp/keep/big")
+    want = img.read("/hello.txt") + img.read("/big")
+    check(big is not None and len(big) == len(want) and big == want,
+          f"镜像里 /tmp/keep/big（用到二级间接块）和 /hello.txt 加 /big 逐字节一样：{None if big is None else len(big)} 字节，应为 {len(want)}")
+    g = re.fullmatch(r"blocks: (\d+) used, (\d+) free; inodes: (\d+) used, (\d+) free", used)
+    check(g and int(g.group(2)) == img.free_blocks() and int(g.group(4)) == img.free_inodes(),
+          f"镜像里的两张位图和 df 说的空闲块数、空闲 i 节点数一样：df {used!r}，镜像 {img.free_blocks()} 块、{img.free_inodes()} 个 i 节点")
+    shutil.rmtree(d)
+
+
 def test_link(_m, _elf):
     """硬链接：两个名字一个 i 节点、链接数 2；从一个名字写另一个马上读得到；删一个名字不收回；开着的文件删光名字也能读；错误情况；链接数上限；末尾的 /；mv 的长名字"""
     d = build_selftest("USER_LINK")
@@ -1460,23 +1544,33 @@ def test_sleep(m, elf):
 
 
 def test_cache(m, elf):
-    """缓冲区缓存：写文件后 df 显示脏块；sync 写回；不 sync，init 每隔大约 5 秒也写回"""
-    check(run_command(m, "sync") == [], "sync 不打印东西")
-    before = run_command(m, "df")[1]
-    check(re.fullmatch(r"cache: 0 of 16 buffers dirty; \d+ blocks written since boot", before), f"sync 之后没有脏块：{before!r}")
-    written = int(before.split("; ")[1].split()[0])
-    check(run_command(m, "echo hi > /tmp/c1") == [], "写文件")
-    after = run_command(m, "df")[1]
-    # 一般是 5 块脏的、一块也没写；init 的 sync 恰好在这中间的话，就是已经写回了这 5 块
-    check(after in (f"cache: 5 of 16 buffers dirty; {written} blocks written since boot",
-                    f"cache: 0 of 16 buffers dirty; {written + 5} blocks written since boot"),
-          f"新建一个文件弄脏 5 块（i 节点位图、区块位图、i 节点表、目录、数据），sync 之前一块也不写盘：{after!r}")
-    m.wait_for(lambda mm: run_command(mm, "df")[1].startswith("cache: 0 of 16"), timeout=12,
-               what="init 每隔大约 5 秒 sync 一次，脏块写回")
-    out = run_command(m, "df")[1]
-    check(out == f"cache: 0 of 16 buffers dirty; {written + 5} blocks written since boot", f"写回了正好 5 块：{out!r}")
-    check(run_command(m, "rm /tmp/c1") == [] and run_command(m, "cat /tmp/c1") == ["cat: /tmp/c1: cannot open"], "删掉")
+    """缓冲区缓存：写文件后 df 显示脏块，sync 之前一块也不写盘；不 sync，init 每隔大约 5 秒也写回，写回的正好是那些块"""
+    def df():
+        out = run_command(m, "df")[1]
+        g = re.fullmatch(r"cache: (\d+) of 16 buffers dirty; (\d+) blocks written since boot", out)
+        check(g, f"df 的第二行：{out!r}")
+        return int(g.group(1)), int(g.group(2))
 
+    # init 每隔大约 5 秒 sync 一次：要是恰好落在写文件和 df 之间（甚至落在 echo 打开文件和写进去之间），
+    # 看到的就是写回了一部分。那就删掉、换个名字再来，最多三次
+    for attempt in range(3):
+        name = f"/tmp/c{attempt}"
+        check(run_command(m, "sync") == [], "sync 不打印东西")
+        dirty, written = df()
+        check(dirty == 0, f"sync 之后没有脏块：{dirty}")
+        check(run_command(m, f"echo hi > {name}") == [], "写文件")
+        dirty, now = df()
+        if now == written:
+            break
+        check(run_command(m, f"rm {name}") == [], "删掉，再来一次")
+    else:
+        raise TestFailure("三次都碰上 init 的 sync")
+    # i 节点位图、区块位图、新文件的 i 节点所在的那块 i 节点表、目录的数据块、文件的数据块；
+    # 目录自己的 i 节点（修改时间变了）在另一块 i 节点表里的话，再多一块
+    check(dirty in (5, 6), f"新建一个文件弄脏 5 块（目录的 i 节点在另一块 i 节点表里时 6 块），sync 之前一块也不写盘：{dirty}")
+    m.wait_for(lambda mm: df()[0] == 0, timeout=12, what="init 每隔大约 5 秒 sync 一次，脏块写回")
+    check(df()[1] == written + dirty, f"写回了正好 {dirty} 块：之前 {written}，现在 {df()[1]}")
+    check(run_command(m, f"rm {name}") == [] and run_command(m, f"cat {name}") == [f"cat: {name}: cannot open"], "删掉")
 
 
 def test_ln_mv(m, elf):
@@ -1490,6 +1584,11 @@ def test_ln_mv(m, elf):
     for command, expected in [("rm /tmp/x", []), ("cat /tmp/y", ["hi"]), ("mv /tmp/y /tmp/z", []), ("mkdir /tmp/dd", []),
                               ("mv /tmp/z /tmp/dd", []), ("cat /tmp/dd/z", ["hi"]), ("echo a > /tmp/w", []),
                               ("mv /tmp/w /tmp/dd/z", []), ("cat /tmp/dd/z", ["a"]), ("mv /tmp/dd/z /tmp/dd/z", []),
+                              ("cat /tmp/dd/z", ["a"]),
+                              # 路径写法不同、其实是同一个文件：比的是 i 节点号，不是字符串，不然会先删掉唯一的名字
+                              ("mv /tmp/dd/z /tmp/dd/./z", []), ("cat /tmp/dd/z", ["a"]), ("cd /tmp/dd", []),
+                              ("mv z /tmp/dd/z", []), ("cat z", ["a"]), ("cd /", []),
+                              ("ln /tmp/dd/z /tmp/zz/", ["ln: /tmp/zz/: cannot link"]), ("mv /tmp/dd/z /tmp/zz/", ["mv: /tmp/zz/: cannot move"]),
                               ("cat /tmp/dd/z", ["a"]), ("mv /tmp/dd /tmp/ee", ["mv: /tmp/dd: cannot move a directory"]),
                               ("ln /tmp/nothing /tmp/q", ["ln: /tmp/q: cannot link"]), ("ln /tmp /tmp/t2", ["ln: /tmp/t2: cannot link"]),
                               ("mv /tmp/nothing /tmp/q", ["mv: /tmp/nothing: no such file"]), ("ln", ["usage: ln file newname"])]:
@@ -1681,7 +1780,7 @@ SEPARATE_TESTS = [test_syscalls, test_page_alloc, test_double_free, test_hd_rw, 
                   test_big_kernel, test_user_write_kernel, test_user_privileged,
                   test_user_bad_pointer, test_user_exit, test_all_tasks_exit,
                   test_nmi_in_user_mode, test_user_write_code, test_preemption,
-                  test_deep_stack, test_wild_read, test_fork_isolation, test_waitpid, test_file_system, test_exec, test_pipe, test_fs_write, test_signal_syscalls, test_brk, test_alarm, test_sync, test_link, test_time_syscalls, test_fcntl, test_no_disk]
+                  test_deep_stack, test_wild_read, test_fork_isolation, test_waitpid, test_file_system, test_exec, test_pipe, test_fs_write, test_signal_syscalls, test_brk, test_alarm, test_sync, test_sync_to_disk, test_link, test_time_syscalls, test_fcntl, test_no_disk]
 
 
 def main():
