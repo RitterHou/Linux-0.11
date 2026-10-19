@@ -6,9 +6,9 @@ int main(int argc, char **argv)
     int status = 0;
     for (int i = 1; i < argc; i++) {
         if (mkdir(argv[i]) < 0) {
-            print("mkdir: ");
-            print(argv[i]);
-            print(": cannot create\n");
+            eprint("mkdir: ");
+            eprint(argv[i]);
+            eprint(": cannot create\n");
             status = 1;
         }
     }

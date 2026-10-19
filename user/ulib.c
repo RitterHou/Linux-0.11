@@ -43,6 +43,22 @@ void print(const char *s)
     write(1, s, strlen(s));
 }
 
+void eprint(const char *s)
+{
+    write(2, s, strlen(s));
+}
+
+void eprint_num(uint32_t n)
+{
+    char buf[12];
+    int i = sizeof(buf);
+    buf[--i] = '\0';
+    do
+        buf[--i] = (char)('0' + n % 10);
+    while (n /= 10);
+    eprint(buf + i);
+}
+
 void print_num(uint32_t n)
 {
     char buf[12];

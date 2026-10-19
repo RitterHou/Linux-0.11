@@ -1192,6 +1192,19 @@ def test_time_syscalls(_m, _elf):
             check(len(out) > i and out[i] == ch, f"第 {i + 1} 项（{meaning[ch]}）没有通过：第 6 行去掉 A 后是 {out!r}，应为 {expected!r}")
 
 
+def test_fcntl(_m, _elf):
+    """dup2 和 fcntl：共用读写位置、换掉开着的描述符、F_DUPFD、F_GETFL/F_SETFL、close-on-exec 在 exec 时关掉、fork 继承"""
+    d = build_selftest("USER_FCNTL")
+    with Machine(os.path.join(d, "floppy.img")) as m:
+        m.wait_for(lambda mm: message_row(mm) == "task 2 exited with code 0", timeout=10, what="init 的结束消息")
+        out = task_output(m).replace("A", "")
+        expected = "dfcke"
+        meaning = {"d": "dup2", "f": "F_DUPFD、F_GETFL、F_SETFL", "c": "close-on-exec：exec 时关掉", "k": "fork 继承 close-on-exec",
+                   "e": "不对的描述符和命令返回 -1"}
+        for i, ch in enumerate(expected):
+            check(len(out) > i and out[i] == ch, f"第 {i + 1} 项（{meaning[ch]}）没有通过：第 6 行去掉 A 后是 {out!r}，应为 {expected!r}")
+
+
 def test_fs_write(_m, _elf):
     """写文件：O_EXCL、读写权限、O_TRUNC、O_APPEND、删掉开着的文件、目录的错误、同一个文件开两次共用 i 节点"""
     d = build_selftest("USER_FSWRITE")
@@ -1542,17 +1555,28 @@ def test_clock(m, elf):
     check(run_command(m, "rm /tmp/clock1") == [] and run_command(m, "rm /tmp/clock2") == [], "清理")
 
 
+
+def test_stderr(m, elf):
+    """标准错误：出错的消息不进管道；2>&1 把它接回管道；2> 和 2>> 写进文件"""
+    for command, expected in [("nosuch | wc", ["sh: nosuch: not found", "0 0 0"]), ("cat /nothing | wc", ["cat: /nothing: cannot open", "0 0 0"]),
+                              ("cat /nothing 2>&1 | wc", ["1 4 27"]), ("nosuch 2> /tmp/err", []), ("ls /nothing 2>> /tmp/err", []),
+                              ("cat /tmp/err", ["sh: nosuch: not found", "ls: /nothing: not a directory"]),
+                              ("echo out > /tmp/o 2>&1", []), ("cat /tmp/o", ["out"]), ("rm /tmp/err", []), ("rm /tmp/o", [])]:
+        out = run_command(m, command)
+        check(out == expected, f"{command} 应输出 {expected!r}，实际是 {out!r}")
+
+
 # 前几项共用一台正常启动的虚拟机；其余各自启动自检内核。
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_console_scroll,
                 test_idle_in_hlt, test_demand_paging, test_fork_address_spaces, test_syscall_gate, test_user_setup, test_user_task,
-                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep, test_cache, test_ln_mv, test_script, test_clock]
+                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep, test_cache, test_ln_mv, test_script, test_clock, test_stderr]
 SEPARATE_TESTS = [test_syscalls, test_page_alloc, test_double_free, test_hd_rw, test_early_key, test_keyboard_edge_cases, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,
                   test_big_kernel, test_user_write_kernel, test_user_privileged,
                   test_user_bad_pointer, test_user_exit, test_all_tasks_exit,
                   test_nmi_in_user_mode, test_user_write_code, test_preemption,
-                  test_deep_stack, test_wild_read, test_fork_isolation, test_waitpid, test_file_system, test_exec, test_pipe, test_fs_write, test_signal_syscalls, test_brk, test_alarm, test_sync, test_link, test_time_syscalls, test_no_disk]
+                  test_deep_stack, test_wild_read, test_fork_isolation, test_waitpid, test_file_system, test_exec, test_pipe, test_fs_write, test_signal_syscalls, test_brk, test_alarm, test_sync, test_link, test_time_syscalls, test_fcntl, test_no_disk]
 
 
 def main():

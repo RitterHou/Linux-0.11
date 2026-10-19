@@ -28,9 +28,9 @@ int main(int argc, char **argv)
 
     int32_t fd = open(dir, 0);
     if (fd < 0 || stat(dir, &st) < 0 || (st.mode & 0170000) != 0040000) {
-        print("ls: ");
-        print(dir);
-        print(": not a directory\n");
+        eprint("ls: ");
+        eprint(dir);
+        eprint(": not a directory\n");
         return 1;
     }
     while (read(fd, &de, sizeof(de)) == sizeof(de)) {

@@ -113,8 +113,28 @@ static int32_t sys_close(uint32_t fd, uint32_t b, uint32_t c, struct interrupt_f
     if (!f)
         return -1;
     current_files()[fd] = 0;
+    *current_cloexec() &= ~(1u << fd);
     file_put(f);
     return 0;
+}
+
+/*
+ * exec 成功以后：关掉设了 close-on-exec 的描述符。不能在 do_exec() 里面关：那时拿着文件系统锁，
+ * 而关掉最后一个引用要 iput()，又要拿这把锁。Linux 0.11 的 do_execve() 在换上新程序时关它们。
+ */
+static void close_on_exec(void)
+{
+    uint32_t *bits = current_cloexec();
+    struct file **files = current_files();
+
+    for (int fd = 0; fd < NR_OPEN; fd++) {
+        if (!(*bits & (1u << fd)) || !files[fd])
+            continue;
+        struct file *f = files[fd];
+        files[fd] = 0;
+        file_put(f);
+    }
+    *bits = 0;
 }
 
 static int32_t sys_getpid(uint32_t a, uint32_t b, uint32_t c, struct interrupt_frame *frame)
@@ -175,6 +195,8 @@ static int32_t sys_exec(uint32_t path, uint32_t argv, uint32_t c, struct interru
     fs_lock();                      /* 装入程序时一直读文件，不能让别人在中途改它 */
     int ret = do_exec(name, argv, frame);
     fs_unlock();
+    if (ret == 0)
+        close_on_exec();
     return ret;
 }
 
@@ -249,17 +271,77 @@ static int32_t sys_pipe(uint32_t fds, uint32_t b, uint32_t c, struct interrupt_f
 }
 
 /* dup(fd)：最小的空闲描述符也指向 fd 指向的那个打开的文件。shell 用 close(1); dup(管道写的一头); 把输出接到管道上。 */
+/*
+ * 让不小于 arg 的最小空闲描述符也指向 fd 打开的文件，两者共用读写位置；新的描述符没有 close-on-exec。
+ * Linux 0.11 的 dupfd() 相同，dup、dup2、fcntl(F_DUPFD) 都用它。
+ */
+static int32_t dupfd(uint32_t fd, uint32_t arg)
+{
+    struct file *f = fd_file(fd);
+    struct file **files = current_files();
+
+    if (!f || arg >= NR_OPEN)
+        return -1;
+    while (arg < NR_OPEN && files[arg])
+        arg++;
+    if (arg >= NR_OPEN)
+        return -1;
+    *current_cloexec() &= ~(1u << arg);
+    file_get(f);
+    files[arg] = f;
+    return (int32_t)arg;
+}
+
 static int32_t sys_dup(uint32_t fd, uint32_t b, uint32_t c, struct interrupt_frame *frame)
 {
     (void)b, (void)c, (void)frame;
-    struct file *f = fd_file(fd);
-    int nfd = free_fd();
+    return dupfd(fd, 0);
+}
 
-    if (!f || nfd < 0)
+/*
+ * dup2(old, new)：new 原来开着就先关掉，再让它指向 old 打开的文件。old 和 new 一样时什么也不做。
+ * Linux 0.11 的 sys_dup2() 先关 new 再 dupfd：old 和 new 一样时就把它关掉了，再返回出错；这里照 POSIX。
+ */
+static int32_t sys_dup2(uint32_t oldfd, uint32_t newfd, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)c;
+    if (!fd_file(oldfd) || newfd >= NR_OPEN)
         return -1;
-    file_get(f);
-    current_files()[nfd] = f;
-    return nfd;
+    if (oldfd == newfd)
+        return (int32_t)newfd;
+    if (fd_file(newfd))
+        sys_close(newfd, 0, 0, frame);
+    return dupfd(oldfd, newfd);
+}
+
+/* fcntl(fd, cmd, arg)：命令见 syscall.h 的 F_ 开头的几个，和 Linux 0.11 的 sys_fcntl() 一样。 */
+static int32_t sys_fcntl(uint32_t fd, uint32_t cmd, uint32_t arg, struct interrupt_frame *frame)
+{
+    (void)frame;
+    struct file *f = fd_file(fd);
+    uint32_t *bits = current_cloexec();
+
+    if (!f)
+        return -1;
+    switch (cmd) {
+    case F_DUPFD:
+        return dupfd(fd, arg);
+    case F_GETFD:
+        return (int32_t)((*bits >> fd) & 1);
+    case F_SETFD:
+        if (arg & FD_CLOEXEC)
+            *bits |= 1u << fd;
+        else
+            *bits &= ~(1u << fd);
+        return 0;
+    case F_GETFL:
+        return (int32_t)f->mode;
+    case F_SETFL:
+        f->mode = (f->mode & ~O_APPEND) | (arg & O_APPEND);
+        return 0;
+    default:
+        return -1;
+    }
 }
 
 /* unlink、mkdir、rmdir 都是：先把路径复制进内核，在文件系统锁里交给 fs.c。 */
@@ -523,6 +605,8 @@ static const syscall_fn syscall_table[SYS_CALLS] = {
     [SYS_CHMOD]  = sys_chmod,
     [SYS_TIME]   = sys_time,
     [SYS_UTIME]  = sys_utime,
+    [SYS_DUP2]   = sys_dup2,
+    [SYS_FCNTL]  = sys_fcntl,
 };
 
 void syscall_dispatch(struct interrupt_frame *frame)

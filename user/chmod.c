@@ -7,12 +7,12 @@ int main(int argc, char **argv)
     const char *p = argc >= 3 ? argv[1] : "";
 
     if (*p == '\0') {
-        print("usage: chmod mode file...\n");
+        eprint("usage: chmod mode file...\n");
         return 2;
     }
     for (; *p; p++) {
         if (*p < '0' || *p > '7') {
-            print("usage: chmod mode file...\n");
+            eprint("usage: chmod mode file...\n");
             return 2;
         }
         mode = mode * 8 + (uint32_t)(*p - '0');
@@ -20,9 +20,9 @@ int main(int argc, char **argv)
     int status = 0;
     for (int i = 2; i < argc; i++) {
         if (chmod(argv[i], mode) < 0) {
-            print("chmod: ");
-            print(argv[i]);
-            print(": cannot change mode\n");
+            eprint("chmod: ");
+            eprint(argv[i]);
+            eprint(": cannot change mode\n");
             status = 1;
         }
     }

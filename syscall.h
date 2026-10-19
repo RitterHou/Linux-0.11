@@ -43,7 +43,9 @@
 #define SYS_CHMOD  28               /* chmod(path, mode)：改文件的权限，比如 0755 让脚本能直接运行 */
 #define SYS_TIME   29               /* time()：现在是 1970 年 1 月 1 日（UTC）以来的第几秒 */
 #define SYS_UTIME  30               /* utime(path, t)：把文件的修改时间设成 t，t 为 0 就是现在 */
-#define SYS_CALLS  31
+#define SYS_DUP2   31               /* dup2(old, new)：让描述符 new 也指向 old 打开的文件，new 原来开着的先关掉 */
+#define SYS_FCNTL  32               /* fcntl(fd, cmd, arg)：复制描述符、close-on-exec、打开方式 */
+#define SYS_CALLS  33
 
 /* fsinfo 写回的内容 */
 struct fsinfo {
@@ -141,6 +143,14 @@ typedef void (*sighandler_t)(int);
 #define O_EXCL     0200             /* 和 O_CREAT 一起用：已经存在就失败 */
 #define O_TRUNC    01000            /* 打开时清空 */
 #define O_APPEND   02000            /* 每次写都接在末尾 */
+
+/* fcntl 的命令，取值与 Linux 0.11 的 include/fcntl.h 相同 */
+#define F_DUPFD    0                /* 复制到不小于 arg 的最小空闲描述符 */
+#define F_GETFD    1                /* 取 close-on-exec 标志 */
+#define F_SETFD    2                /* 设 close-on-exec 标志：arg 为 FD_CLOEXEC 就是 exec 时关掉 */
+#define F_GETFL    3                /* 取打开方式（O_RDONLY 等，加上 O_APPEND） */
+#define F_SETFL    4                /* 改 O_APPEND */
+#define FD_CLOEXEC 1
 
 static inline int32_t syscall3(uint32_t nr, uint32_t a, uint32_t b, uint32_t c)
 {
@@ -286,6 +296,16 @@ static inline uint32_t time(void)
 static inline int32_t utime(const char *path, uint32_t t)
 {
     return syscall3(SYS_UTIME, (uint32_t)path, t, 0);
+}
+
+static inline int32_t dup2(int32_t oldfd, int32_t newfd)
+{
+    return syscall3(SYS_DUP2, (uint32_t)oldfd, (uint32_t)newfd, 0);
+}
+
+static inline int32_t fcntl(int32_t fd, int32_t cmd, int32_t arg)
+{
+    return syscall3(SYS_FCNTL, (uint32_t)fd, (uint32_t)cmd, (uint32_t)arg);
 }
 
 static inline int32_t chmod(const char *path, uint32_t mode)

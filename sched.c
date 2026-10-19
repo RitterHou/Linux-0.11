@@ -64,6 +64,7 @@ struct task {
     int parent;                     /* 父进程的任务号；内核建的任务和孤儿是 0，没有人等它们 */
     uint32_t status;                /* 结束时的状态，waitpid 取走：exit 的退出码、0x100 加异常号或 0x200 加信号编号 */
     struct file *files[NR_OPEN];    /* 文件描述符表：第 fd 项指向打开的文件，0 表示没用 */
+    uint32_t cloexec;               /* 第 fd 位为 1：exec 时关掉这个描述符（close-on-exec），fork 时继承 */
     char name[TASK_NAME_LEN];       /* ps 显示的名字：内核建的任务起好的名字，exec 后是程序的文件名 */
     char cwd[PATH_MAX];             /* 当前目录：规范化过的绝对路径，内核建的任务是 /，fork 时继承 */
     uint32_t signal;                /* 收到、还没处理的信号：第 sig - 1 位 */
@@ -113,6 +114,12 @@ int current_pid(void)
 struct file **current_files(void)
 {
     return tasks[current_task].files;
+}
+
+/* 当前任务的 close-on-exec 位图。 */
+uint32_t *current_cloexec(void)
+{
+    return &tasks[current_task].cloexec;
 }
 
 /* 当前任务的当前目录。 */
@@ -690,7 +697,8 @@ int sched_fork(const struct interrupt_frame *frame)
     };
     tasks[n] = (struct task){ .state = TASK_RUNNING, .page_dir = dir, .kstack = kstack, .parent = current_task,
                               .restorer = tasks[current_task].restorer, .pgrp = tasks[current_task].pgrp,   /* 收到的信号不继承 */
-                              .start_brk = tasks[current_task].start_brk, .brk = tasks[current_task].brk };
+                              .start_brk = tasks[current_task].start_brk, .brk = tasks[current_task].brk,
+                              .cloexec = tasks[current_task].cloexec };
     for (int i = 0; i < 32; i++)
         tasks[n].action[i] = tasks[current_task].action[i];
     set_name(n, tasks[current_task].name);

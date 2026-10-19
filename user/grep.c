@@ -56,7 +56,7 @@ static void grep(int32_t fd, const char *word)
 int main(int argc, char **argv)
 {
     if (argc < 2) {
-        print("usage: grep text [file...]\n");
+        eprint("usage: grep text [file...]\n");
         return 2;
     }
     if (argc == 2)
@@ -64,9 +64,9 @@ int main(int argc, char **argv)
     for (int i = 2; i < argc; i++) {
         int32_t fd = open(argv[i], 0);
         if (fd < 0) {
-            print("grep: ");
-            print(argv[i]);
-            print(": cannot open\n");
+            eprint("grep: ");
+            eprint(argv[i]);
+            eprint(": cannot open\n");
             continue;
         }
         grep(fd, argv[1]);

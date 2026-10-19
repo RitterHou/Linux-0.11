@@ -8,9 +8,9 @@ int main(int argc, char **argv)
         struct stat st;
         int32_t fd;
         if (stat(argv[i], &st) == 0 ? utime(argv[i], 0) < 0 : (fd = open(argv[i], O_WRONLY | O_CREAT)) < 0 || close(fd) < 0) {
-            print("touch: ");
-            print(argv[i]);
-            print(": cannot touch\n");
+            eprint("touch: ");
+            eprint(argv[i]);
+            eprint(": cannot touch\n");
             status = 1;
         }
     }

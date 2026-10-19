@@ -3,6 +3,8 @@
  *   - 命令名里没有 / 的，到 /bin 下找：ls 就是 /bin/ls；
  *   - 用 | 把几个命令接起来：每一段一个子进程，相邻两段之间一个管道，前一个的标准输出接到后一个的标准输入；
  *   - > 文件、>> 文件、< 文件：把这一段的标准输出写进文件（清空或者接在末尾），或者从文件读标准输入；
+ *     2> 文件、2>> 文件：标准错误写进文件；2>&1：标准错误也接到标准输出那里。都是子进程在 exec 之前用 dup2 接好。
+ *     出错的消息都写到标准错误（2 号），所以管道里只有数据；
  *   - 最后一个参数是 & 的，在后台运行，不等它；每次读命令之前收走已经结束的后台程序；
  *   - Ctrl+C：终端给前台进程组发 SIGINT。shell 自己接住它（on_intr），被打断的 read 返回 -EINTR，
  *     重新打出提示符；被打断的 waitpid 也返回 -EINTR，接着等。前台的子进程在 exec 之前改回默认，就被结束；
@@ -42,18 +44,18 @@ static int split(char *line, char **argv)
 static void report(const char *name, int32_t st)
 {
     if (st & 0x100) {               /* 被异常结束：0x100 加异常号 */
-        print("sh: ");
-        print(name);
-        print(" killed by exception ");
-        print_num((uint32_t)st & 0xFF);
-        print("\n");
+        eprint("sh: ");
+        eprint(name);
+        eprint(" killed by exception ");
+        eprint_num((uint32_t)st & 0xFF);
+        eprint("\n");
     } else if ((st & 0x200) && (st & 0xFF) != SIGINT && (st & 0xFF) != SIGPIPE) {
         /* 被信号结束。Ctrl+C 的 ^C 终端已经回显了；SIGPIPE 是后面的程序先走了，不算出错，和 bash 一样不报告 */
-        print("sh: ");
-        print(name);
-        print(" killed by signal ");
-        print_num((uint32_t)st & 0xFF);
-        print("\n");
+        eprint("sh: ");
+        eprint(name);
+        eprint(" killed by signal ");
+        eprint_num((uint32_t)st & 0xFF);
+        eprint("\n");
     }
 }
 
@@ -65,22 +67,29 @@ static void redirect(char **argv)
 {
     int out = 0;
     for (int i = 0; argv[i];) {
-        int fd = strcmp(argv[i], ">") == 0 ? 1 : strcmp(argv[i], ">>") == 0 ? 1 : strcmp(argv[i], "<") == 0 ? 0 : -1;
+        const char *a = argv[i];
+        if (strcmp(a, "2>&1") == 0) {   /* 标准错误也接到标准输出现在指向的地方 */
+            dup2(1, 2);
+            i++;
+            continue;
+        }
+        int err = a[0] == '2' && a[1] == '>';   /* 2> 2>>：标准错误 */
+        const char *op = err ? a + 1 : a;
+        int fd = strcmp(op, ">") == 0 || strcmp(op, ">>") == 0 ? (err ? 2 : 1) : !err && strcmp(op, "<") == 0 ? 0 : -1;
         if (fd < 0) {
             argv[out++] = argv[i++];
             continue;
         }
         const char *file = argv[i + 1];
-        int32_t flags = fd == 0 ? O_RDONLY : argv[i][1] == '>' ? (O_WRONLY | O_CREAT | O_APPEND) : (O_WRONLY | O_CREAT | O_TRUNC);
+        int32_t flags = fd == 0 ? O_RDONLY : op[1] == '>' ? (O_WRONLY | O_CREAT | O_APPEND) : (O_WRONLY | O_CREAT | O_TRUNC);
         int32_t opened = file ? open(file, flags) : -1;
         if (opened < 0) {
-            print("sh: ");
-            print(file ? file : argv[i]);
-            print(": cannot redirect\n");
+            eprint("sh: ");
+            eprint(file ? file : a);
+            eprint(": cannot redirect\n");
             exit(1);
         }
-        close(fd);
-        dup(opened);
+        dup2(opened, fd);
         close(opened);
         i += 2;
     }
@@ -106,15 +115,15 @@ static void exec_command(char **argv)
         path[len++] = *p;
     path[len] = '\0';
     execv(path, argv);
-    print("sh: ");
-    print(argv[0]);
-    print(": not found\n");
+    eprint("sh: ");
+    eprint(argv[0]);
+    eprint(": not found\n");
     exit(127);
 }
 
 /*
  * 运行一行命令（可能有 |）。第 k 段的子进程：要是前面有管道，把它读的一头接到 0 号描述符；
- * 要是后面有管道，把写的一头接到 1 号描述符。接法都是先 close 再 dup：dup 返回最小的空闲描述符，
+ * 要是后面有管道，把写的一头接到 1 号描述符，都用 dup2。早年没有 dup2 时是先 close 再 dup：dup 返回最小的空闲描述符，
  * 正是刚关掉的那一个。管道多余的描述符都要关掉：只要还有人拿着写的一头，读的一方就永远等不到结束。
  */
 static void run_line(char **argv, int argc, int background)
@@ -131,12 +140,12 @@ static void run_line(char **argv, int argc, int background)
         if (!last)
             argv[i] = 0;
         if (i == start) {
-            print("sh: empty command\n");
+            eprint("sh: empty command\n");
             break;
         }
         int32_t p[2] = { -1, -1 };
         if (!last && pipe(p) < 0) {
-            print("sh: pipe failed\n");
+            eprint("sh: pipe failed\n");
             break;
         }
         int32_t pid = fork();
@@ -147,14 +156,12 @@ static void run_line(char **argv, int argc, int background)
              */
             signal(SIGINT, background ? SIG_IGN : SIG_DFL);
             signal(SIGTERM, SIG_DFL);
-            if (prev >= 0) {
-                close(0);
-                dup(prev);
+            if (prev >= 0) {        /* 前一段管道读的一头接到标准输入 */
+                dup2(prev, 0);
                 close(prev);
             }
-            if (!last) {
-                close(1);
-                dup(p[1]);
+            if (!last) {            /* 下一段管道写的一头接到标准输出 */
+                dup2(p[1], 1);
                 close(p[0]);
                 close(p[1]);
             }
@@ -168,7 +175,7 @@ static void run_line(char **argv, int argc, int background)
             prev = p[0];
         }
         if (pid < 0) {
-            print("sh: fork failed\n");
+            eprint("sh: fork failed\n");
             break;
         }
         names[n] = argv[start];
@@ -243,9 +250,9 @@ int main(int sh_argc, char **sh_argv)
     int interactive = sh_argc < 2;
 
     if (!interactive && (in = open(sh_argv[1], O_RDONLY)) < 0) {
-        print("sh: ");
-        print(sh_argv[1]);
-        print(": cannot open\n");
+        eprint("sh: ");
+        eprint(sh_argv[1]);
+        eprint(": cannot open\n");
         return 1;
     }
     if (interactive) {
@@ -277,9 +284,9 @@ int main(int sh_argc, char **sh_argv)
         if (strcmp(argv[0], "cd") == 0) {
             const char *dir = argc > 1 ? argv[1] : "/";
             if (chdir(dir) < 0) {
-                print("sh: cd: ");
-                print(dir);
-                print(": not a directory\n");
+                eprint("sh: cd: ");
+                eprint(dir);
+                eprint(": not a directory\n");
             }
             continue;
         }

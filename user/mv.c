@@ -12,19 +12,19 @@ int main(int argc, char **argv)
     char path[128];
 
     if (argc != 3) {
-        print("usage: mv file newname\n");
+        eprint("usage: mv file newname\n");
         return 2;
     }
     if (stat(argv[1], &from) < 0) {
-        print("mv: ");
-        print(argv[1]);
-        print(": no such file\n");
+        eprint("mv: ");
+        eprint(argv[1]);
+        eprint(": no such file\n");
         return 1;
     }
     if ((from.mode & 0170000) == 0040000) {
-        print("mv: ");
-        print(argv[1]);
-        print(": cannot move a directory\n");
+        eprint("mv: ");
+        eprint(argv[1]);
+        eprint(": cannot move a directory\n");
         return 1;
     }
     const char *dst = argv[2];
@@ -48,16 +48,16 @@ int main(int argc, char **argv)
         if (to.ino == from.ino)
             return 0;               /* 搬到它自己身上 */
         if ((to.mode & 0170000) == 0040000 || unlink(dst) < 0) {
-            print("mv: ");
-            print(dst);
-            print(": cannot replace\n");
+            eprint("mv: ");
+            eprint(dst);
+            eprint(": cannot replace\n");
             return 1;
         }
     }
     if (link(argv[1], dst) < 0 || unlink(argv[1]) < 0) {
-        print("mv: ");
-        print(dst);
-        print(": cannot move\n");
+        eprint("mv: ");
+        eprint(dst);
+        eprint(": cannot move\n");
         return 1;
     }
     return 0;

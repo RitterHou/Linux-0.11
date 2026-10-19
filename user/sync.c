@@ -5,7 +5,7 @@ int main(int argc, char **argv)
 {
     (void)argc, (void)argv;
     if (sync() < 0) {
-        print("sync: write error\n");
+        eprint("sync: write error\n");
         return 1;
     }
     return 0;

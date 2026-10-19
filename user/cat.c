@@ -14,9 +14,9 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; i++) {
         int32_t fd = open(argv[i], 0);
         if (fd < 0) {
-            print("cat: ");
-            print(argv[i]);
-            print(": cannot open\n");
+            eprint("cat: ");
+            eprint(argv[i]);
+            eprint(": cannot open\n");
             status = 1;
             continue;
         }
