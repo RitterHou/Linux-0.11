@@ -471,7 +471,8 @@ KEY_NAMES = {" ": "spc", "/": "slash", ".": "dot", "-": "minus", "&": "shift-7",
              "!": "shift-1", "@": "shift-2", "#": "shift-3", "|": "shift-backslash", ">": "shift-dot", "<": "shift-comma",
              ":": "shift-semicolon", ";": "semicolon", "\\": "backslash", "[": "bracket_left", "]": "bracket_right",
              "'": "apostrophe", '"': "shift-apostrophe", "$": "shift-4", "=": "equal", "+": "shift-equal", "*": "shift-8",
-             "(": "shift-9", ")": "shift-0", "%": "shift-5", "\n": "ret"}
+             "(": "shift-9", ")": "shift-0", "%": "shift-5", "{": "shift-bracket_left", "}": "shift-bracket_right",
+             "?": "shift-slash", "\n": "ret"}
 
 
 def type_text(m, text):
@@ -1434,8 +1435,8 @@ def test_shell(m, elf):
     check(run_command(m, "check badptr") == ["badptr ok"],
           "把代码页的地址交给要写用户内存的系统调用，应逐个返回 -1，而不是让内核停机")
     words = " ".join(str(i) for i in range(1, 18))
-    check(run_command(m, "echo " + words) == [" ".join(str(i) for i in range(1, 16))],
-          "shell 最多 16 个参数，多余的不要，不能并进最后一个参数里")
+    check(run_command(m, "echo " + words) == ["sh: too many arguments"],
+          "exec 最多 16 个参数：shell 展开出 18 个就报错，不偷偷截掉")
     out = run_command(m, "check crash")
     check(out == ["sh: check killed by exception 14"], f"check crash 写代码页，应被缺页异常结束：{out!r}")
     out = run_command(m, "ps")
@@ -1689,9 +1690,10 @@ def test_ln_mv(m, elf):
 def test_script(m, elf):
     """脚本：sh 脚本一行行执行、跳过注释、cd 不影响外面；chmod 之后 #! 脚本能直接运行；#! 的参数排法和上限；嵌套、没有解释器、没有执行权限都不行；Ctrl+C 结束脚本"""
     lines = ["#!/bin/sh", "# a comment", "echo one", "cd /etc", "cat issue", "pwd"]
-    check(run_command(m, f"echo {lines[0]} > /tmp/s") == [], "写脚本的第一行")
+    # # 在词首是注释：要用引号括起来才能写进文件
+    check(run_command(m, f"echo '{lines[0]}' > /tmp/s") == [], "写脚本的第一行")
     for line in lines[1:]:
-        check(run_command(m, f"echo {line} >> /tmp/s") == [], f"写脚本：{line}")
+        check(run_command(m, f"echo '{line}' >> /tmp/s") == [], f"写脚本：{line}")
     want = ["one", "Linux 0.11 learning kernel", "/etc"]
     check(run_command(m, "sh /tmp/s") == want, "sh 脚本：一行行执行，# 开头的是注释")
     check(run_command(m, "pwd") == ["/"], "脚本里的 cd 换的是运行脚本的那个 sh 的当前目录，外面的 shell 不变")
@@ -1699,15 +1701,15 @@ def test_script(m, elf):
     for command, expected in [("chmod 755 /tmp/s", []), ("/tmp/s", want), ("chmod", ["usage: chmod mode file..."]),
                               ("chmod 9 /tmp/s", ["usage: chmod mode file..."]), ("chmod 644 /nothing", ["chmod: /nothing: cannot change mode"]),
                               ("sh /nothing", ["sh: /nothing: cannot open"]),
-                              ("echo #!/bin/hello one two > /tmp/h", []), ("chmod 755 /tmp/h", []),
+                              ("echo '#!/bin/hello one two' > /tmp/h", []), ("chmod 755 /tmp/h", []),
                               ("/tmp/h a b", ["hello one two /tmp/h a b"]),
                               ("/tmp/h 1 2 3 4 5 6 7 8 9 10 11 12 13", ["hello one two /tmp/h 1 2 3 4 5 6 7 8 9 10 11 12 13"]),
                               ("/tmp/h 1 2 3 4 5 6 7 8 9 10 11 12 13 14", ["sh: /tmp/h: not found"]),
-                              ("echo #! > /tmp/e", []), ("chmod 755 /tmp/e", []), ("/tmp/e", ["sh: /tmp/e: not found"]),
-                              ("echo #!/tmp/h > /tmp/n", []), ("chmod 755 /tmp/n", []), ("/tmp/n", ["sh: /tmp/n: not found"])]:
+                              ("echo '#!' > /tmp/e", []), ("chmod 755 /tmp/e", []), ("/tmp/e", ["sh: /tmp/e: not found"]),
+                              ("echo '#!/tmp/h' > /tmp/n", []), ("chmod 755 /tmp/n", []), ("/tmp/n", ["sh: /tmp/n: not found"])]:
         out = run_command(m, command)
         check(out == expected, f"{command} 应输出 {expected!r}，实际是 {out!r}")
-    check(run_command(m, "echo #!/bin/sh > /tmp/slow") == [] and run_command(m, "echo sleep 100 >> /tmp/slow") == [] and
+    check(run_command(m, "echo '#!/bin/sh' > /tmp/slow") == [] and run_command(m, "echo sleep 100 >> /tmp/slow") == [] and
           run_command(m, "echo echo after >> /tmp/slow") == [] and run_command(m, "chmod 755 /tmp/slow") == [], "写一个睡很久的脚本")
     out = run_command(m, "sh /tmp/slow &")
     check(len(out) == 1 and re.fullmatch(r"\[\d+\]", out[0]), f"后台运行脚本：{out!r}")
@@ -1779,9 +1781,9 @@ def test_script_edge_cases(m, elf):
             check(out == expected, f"{command} 应输出 {expected!r}，实际是 {out!r}")
 
     run_all([("echo -n ab > /tmp/x", []), ("echo cd >> /tmp/x", []), ("cat /tmp/x", ["abcd"]),
-             ("echo -e a\\tb\\\\ > /tmp/x", []), ("wc /tmp/x", ["1 2 5"]),
+             ("echo -e 'a\\tb\\\\' > /tmp/x", []), ("wc /tmp/x", ["1 2 5"]),
              # Tab 隔开的参数、Tab 缩进、行尾的回车
-             ("echo -e echo\\tone\\r > /tmp/t", []), ("echo -e \\techo\\ttwo >> /tmp/t", []), ("sh /tmp/t", ["one", "two"]),
+             ("echo -e 'echo\\tone\\r' > /tmp/t", []), ("echo -e '\\techo\\ttwo' >> /tmp/t", []), ("sh /tmp/t", ["one", "two"]),
              ("echo exit 3 > /tmp/x3", []), ("echo exit 300 > /tmp/x300", []), ("echo check fds > /tmp/f", []),
              ("sh /tmp", ["sh: /tmp: is a directory"]), ("sh -x /tmp/t", ["sh: -x: unknown option"]),
              ("sh /tmp/f", ["fds: 0 1 2"]), ("check fds", ["fds: 0 1 2"]),
@@ -1790,8 +1792,8 @@ def test_script_edge_cases(m, elf):
     check(run_command(m, "sh /tmp/x3") == [] and re.fullmatch(r"task \d+ exited with code 3", message_row(m).strip()),
           f"脚本里的 exit 3：运行脚本的 sh 以 3 退出：{message_row(m)!r}")
     out = run_command(m, "sh /tmp/x300")
-    check(out == ["sh: exit: 300: bad number"] and message_row(m).endswith("exited with code 0"),
-          f"exit 300 超出 0～255：报错，接着读完脚本，以 0 退出：{out!r} {message_row(m)!r}")
+    check(out == ["sh: exit: 300: bad number"] and message_row(m).endswith("exited with code 2"),
+          f"exit 300 超出 0～255：报错（退出码 2），接着读完脚本，脚本的退出码是最后一条命令的 2：{out!r} {message_row(m)!r}")
 
     # 超过 127 个字节的一行：分两次写进去，sh 报错跳过它，接着执行下一行
     run_all([("echo -n echo " + "a" * 100 + " > /tmp/l", []), ("echo " + "b" * 40 + " >> /tmp/l", []),
@@ -1801,13 +1803,13 @@ def test_script_edge_cases(m, elf):
     check("".join(out) == f"sh: {name}: name too long", f"太长的命令名不截短：{out!r}")
 
     # #!：行尾的空白和回车去掉；解释器可以是相对路径（从当前目录找起）；第一行太长就运行不了
-    run_all([("echo -e #!/bin/hello one \\r > /tmp/q", []), ("chmod 755 /tmp/q", []), ("/tmp/q x", ["hello one /tmp/q x"]),
-             ("echo -e #!/bin/sh\\r > /tmp/c", []), ("echo -e echo crlf\\r >> /tmp/c", []), ("chmod 755 /tmp/c", []),
+    run_all([("echo -e '#!/bin/hello one \\r' > /tmp/q", []), ("chmod 755 /tmp/q", []), ("/tmp/q x", ["hello one /tmp/q x"]),
+             ("echo -e '#!/bin/sh\\r' > /tmp/c", []), ("echo -e 'echo crlf\\r' >> /tmp/c", []), ("chmod 755 /tmp/c", []),
              ("/tmp/c", ["crlf"]),
-             ("echo #!/bin/sh -x > /tmp/o", []), ("chmod 755 /tmp/o", []), ("/tmp/o", ["sh: -x: unknown option"]),
-             ("echo #!bin/sh > /tmp/r", []), ("echo echo rel >> /tmp/r", []), ("chmod 755 /tmp/r", []),
+             ("echo '#!/bin/sh -x' > /tmp/o", []), ("chmod 755 /tmp/o", []), ("/tmp/o", ["sh: -x: unknown option"]),
+             ("echo '#!bin/sh' > /tmp/r", []), ("echo echo rel >> /tmp/r", []), ("chmod 755 /tmp/r", []),
              ("/tmp/r", ["rel"]), ("cd /tmp", []), ("/tmp/r", ["sh: /tmp/r: not found"]), ("cd /", []),
-             ("echo -n #!/bin/echo " + "a" * 90 + " > /tmp/w", []), ("echo " + "b" * 40 + " >> /tmp/w", []),
+             ("echo -n '#!/bin/echo' " + "a" * 90 + " > /tmp/w", []), ("echo " + "b" * 40 + " >> /tmp/w", []),
              ("chmod 755 /tmp/w", []), ("/tmp/w", ["sh: /tmp/w: not found"])])
     for f in ("x", "t", "x3", "x300", "f", "l", "q", "c", "o", "r", "w"):
         run_command(m, f"rm /tmp/{f}")
@@ -2202,7 +2204,7 @@ def test_raw_tty(m, elf):
     m.wait_for(lambda mm: rows()[-2:] == ["xy", "xy"], timeout=3, what="规范模式把方向键的转义序列整个丢掉：这一行是 xy")
     m.sendkeys(["ctrl-d"])
     wait_prompt(m)
-    for command, expected in [("echo -e abc\\e[2Dx", ["axc"]), ("echo -e abcdef\\e[3D\\e[K", ["abc"]), ("echo -e ab\\e[Zcd", ["abcd"])]:
+    for command, expected in [("echo -e 'abc\\e[2Dx'", ["axc"]), ("echo -e 'abcdef\\e[3D\\e[K'", ["abc"]), ("echo -e 'ab\\e[Zcd'", ["abcd"])]:
         out = run_command(m, command)
         check(out == expected, f"控制台的转义序列：{command} 应显示 {expected!r}，实际是 {out!r}")
     m.serial_send("user\r")              # 串口那头停在 login: 上，先登录
@@ -2294,10 +2296,71 @@ def test_line_edit(m, elf):
     m.serial_wait("login: ")
 
 
+def test_shell_language(m, elf):
+    """shell 的语法：引号、变量、$?、$((…))、; && ||、if/elif/else、while、for、test 和 [ ]、没写完时 > 接着读、带参数的脚本、Ctrl+C 跳出循环、语法错误"""
+    rows = lambda: [r for r in console(m) if r]
+
+    def run_all(cases):
+        for command, expected in cases:
+            out = run_command(m, command) if len(command) + 2 <= 80 else run_long(m, command)
+            check(out == expected, f"{command} 应输出 {expected!r}，实际是 {out!r}")
+
+    run_all([
+        ("x=hello", []), ("echo $x ${x}! \"$x  world\" '$x' \\$x", ["hello hello! hello  world $x $x"]),
+        ("echo 'a  b'   c\\ d", ["a  b c d"]), ("echo $nosuch end", ["end"]), ('echo "" end', [" end"]),
+        ("echo a # a comment", ["a"]), ("echo a#b", ["a#b"]),
+        ("false; echo $?", ["1"]), ("true; echo $?", ["0"]), ("nosuch; echo $?", ["sh: nosuch: not found", "127"]),
+        ("echo $((1+2*3)) $(( (2+3) % 4 )) $((-7/2))", ["7 1 -3"]), ("echo $((10-2-3)) $((20/2/5))", ["5 2"]), ("i=5; echo $((i*2-1)) $(($i>4)) $((i==4))", ["9 1 0"]),
+        ("echo $((7/0)); echo $?", ["sh: division by zero", "1"]), ("echo ${x", ["sh: bad substitution"]),
+        ("true && echo yes; false && echo no; false || echo or; true || echo not", ["yes", "or"]),
+        ("echo a; echo b", ["a", "b"]),
+        ("if true; then echo T; else echo F; fi", ["T"]),
+        ("if false; then echo T; elif true; then echo E; else echo F; fi", ["E"]),
+        ("if [ 3 -lt 5 ]; then echo lt; fi; [ abc = abc ]; echo $?", ["lt", "0"]),
+        ("test -d /tmp && echo dir; [ -f /tmp ] || echo notfile; [ ! -e /nothing ] && echo none", ["dir", "notfile", "none"]),
+        ("[ -z '' ] && [ -n x ] && [ x != y ] && echo strings", ["strings"]),
+        ("[ 1 -eq x ]; echo $?", ["sh: test: integer expected", "2"]),
+        ("i=0; while [ $i -lt 3 ]; do echo $i; i=$((i+1)); done", ["0", "1", "2"]),
+        ("for w in a 'b c' $x; do echo [$w]; done", ["[a]", "[b c]", "[hello]"]),
+        ("for i in 1 2 3; do echo $i; done | wc", ["3 3 6"]),
+        ("echo hi>/tmp/rx; cat</tmp/rx; rm /tmp/rx", ["hi"]),
+        ("fi", ["sh: syntax error near fi"]), ("if true; then echo x; done", ["sh: syntax error near done"]),
+        ("echo a ;; echo b", ["sh: syntax error near ;"]), ("echo $?", ["2"]),
+    ])
+    # 没写完：if 没有 fi、末尾是 |，接着打 > 读下一行
+    wait_prompt(m)
+    for line, prompt in [("if true", "> "), ("then echo multi", "> "), ("fi", None)]:
+        type_text(m, line + "\n")
+        if prompt:
+            m.wait_for(lambda mm: rows()[-1:] == [prompt.strip()], timeout=3, what=f"{line!r} 还没写完，打出 > 接着读")
+    m.wait_for(lambda mm: rows()[-5:] == ["$ if true", "> then echo multi", "> fi", "multi", "$"], timeout=3, what="三行合成一条 if")
+    type_text(m, "echo pipe |\n")
+    m.wait_for(lambda mm: rows()[-1:] == [">"], timeout=3, what="末尾是 |，接着读")
+    type_text(m, "wc\n")
+    m.wait_for(lambda mm: rows()[-2:] == ["1 1 5", "$"], timeout=3, what="接上的 wc 数出 echo 的输出")
+
+    # 脚本：$1 $2 $3、$#、for、$((…))、if 里的 exit
+    lines = ["#!/bin/sh", "n=0", "for a in $1 $2 $3; do n=$((n+a)); done", "echo sum=$n args=$# name=$0", "if [ $n -gt 5 ]", "then", "  exit 3", "fi"]
+    for i, line in enumerate(lines):
+        check(run_command(m, f"echo '{line}' {'>' if i == 0 else '>>'} /tmp/sum") == [], f"写脚本：{line}")
+    out = run_command(m, "sh /tmp/sum 1 2 3")
+    check(out == ["sum=6 args=3 name=/tmp/sum"] and message_row(m).strip().endswith("exited with code 3"),
+          f"脚本的参数、for、$((…))，if 跨几行，exit 3：{out!r} {message_row(m)!r}")
+    run_all([("chmod 755 /tmp/sum", []), ("/tmp/sum 1 1", ["sum=2 args=2 name=/tmp/sum"]), ("echo $?", ["0"]), ("rm /tmp/sum", [])])
+
+    # Ctrl+C 跳出循环：结束正在运行的 sleep，循环也不再往下转
+    wait_prompt(m)
+    type_text(m, "while true; do sleep 1; done\n")
+    time.sleep(1.5)
+    m.sendkeys(["ctrl-c"])
+    m.wait_for(lambda mm: rows()[-2:] == ["^C", "$"], timeout=3, what="Ctrl+C 跳出 while 循环，回到提示符")
+    run_all([("echo $?", ["130"])])
+
+
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_console_scroll,
                 test_idle_in_hlt, test_demand_paging, test_fork_address_spaces, test_syscall_gate, test_user_setup, test_user_task,
-                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep, test_cache, test_ln_mv, test_script, test_shell_input, test_script_edge_cases, test_clock, test_stderr, test_nice_shell, test_users, test_login, test_serial, test_mount, test_demand_loading, test_raw_tty, test_line_edit]
+                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep, test_cache, test_ln_mv, test_script, test_shell_input, test_script_edge_cases, test_clock, test_stderr, test_nice_shell, test_users, test_login, test_serial, test_mount, test_demand_loading, test_raw_tty, test_line_edit, test_shell_language]
 SEPARATE_TESTS = [test_syscalls, test_page_alloc, test_double_free, test_hd_rw, test_early_key, test_keyboard_edge_cases, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,
                   test_big_kernel, test_user_write_kernel, test_user_privileged,
