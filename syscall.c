@@ -172,6 +172,7 @@ static int32_t sys_fork(uint32_t a, uint32_t b, uint32_t c, struct interrupt_fra
     (void)a, (void)b, (void)c;
     if (!from_user_mode(frame))
         return -1;
+    mem_reclaim(SWAP_LOW * 2);      /* fork 要分几页（内核栈、页目录、页表），那时关着中断不能换页：先腾出来 */
     fs_lock();                      /* 子进程也引用程序文件的 i 节点：改 i 节点表要拿着锁 */
     int pid = sched_fork(frame);
     fs_unlock();
@@ -197,6 +198,7 @@ static int32_t sys_exec(uint32_t path, uint32_t argv, uint32_t c, struct interru
 
     if (!from_user_mode(frame) || get_path(name, path, 1) < 0)
         return -1;
+    mem_reclaim(SWAP_LOW * 2);      /* 新的页目录、页表、栈顶那一页 */
     fs_lock();                      /* 装入程序时一直读文件，不能让别人在中途改它 */
     int ret = do_exec(name, argv, frame);
     fs_unlock();
@@ -257,6 +259,7 @@ static int32_t sys_pipe(uint32_t fds, uint32_t b, uint32_t c, struct interrupt_f
     struct file **files = current_files();
     struct file *r, *w;
 
+    mem_reclaim(SWAP_LOW * 2);      /* 管道的缓冲区要一页，分的时候关着中断 */
     if (from_user_mode(frame) && !user_write_ok(fds, 8))
         return -1;
     int rfd = free_fd();

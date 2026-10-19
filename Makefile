@@ -27,7 +27,7 @@ KERNEL_CFLAGS += -DSELFTEST=SELFTEST_$(SELFTEST)
 endif
 
 KERNEL_OBJS := $(addprefix $(BUILD)/, entry.o isr.o kernel.o vga.o gdt.o \
-	interrupt.o paging.o mem.o hd.o buffer.o fs.o file.o pipe.o exec.o tty.o serial.o timer.o sched.o syscall.o keyboard.o selftest.o user.o string.o)
+	interrupt.o paging.o mem.o swap.o hd.o buffer.o fs.o file.o pipe.o exec.o tty.o serial.o timer.o sched.o syscall.o keyboard.o selftest.o user.o string.o)
 KERNEL_HEADERS := kernel.h io.h syscall.h selftest.h fs.h
 
 .PHONY: all run test clean
@@ -99,6 +99,7 @@ $(BUILD)/hd.img: tools/mkfs.py tools/mkbig.py tools/mkshadow.py $(ROOTFS_FILES) 
 		--blk /dev/hda=3,0 --blk /dev/hdb=3,5 \
 		--own /tmp=0,0,1777 --own /home/user=100,100,755 --own /etc/shadow=0,0,600 \
 		--own /bin/su=0,0,4755 --own /bin/passwd=0,0,4755
+	dd if=/dev/zero bs=1024 count=4096 >> $@ 2>/dev/null   # 文件系统后面接 4 MB：交换区
 
 # 运行它的终端窗口接在串口上：串口那头是 login，可以在这里登录（user/user 或 root/root）。signal=off：在这里按 Ctrl+C 交给客户机，不结束 QEMU。
 # 第二块硬盘：接在主 IDE 通道的从盘上（hdb），1 MB 的 Minix 文件系统，内容是 rootfs-hdb/。mount /dev/hdb /mnt 挂上它。

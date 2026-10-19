@@ -12,6 +12,7 @@
  * 读完都睡 3 秒（好让别人看第 3 行的空闲页数）；late 先睡 1 秒再读遍 16 页。每页的记号都对，以 0 退出，打印 lazy ok。
  * 睡之前还往 .data 里的 mine 写下自己的任务号，睡醒再看：可写的页每个进程一份，别的 check 写不到这里。
  * 程序的页是用到才从硬盘读进来的：只读第一页，就只多用了一页；两个 check 一起运行，只读的页共用。
+ * check swap n：交换的自检用：物理页不够时，程序自己的页被挤出去再读回来，内容都对，以 0 退出，打印 swap ok。
  */
 #include "ulib.h"
 
@@ -180,6 +181,27 @@ int main(int argc, char **argv)
     }
     if (argc == 2 && strcmp(argv[1], "malloc") == 0)
         return check_malloc() ? 0 : 1;
+    if (argc == 3 && strcmp(argv[1], "swap") == 0) {
+        /*
+         * 交换的自检用：先写 .data 的 mine、.bss 的 zeros，读遍只读表；再把堆挪大 n 页写满、读一遍，
+         * 物理页不够时前面这些页多半被挤出去了。再看一遍：只读表从程序文件读回来，写过的那两页从交换区读回来。
+         */
+        uint32_t n;
+        if (parse_uint(argv[2], 10, 1000, &n) < 0)
+            return 2;
+        mine = getpid();
+        zeros[4000] = 7;
+        int ok = read_table(16);
+        uint32_t base = brk(0);
+        ok &= brk(base + n * 4096) == base + n * 4096;
+        for (uint32_t i = 0; ok && i < n; i++)
+            ((volatile uint32_t *)(base + i * 4096))[0] = i + 1;
+        for (uint32_t i = 0; ok && i < n; i++)
+            ok &= ((volatile uint32_t *)(base + i * 4096))[0] == i + 1;
+        ok &= read_table(16) && mine == getpid() && zeros[4000] == 7 && initialized == 12345;
+        print(ok ? "swap ok\n" : "swap bad\n");
+        return ok ? 0 : 1;
+    }
     if (argc == 2 && strcmp(argv[1], "crash") == 0) {
         *(volatile char *)main = 0;
         print("x\n");

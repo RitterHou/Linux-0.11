@@ -33,6 +33,7 @@
 
 #define USER_PDE      (USER_LOW >> 22)    /* 用户空间是第 256 个页目录项 */
 #define PAGE_COW      0x200         /* 页表项第 9 位，CPU 不用：标记 fork 时去掉了可写位、等着写时复制的页 */
+#define PAGE_DIRTY    0x040         /* 脏位：CPU 写这一页时置上。内核按物理地址往页里写东西时自己置上，交换时看它（见 swap.c） */
 
 #define ENTRIES       1024          /* 每张页目录或页表有 1024 项，每项 4 字节 */
 #define IDENTITY_MB   16
@@ -138,7 +139,7 @@ static uint32_t *current_page_dir(void)
 }
 
 /* 重新装入 CR3，丢掉 TLB 里缓存的翻译。改了存在的页表项之后要这样做；386 没有只刷一页的 invlpg。 */
-static void flush_tlb(void)
+void flush_tlb(void)
 {
     __asm__ volatile("movl %0, %%cr3" : : "r"(current_page_dir()) : "memory");
 }
@@ -184,6 +185,9 @@ uint32_t copy_page_dir(uint32_t src)
                     from[i] = (from[i] & ~PAGE_WRITE) | PAGE_COW;
                 to[i] = from[i];
                 page_add_ref(from[i] & ~0xFFFu);
+            } else if (from[i]) {   /* 换出去了：子进程的页表项也指向那个交换页，谁先读回来谁拿到自己的一份 */
+                to[i] = from[i];
+                swap_dup(from[i]);
             }
         }
         ((uint32_t *)dir)[USER_PDE] = table | PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
@@ -209,7 +213,7 @@ static int copy_on_write(uint32_t *pte)
             return 0;
         for (int i = 0; i < PAGE_SIZE / 4; i++)
             ((uint32_t *)page)[i] = ((uint32_t *)old)[i];
-        *pte = page | PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
+        *pte = page | PAGE_PRESENT | PAGE_WRITE | PAGE_USER | PAGE_DIRTY;   /* 按物理地址复制进去的：CPU 没置脏位 */
         free_page(old);
     }
     flush_tlb();
@@ -290,6 +294,11 @@ int handle_page_fault(uint32_t addr, uint32_t error_code, int can_sleep)
     if (current_page_dir() == page_directory)   /* 内核的页目录里没有用户空间，也不能给它建 */
         return 0;
 
+    if (can_sleep && swap_total && free_page_count() < SWAP_LOW) {
+        __asm__ volatile("sti");    /* 物理页快用完了：先换出去几页（要写硬盘，会睡） */
+        mem_reclaim(SWAP_LOW * 2);
+        __asm__ volatile("cli");
+    }
     uint32_t *pde = &current_page_dir()[addr >> 22];   /* 当前任务自己的用户空间 */
     if (error_code & PF_PROTECTION) {
         /* 页存在却出错：只有“写一个打了写时复制记号的页”能处理，那是 fork 留下的共享页 */
@@ -305,6 +314,26 @@ int handle_page_fault(uint32_t addr, uint32_t error_code, int can_sleep)
      * 页不存在：程序和堆（brk 以下）、栈区（顶端 64 KB）缺的页都补上；两者之间是还没要来的地方，不补，
      * 用到那里就是程序的错。brk 不一定对齐到页：brk 所在的那一页也算堆。
      */
+    uint32_t *slot = (*pde & PAGE_PRESENT) ? &((uint32_t *)(*pde & ~0xFFFu))[(addr >> 12) & (ENTRIES - 1)] : 0;
+    if (slot && *slot && !(*slot & PAGE_PRESENT)) {
+        /* 换出去了的页：从交换区读回来。换出去的都是这个进程自己的、写过的页，读回来就是可写的、脏的 */
+        if (!can_sleep)
+            return 0;
+        uint32_t entry = *slot, page = get_free_page();
+        if (page == 0)
+            return 0;
+        __asm__ volatile("sti");
+        int ok = swap_in(entry, page) == 0;
+        __asm__ volatile("cli");
+        if (!ok) {
+            free_page(page);
+            return 0;
+        }
+        *slot = page | PAGE_PRESENT | PAGE_WRITE | PAGE_USER | PAGE_DIRTY;
+        page_faults++;
+        mem_show();
+        return 1;
+    }
     if ((addr & ~(PAGE_SIZE - 1)) >= current_brk() && addr < STACK_LOW)
         return 0;
     if (addr < STACK_LOW) {
@@ -397,7 +426,7 @@ uint32_t map_user_page(uint32_t dir, uint32_t addr, int writable)
     uint32_t page = get_free_page();
     if (page == 0)
         return 0;
-    *pte = page | PAGE_PRESENT | PAGE_USER | (writable ? PAGE_WRITE : 0);
+    *pte = page | PAGE_PRESENT | PAGE_USER | PAGE_DIRTY | (writable ? PAGE_WRITE : 0);   /* exec 按物理地址往里写参数 */
     return page;
 }
 
@@ -422,9 +451,12 @@ void free_page_dir(uint32_t dir)
 
     if (pde & PAGE_PRESENT) {
         uint32_t *table = (uint32_t *)(pde & ~0xFFFu);
-        for (int i = 0; i < ENTRIES; i++)
+        for (int i = 0; i < ENTRIES; i++) {
             if (table[i] & PAGE_PRESENT)
                 free_page(table[i] & ~0xFFFu);
+            else if (table[i])
+                swap_free(table[i]);        /* 换出去了的页：交换页空出来 */
+        }
         free_page(pde & ~0xFFFu);
     }
     free_page(dir);

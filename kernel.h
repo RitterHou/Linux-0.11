@@ -85,6 +85,17 @@ int copy_string(char *dst, uint32_t src, uint32_t max, int from_user);
 #define PATH_MAX 128                /* 路径最长 127 个字节（相对路径接上当前目录之后） */
 int handle_page_fault(uint32_t addr, uint32_t error_code, int can_sleep);
 uint32_t user_page_phys(uint32_t dir, uint32_t addr);
+void flush_tlb(void);
+
+/* swap.c：交换 */
+#define SWAP_LOW 16                 /* 空闲页少于这么多就先换出去几页，留着给不能睡的地方用 */
+extern uint32_t swap_total, swap_used;
+void swap_init(uint32_t start, uint32_t end);
+int swap_in(uint32_t entry, uint32_t page);
+void swap_dup(uint32_t entry);
+void swap_free(uint32_t entry);
+void mem_reclaim(uint32_t want);
+uint32_t *sched_user_table(int n, int *is_current);   /* 在 sched.c：第 n 个任务的用户页表，给交换的时钟用 */
 uint32_t kernel_page_dir(void);
 uint32_t new_page_dir(void);
 void free_page_dir(uint32_t dir);

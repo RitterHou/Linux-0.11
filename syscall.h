@@ -70,6 +70,8 @@ struct fsinfo {
     uint32_t inodes, free_inodes;
     uint32_t dirty, buffers;        /* 缓冲区缓存：有几个缓冲区改过了还没写回硬盘，一共几个 */
     uint32_t written;               /* 开机以来写回硬盘的块数 */
+    uint32_t swap_total, swap_used; /* 交换区一共几页、用了几页 */
+    uint32_t free_pages;            /* 空闲的物理页 */
 };
 
 /* stat 写回的内容：取自磁盘上的 i 节点 */

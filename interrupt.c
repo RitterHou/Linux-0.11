@@ -348,6 +348,12 @@ void interrupt_dispatch(struct interrupt_frame *frame)
      * 任务可能在 dispatch() 里被切走过，回到这里时已经过了一段时间，期间可能收到了信号；
      * frame 是它自己内核栈上的，看的是它自己被打断的地方。
      */
-    if (from_user_mode(frame))
+    if (from_user_mode(frame)) {
+        /*
+         * 马上就回用户态了，这里开着中断也无妨：处理信号要往用户栈上写，那一页可能换出去了，读回来要睡。
+         * 定时器、键盘这些走中断门进来，此刻是关着的。
+         */
+        __asm__ volatile("sti");
         handle_signals(frame);
+    }
 }

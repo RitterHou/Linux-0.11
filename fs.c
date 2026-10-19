@@ -94,6 +94,7 @@ int fs_mount(void)
     }
     root_state = 1;
     s->on[0] = '/';
+    swap_init(s->d.nzones * 2, hd_sectors[0]);  /* 文件系统后面剩下的扇区是交换区（见 swap.c） */
 
     struct text_line line;
     line_init(&line);
@@ -972,6 +973,9 @@ int fs_info(uint32_t n, struct fsinfo *info)
     if (count_free(s->dev, 2 + s->d.imap_blocks, s->d.zmap_blocks, info->blocks, &info->free_blocks) < 0 ||
         count_free(s->dev, 2, s->d.imap_blocks, info->inodes, &info->free_inodes) < 0)
         return -1;
+    info->swap_total = swap_total;
+    info->swap_used = swap_used;
+    info->free_pages = free_page_count();
     info->dirty = buffer_dirty();
     info->buffers = NR_BUFFERS;
     info->written = buffer_writes;
