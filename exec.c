@@ -52,11 +52,11 @@ static int elf_ok(const struct elf_header *eh)
  * 不是脚本，interp 留空，返回 0；#! 后面没有解释器、第一行太长、参数放不下，返回 -1。
  * 解释器不是 / 开头的，从当前目录找起，和别的路径一样（Linux 0.11 的 namei() 也从 current->pwd 找起）。
  */
-static int script(const char *path, const struct minix_inode *ip, char *interp, char *args, uint32_t *used,
+static int script(const char *path, uint32_t dev, const struct minix_inode *ip, char *interp, char *args, uint32_t *used,
                   uint32_t *offsets, uint32_t *argc)
 {
     char line[PATH_MAX];
-    int32_t n = inode_read(ip, 0, line, sizeof(line) - 1);
+    int32_t n = inode_read(dev, ip, 0, line, sizeof(line) - 1);
 
     interp[0] = '\0';
     if (n < 2 || line[0] != '#' || line[1] != '!')
@@ -130,7 +130,7 @@ static int script(const char *path, const struct minix_inode *ip, char *interp, 
 }
 
 /* 把一个要装入的段放进新的页目录 dir。 */
-static int load_segment(uint32_t dir, const struct minix_inode *ip, const struct elf_phdr *ph)
+static int load_segment(uint32_t dir, uint32_t dev, const struct minix_inode *ip, const struct elf_phdr *ph)
 {
     uint32_t end = ph->vaddr + ph->memsz;
 
@@ -146,7 +146,7 @@ static int load_segment(uint32_t dir, const struct minix_inode *ip, const struct
         /* 这一页里属于文件内容的部分：[lo, hi)；其余是 .bss 或页内的空隙，分页时已经清零 */
         uint32_t lo = va > ph->vaddr ? va : ph->vaddr;
         uint32_t hi = va + PAGE_SIZE < ph->vaddr + ph->filesz ? va + PAGE_SIZE : ph->vaddr + ph->filesz;
-        if (lo < hi && inode_read(ip, ph->offset + (lo - ph->vaddr), (void *)(page + (lo - va)), hi - lo) !=
+        if (lo < hi && inode_read(dev, ip, ph->offset + (lo - ph->vaddr), (void *)(page + (lo - va)), hi - lo) !=
                            (int32_t)(hi - lo))
             return -1;
     }
@@ -177,26 +177,26 @@ int do_exec(const char *path, uint32_t user_argv, struct interrupt_frame *frame)
     }
 
     /* 2. 文件：必须是普通文件，有执行权限，是 ELF 可执行文件；#! 开头的脚本换成它的解释器 */
-    uint32_t ino;
+    uint32_t dev, ino;
     struct minix_inode ip;
     struct elf_header eh;
     struct elf_phdr ph[MAX_PHDRS];
     char interp[PATH_MAX];
     const char *name = path;        /* ps 里显示的名字：脚本显示脚本自己的名字 */
-    if (namei(path, &ino, &ip) < 0 || (ip.mode & S_IFMT) != S_IFREG || !permission(&ip, MAY_EXEC))
+    if (namei(path, &dev, &ino, &ip) < 0 || (ip.mode & S_IFMT) != S_IFREG || !permission(&ip, MAY_EXEC))
         return -1;
-    if (script(path, &ip, interp, args, &used, offsets, &argc) < 0)
+    if (script(path, dev, &ip, interp, args, &used, offsets, &argc) < 0)
         return -1;
     if (interp[0]) {                /* 脚本：从此 ip 是解释器的。脚本自己的 setuid 位不管用，只看解释器的，和 Linux 一样 */
         path = interp;
-        if (namei(path, &ino, &ip) < 0 || (ip.mode & S_IFMT) != S_IFREG || !permission(&ip, MAY_EXEC))
+        if (namei(path, &dev, &ino, &ip) < 0 || (ip.mode & S_IFMT) != S_IFREG || !permission(&ip, MAY_EXEC))
             return -1;
     }
-    if (inode_read(&ip, 0, &eh, sizeof(eh)) != sizeof(eh) || !elf_ok(&eh) ||
+    if (inode_read(dev, &ip, 0, &eh, sizeof(eh)) != sizeof(eh) || !elf_ok(&eh) ||
         eh.entry < USER_LOW || eh.entry >= STACK_LOW)
         return -1;
     uint32_t ph_bytes = eh.phnum * sizeof(ph[0]);
-    if (inode_read(&ip, eh.phoff, ph, ph_bytes) != (int32_t)ph_bytes)
+    if (inode_read(dev, &ip, eh.phoff, ph, ph_bytes) != (int32_t)ph_bytes)
         return -1;
 
     /* 3. 新的地址空间 */
@@ -207,7 +207,7 @@ int do_exec(const char *path, uint32_t user_argv, struct interrupt_frame *frame)
     for (uint32_t i = 0; i < eh.phnum; i++) {
         if (ph[i].type != PT_LOAD || ph[i].memsz == 0)
             continue;
-        if (load_segment(dir, &ip, &ph[i]) < 0)
+        if (load_segment(dir, dev, &ip, &ph[i]) < 0)
             goto fail;
         if (ph[i].vaddr + ph[i].memsz > end)
             end = ph[i].vaddr + ph[i].memsz;

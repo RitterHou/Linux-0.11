@@ -177,11 +177,11 @@ int do_exec(const char *path, uint32_t user_argv, struct interrupt_frame *frame)
 void syscall_dispatch(struct interrupt_frame *frame);
 
 /* hd.c：硬盘 */
-extern uint32_t hd_sectors, hd_requests;
+extern uint32_t hd_sectors[2], hd_requests;
 void hd_init(void);
 void hd_handle(void);
-int hd_read(uint32_t lba, void *buf);
-int hd_write(uint32_t lba, const void *buf);
+int hd_read(int drive, uint32_t lba, void *buf);
+int hd_write(int drive, uint32_t lba, const void *buf);
 
 /* tty.c：终端 */
 #define NR_TTYS     2

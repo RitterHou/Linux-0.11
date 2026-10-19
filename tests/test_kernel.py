@@ -49,6 +49,10 @@ class Machine:
         # snapshot=False 时写进镜像本身：只用在复制出来的镜像上，事后读它核对
         hd = os.path.join(os.path.dirname(image), "hd.img")
         disk = ["-drive", f"file={hd},format=raw,if=ide,index=0" + (",snapshot=on" if snapshot else "")] if os.path.exists(hd) else []
+        # 第二块盘 hdb.img 接在从盘上，也一样
+        hdb = os.path.join(os.path.dirname(image), "hdb.img")
+        if os.path.exists(hdb):
+            disk += ["-drive", f"file={hdb},format=raw,if=ide,index=1" + (",snapshot=on" if snapshot else "")]
         with open(self.log_path, "w") as log:
             self.proc = subprocess.Popen(
                 [QEMU, "-machine", "pc", "-accel", "tcg", "-m", "16M",
@@ -1315,12 +1319,13 @@ def test_sync(_m, _elf):
 def test_sync_to_disk(_m, _elf):
     """sync 真的写到了硬盘上：在镜像的副本上运行，sync 之后直接杀掉 QEMU，从宿主机读镜像，文件内容、目录、空闲块数都对"""
     d = tempfile.mkdtemp(prefix="kernel-disk-")
-    for f in ("floppy.img", "hd.img"):
+    for f in ("floppy.img", "hd.img", "hdb.img"):
         shutil.copy(os.path.join(BUILD, f), d)
     text = "persisted on disk"
     with Machine(os.path.join(d, "floppy.img"), snapshot=False) as m:
         m.wait_for(boot_ready, what="开机")
-        for command in ("mkdir /tmp/keep", f"echo {text} > /tmp/keep/a", "cat /hello.txt /big > /tmp/keep/big", "sync"):
+        for command in ("mkdir /tmp/keep", f"echo {text} > /tmp/keep/a", "cat /hello.txt /big > /tmp/keep/big",
+                        "mount /dev/hdb /mnt", "echo on hdb > /mnt/b", "sync"):
             check(run_command(m, command) == [], f"{command} 不打印东西")
         used = run_command(m, "df")[0]
         m.proc.kill()               # 不让 QEMU 好好退出、也不让 init 再 sync：镜像里有的，就是 sync 写下去的
@@ -1331,7 +1336,10 @@ def test_sync_to_disk(_m, _elf):
     want = img.read("/hello.txt") + img.read("/big")
     check(big is not None and len(big) == len(want) and big == want,
           f"镜像里 /tmp/keep/big（用到二级间接块）和 /hello.txt 加 /big 逐字节一样：{None if big is None else len(big)} 字节，应为 {len(want)}")
-    g = re.fullmatch(r"blocks: (\d+) used, (\d+) free; inodes: (\d+) used, (\d+) free", used)
+    hdb = MinixImage(os.path.join(d, "hdb.img"))
+    check(hdb.read("/b") == b"on hdb\n" and hdb.read("/readme") is not None and img.read("/b") is None,
+          f"写进 /mnt/b 的内容在 hdb 的镜像里，不在 hda 上：{hdb.read('/b')!r}")
+    g = re.fullmatch(r"/: blocks: (\d+) used, (\d+) free; inodes: (\d+) used, (\d+) free", used)
     check(g and int(g.group(2)) == img.free_blocks() and int(g.group(4)) == img.free_inodes(),
           f"镜像里的两张位图和 df 说的空闲块数、空闲 i 节点数一样：df {used!r}，镜像 {img.free_blocks()} 块、{img.free_inodes()} 个 i 节点")
     shutil.rmtree(d)
@@ -1411,10 +1419,10 @@ def test_shell(m, elf):
     check(out == ["Hello from the Minix file system on hda!"], f"cat 应打印 /hello.txt：{out!r}")
     out = run_command(m, "help")
     progs = [p for p in bin_programs() if p != "sh"]
-    listed = out[0].split()[1:] + out[1].split()[1:] + out[2].split()[1:] if len(out) == 5 else []
-    check(len(out) == 5 and out[0].startswith("files: ") and out[1].startswith("tasks: ") and out[2].startswith("users: ") and
-          sorted(listed) == progs and all(len(r) < 80 for r in out),
-          f"help 应是 5 行，每行都放得下（不折行），头三行合起来列出 /bin 里除了 sh 的每个程序 {progs}：{out!r}")
+    heads = ["files: ", "disks: ", "tasks: ", "users: "]
+    listed = [p for r in out[:4] for p in r.split()[1:]] if len(out) == 6 else []
+    check(len(out) == 6 and all(r.startswith(h) for r, h in zip(out, heads)) and sorted(listed) == progs and all(len(r) < 80 for r in out),
+          f"help 应是 6 行，每行都放得下（不折行），头四行合起来列出 /bin 里除了 sh 的每个程序 {progs}：{out!r}")
     free_before = m.screen(4)[3].split("/")[0]
     check(run_command(m, "nosuch") == ["sh: nosuch: not found"], "找不到的命令应报告 not found")
     check(run_command(m, "check") == ["check ok"], "check 应通过")
@@ -1457,7 +1465,7 @@ def test_shell(m, elf):
                what=f"管道和命令都结束后空闲页回到 {free_before}")
 
     df = run_command(m, "df")
-    check(len(df) == 2 and df[0].startswith("blocks: ") and df[1].startswith("cache: "), f"df 的输出不对：{df!r}")
+    check(len(df) == 2 and df[0].startswith("/: blocks: ") and df[1].startswith("cache: "), f"df 的输出不对：{df!r}")
     df = df[0]                      # 第二行是缓冲区缓存的数字，随时在变
     for command, expected in [("echo hello > /tmp/a", []), ("echo world >> /tmp/a", []), ("cat /tmp/a", ["hello", "world"]),
                               ("wc < /tmp/a", ["2 2 12"]), ("mkdir /tmp/d", []), ("echo x > /tmp/d/f", []),
@@ -1507,7 +1515,9 @@ def test_cwd(m, elf):
     run_command(m, "cd /etc")
     out = run_command(m, "ls")
     check(names(out) == [".", "..", "group", "issue", "passwd", "shadow"], f"ls 不带参数应列出当前目录 /etc：{out!r}")
-    check(names(run_command(m, "ls ..")) == names(run_command(m, "ls /")), "ls .. 应与 ls / 相同")
+    # 根目录有 10 项，加上命令和提示符就比窗口高了：比 wc 的结果和其中一项
+    check(run_command(m, "ls .. | wc") == run_command(m, "ls / | wc") and run_command(m, "ls .. | grep hello") == run_command(m, "ls / | grep hello"),
+          "ls .. 应与 ls / 相同")
     wait_prompt(m)
     type_text(m, "exit\n")
     m.wait_for(lambda mm: "shell on hda: try help, ls /bin, cat /hello.txt, ps" in console(mm)[-2:], timeout=5,
@@ -1573,8 +1583,8 @@ def test_sort(m, elf):
     free_before = m.screen(4)[3].split("/")[0]
     check(run_command(m, "cat /hello.txt /etc/issue | sort") == ["Hello from the Minix file system on hda!", "Linux 0.11 learning kernel"],
           "两行按字节排好")
-    lines = run_command(m, "ls /")                 # sort 比较整行：类型、大小、i 节点号、名字（/bin 太长，窗口放不下）
-    out = run_command(m, "ls / | sort -r")
+    lines = run_command(m, "ls /etc")              # sort 比较整行：类型、大小、i 节点号、名字（/bin 和 / 太长，窗口放不下）
+    out = run_command(m, "ls /etc | sort -r")
     check(out == sorted(lines, reverse=True), f"sort -r 把整行按字节倒着排：{out!r}")
     check(run_command(m, "sort /nothing") == ["sort: /nothing: cannot open"], "打不开的文件要报错")
     wait_prompt(m)
@@ -1616,7 +1626,7 @@ def test_sleep(m, elf):
 def test_cache(m, elf):
     """缓冲区缓存：写文件后 df 显示脏块，sync 之前一块也不写盘；不 sync，init 每隔大约 5 秒也写回，写回的正好是那些块"""
     def df():
-        out = run_command(m, "df")[1]
+        out = run_command(m, "df")[-1]
         g = re.fullmatch(r"cache: (\d+) of 16 buffers dirty; (\d+) blocks written since boot", out)
         check(g, f"df 的第二行：{out!r}")
         return int(g.group(1)), int(g.group(2))
@@ -1812,8 +1822,8 @@ def test_clock(m, elf):
     check(len(out) == 1 and out[0].endswith(" UTC"), f"date 的输出：{out!r}")
     shown = datetime.datetime.strptime(out[0][:-4], "%Y-%m-%d %H:%M:%S")
     check(abs((shown - utc_now()).total_seconds()) <= 5, f"date 的时间 {shown} 应和宿主机的 UTC 时间 {utc_now()} 差不到 5 秒")
-    line = re.compile(r"([-dc])[-r][-w][-xsS][-r][-w][-xsS][-r][-w][-xtT] +\d+ +0 +0 +\d+ (\d{4}-\d\d-\d\d \d\d:\d\d) (\S+)")
-    for row in run_command(m, "ls -l /"):
+    line = re.compile(r"([-dcb])[-r][-w][-xsS][-r][-w][-xsS][-r][-w][-xtT] +\d+ +0 +0 +\d+ (\d{4}-\d\d-\d\d \d\d:\d\d) (\S+)")
+    for row in run_command(m, "ls -l /etc") + run_command(m, "ls -l /dev"):    # / 有 10 项，窗口放不下
         check(line.fullmatch(row), f"ls -l 的格式：类型和权限、链接数、主人、组、大小、修改时间、名字：{row!r}")
     check(run_command(m, "ls -l /bin | grep sh")[0].startswith("-rwxr-xr-x  1    0    0 "), "/bin 里的程序有执行权限")
     check(run_command(m, "ls -l /dev | grep tty0")[0].startswith("crw-rw-rw-  1"), "设备文件")
@@ -1888,7 +1898,7 @@ def test_nice_shell(m, elf):
 
 def test_users(m, elf):
     """用户：id；/tmp 有粘滞位、/home/user 是 user 的；chown 用名字或号码改主人和组，错误情况；ls -l 显示 setuid、setgid、粘滞位"""
-    entry = lambda path, name: next((r for r in run_command(m, f"ls -l {path}") if r.split()[-1] == name), "")
+    entry = lambda path, name: next((r for r in run_command(m, f"ls -l {path} | grep {name}") if r.split()[-1] == name), "")
     check(run_command(m, "id") == ["uid=0(root) gid=0(root)"], "shell 是 root 运行的")
     check(entry("/", "tmp").startswith("drwxrwxrwt "), f"/tmp 谁都能写，有粘滞位：{entry('/', 'tmp')!r}")
     check(entry("/home", "user").split()[:4] == ["drwxr-xr-x", "2", "100", "100"], f"/home/user 是 user（100）的：{entry('/home', 'user')!r}")
@@ -2052,10 +2062,62 @@ def test_serial(m, elf):
     check(out == "\r\nlogin incorrect\r\nlogin: ", f"密码不对：{out!r}")
 
 
+def test_mount(m, elf):
+    """第二块盘：挂上 hdb 以后 /mnt 是它的根目录，/mnt/.. 回到 /；读写；df 每块盘一行；不能跨盘链接；开着文件卸不了；挂载点删不掉；卸了再挂内容还在；只有 root 能挂"""
+    names = lambda out: [r.split()[-1] for r in out]
+    for command, expected in [("mount", ["/dev/hda on /"]), ("ls /mnt", None), ("mount /dev/hdb /mnt", []),
+                              ("mount", ["/dev/hda on /", "/dev/hdb on /mnt"]), ("cat /mnt/readme", ["This file is on the second disk (hdb)."]),
+                              ("ls / | wc", None), ("cat /mnt/../hello.txt", ["Hello from the Minix file system on hda!"]),
+                              ("echo hi > /mnt/new", []), ("cat /mnt/new", ["hi"]), ("ln /mnt/new /tmp/x", ["ln: /tmp/x: cannot link"]),
+                              ("mv /mnt/new /tmp/x", ["mv: /tmp/x: cannot move"]),
+                              ("mount /dev/hdb /mnt", ["mount: /dev/hdb: cannot mount"]), ("mount /dev/hdb /tmp", ["mount: /dev/hdb: cannot mount"]),
+                              ("mount /dev/hda /tmp", ["mount: /dev/hda: cannot mount"]), ("mount /dev/tty0 /tmp", ["mount: /dev/tty0: cannot mount"]),
+                              ("mount /hello.txt /tmp", ["mount: /hello.txt: cannot mount"]), ("mount /dev/hdb /hello.txt", ["mount: /dev/hdb: cannot mount"]),
+                              ("mount /dev/hdb", ["usage: mount [device dir]"]), ("umount /", ["umount: /: cannot unmount"]),
+                              ("umount /dev/hda", ["umount: /dev/hda: cannot unmount"]), ("umount /tmp", ["umount: /tmp: cannot unmount"]),
+                              ("rmdir /mnt", ["rmdir: /mnt: cannot remove (not an empty directory?)"]), ("cat /dev/hdb", ["cat: /dev/hdb: cannot open"])]:
+        out = run_command(m, command)
+        if command == "ls /mnt":
+            check(names(out) == [".", ".."], f"挂上之前 /mnt 是一个空目录：{out!r}")
+        elif command == "ls / | wc":
+            root = out
+        else:
+            check(out == expected, f"{command} 应输出 {expected!r}，实际是 {out!r}")
+    check(run_command(m, "ls /mnt/.. | wc") == root, "/mnt/.. 是 / ：在挂上来的盘的根目录里查 ..，先回到挂载点")
+    rows = {r.split()[-1]: r.split() for r in run_command(m, "ls /mnt")}
+    check(rows["."][2] == "1" and rows["readme"][2] == "2" and rows[".."][2] == "1", f"/mnt 是 hdb 的根目录（1 号 i 节点），i 节点号是 hdb 上的：{rows!r}")
+    df = run_command(m, "df")
+    check(len(df) == 3 and df[0].startswith("/: ") and re.fullmatch(r"/mnt: blocks: \d+ used, \d+ free; inodes: 3 used, 125 free", df[1]),
+          f"df 每块盘一行，hdb 有 128 个 i 节点，用了 3 个（根目录、readme、new）：{df!r}")
+    check(entry_row(m, "/dev", "hdb").startswith("brw------- "), "/dev/hdb 是块设备，只有 root 能用")
+
+    out = run_command(m, "sleep 30 < /mnt/new &")
+    sleeper = out[0][1:-1]
+    check(run_command(m, "umount /mnt") == ["umount: /mnt: cannot unmount"], "/mnt/new 还开着：卸不了")
+    check(run_command(m, f"kill {sleeper}") == [], "结束开着它的 sleep")
+    m.wait_for(lambda mm: run_command(mm, "umount /mnt") == [], timeout=5, what="sleep 结束以后就能卸了")
+    for command, expected in [("mount", ["/dev/hda on /"]), ("cat /mnt/new", ["cat: /mnt/new: cannot open"]), ("umount /mnt", ["umount: /mnt: cannot unmount"]),
+                              ("mount /dev/hdb /mnt", []), ("cat /mnt/new", ["hi"]), ("rm /mnt/new", []), ("umount /dev/hdb", []),
+                              ("su user", None), ("mount /dev/hdb /mnt", ["mount: /dev/hdb: cannot mount"]), ("exit", [])]:
+        if expected is None:
+            wait_prompt(m)
+            type_text(m, command + "\n")
+            m.wait_for(lambda mm: [r for r in console(mm) if r][-1:] == ["$"] and "shell on hda: try help, ls /bin, cat /hello.txt, ps" in console(mm)[-2:],
+                       timeout=5, what="换成 user 的 shell")
+            continue
+        out = run_command(m, command)
+        check(out == expected, f"{command} 应输出 {expected!r}，实际是 {out!r}")
+    check(run_command(m, "mount") == ["/dev/hda on /"], "最后卸掉了")
+
+
+def entry_row(m, path, name):
+    return next((r for r in run_command(m, f"ls -l {path} | grep {name}") if r.split()[-1] == name), "")
+
+
 SHARED_TESTS = [test_boot_screen, test_kernel_in_memory, test_protected_mode, test_paging,
                 test_timer_rate, test_keyboard_echo, test_keyboard_shift, test_console_scroll,
                 test_idle_in_hlt, test_demand_paging, test_fork_address_spaces, test_syscall_gate, test_user_setup, test_user_task,
-                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep, test_cache, test_ln_mv, test_script, test_shell_input, test_script_edge_cases, test_clock, test_stderr, test_nice_shell, test_users, test_login, test_serial]
+                test_tasks_alternate, test_shell, test_cwd, test_signals, test_sort, test_sleep, test_cache, test_ln_mv, test_script, test_shell_input, test_script_edge_cases, test_clock, test_stderr, test_nice_shell, test_users, test_login, test_serial, test_mount]
 SEPARATE_TESTS = [test_syscalls, test_page_alloc, test_double_free, test_hd_rw, test_early_key, test_keyboard_edge_cases, test_divide_error, test_bad_gate, test_register_dump, test_unmapped_read, test_null_write,
                   test_clobber_loader, test_other_segments,
                   test_big_kernel, test_user_write_kernel, test_user_privileged,

@@ -55,10 +55,14 @@
 #define SYS_SETGID 40               /* setgid(gid)：同上，组号 */
 #define SYS_CHOWN  41               /* chown(path, uid, gid)：改文件的主人和组，只有 root 能改 */
 #define SYS_IOCTL  42               /* ioctl(fd, cmd, arg)：取、设终端的工作方式（回显没有），输密码时关掉回显 */
-#define SYS_CALLS  43
+#define SYS_MOUNT  43               /* mount(dev, dir)：把块设备 dev 上的文件系统挂到目录 dir 上，只有 root 能挂 */
+#define SYS_UMOUNT 44               /* umount(path)：卸下一块盘，path 是块设备或者挂载点 */
+#define SYS_CALLS  45
 
 /* fsinfo 写回的内容 */
 struct fsinfo {
+    uint32_t dev;                   /* 设备号：0x300 是 hda，0x305 是 hdb */
+    char on[128];                   /* 挂在哪个目录上 */
     uint32_t blocks, free_blocks;   /* 数据块 */
     uint32_t inodes, free_inodes;
     uint32_t dirty, buffers;        /* 缓冲区缓存：有几个缓冲区改过了还没写回硬盘，一共几个 */
@@ -78,6 +82,7 @@ struct stat {
     uint32_t ino;
     uint16_t uid, gid;              /* 文件的主人和组 */
     uint32_t mtime;                 /* 最后一次修改的时间：1970 年以来的秒数 */
+    uint32_t dev;                   /* 在哪块盘上：i 节点号只在一块盘里不重复，比较是不是同一个文件要连设备号一起比 */
 };
 
 /*
@@ -241,9 +246,15 @@ static inline int32_t rmdir(const char *path)
     return syscall3(SYS_RMDIR, (uint32_t)path, 0, 0);
 }
 
+/* 根文件系统的块数等；fsinfo_at(n, &info) 取第 n 个挂着的文件系统的，没有第 n 个返回 -1 */
+static inline int32_t fsinfo_at(uint32_t n, struct fsinfo *info)
+{
+    return syscall3(SYS_FSINFO, (uint32_t)info, n, 0);
+}
+
 static inline int32_t fsinfo(struct fsinfo *info)
 {
-    return syscall3(SYS_FSINFO, (uint32_t)info, 0, 0);
+    return fsinfo_at(0, info);
 }
 
 static inline int32_t chdir(const char *path)
@@ -398,6 +409,16 @@ struct termios {
 static inline int32_t ioctl(int32_t fd, uint32_t cmd, void *arg)
 {
     return syscall3(SYS_IOCTL, (uint32_t)fd, cmd, (uint32_t)arg);
+}
+
+static inline int32_t mount(const char *dev, const char *dir)
+{
+    return syscall3(SYS_MOUNT, (uint32_t)dev, (uint32_t)dir, 0);
+}
+
+static inline int32_t umount(const char *path)
+{
+    return syscall3(SYS_UMOUNT, (uint32_t)path, 0, 0);
 }
 
 static inline int32_t chmod(const char *path, uint32_t mode)

@@ -205,14 +205,14 @@ static int32_t sys_stat(uint32_t path, uint32_t st, uint32_t c, struct interrupt
 {
     (void)c;
     char name[PATH_MAX];
-    uint32_t ino;
+    uint32_t dev, ino;
     struct minix_inode inode;
     int from_user = from_user_mode(frame);
 
     if (get_path(name, path, from_user) < 0 || (from_user && !user_write_ok(st, sizeof(struct stat))))
         return -1;
     fs_lock();
-    int found = namei(name, &ino, &inode);
+    int found = namei(name, &dev, &ino, &inode);
     fs_unlock();
     if (found < 0)
         return -1;
@@ -224,6 +224,7 @@ static int32_t sys_stat(uint32_t path, uint32_t st, uint32_t c, struct interrupt
     out->uid = inode.uid;
     out->gid = inode.gid;
     out->mtime = inode.time;
+    out->dev = dev;
     return 0;
 }
 
@@ -512,15 +513,15 @@ static int32_t sys_rmdir(uint32_t path, uint32_t b, uint32_t c, struct interrupt
 }
 
 /* fsinfo(&info)：数一数两张位图里还有几个 0。先取到内核里，再复制给用户。 */
-static int32_t sys_fsinfo(uint32_t info, uint32_t b, uint32_t c, struct interrupt_frame *frame)
+static int32_t sys_fsinfo(uint32_t info, uint32_t n, uint32_t c, struct interrupt_frame *frame)
 {
-    (void)b, (void)c;
+    (void)c;
     struct fsinfo tmp;
 
     if (from_user_mode(frame) && !user_write_ok(info, sizeof(tmp)))
         return -1;
     fs_lock();
-    int ok = fs_info(&tmp);
+    int ok = fs_info(n, &tmp);
     fs_unlock();
     if (ok < 0)
         return -1;
@@ -575,13 +576,13 @@ static int32_t sys_chdir(uint32_t path, uint32_t b, uint32_t c, struct interrupt
 {
     (void)b, (void)c;
     char name[PATH_MAX];
-    uint32_t ino;
+    uint32_t dev, ino;
     struct minix_inode d;
 
     if (get_path(name, path, from_user_mode(frame)) < 0)
         return -1;
     fs_lock();
-    int found = namei(name, &ino, &d);
+    int found = namei(name, &dev, &ino, &d);
     fs_unlock();
     if (found < 0 || (d.mode & S_IFMT) != S_IFDIR || !permission(&d, MAY_EXEC))
         return -1;                  /* 要能在里面查找才能进去 */
@@ -590,6 +591,30 @@ static int32_t sys_chdir(uint32_t path, uint32_t b, uint32_t c, struct interrupt
     for (int i = 0; i < PATH_MAX; i++)
         cwd[i] = name[i];
     return 0;
+}
+
+/* mount(dev, dir)：见 fs.c 的 fs_do_mount()。挂载点的路径规范化以后记下来，给 df 和 mount 显示。 */
+static int32_t sys_mount(uint32_t devpath, uint32_t dirpath, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)c;
+    char dev[PATH_MAX], dir[PATH_MAX], on[PATH_MAX];
+
+    if (get_path(dev, devpath, from_user_mode(frame)) < 0 || get_path(dir, dirpath, from_user_mode(frame)) < 0)
+        return -1;
+    for (int i = 0; i < PATH_MAX; i++)
+        on[i] = dir[i];
+    normalize(on);
+    fs_lock();
+    int ret = fs_do_mount(dev, dir, on);
+    fs_unlock();
+    return ret;
+}
+
+/* umount(path)：见 fs.c 的 fs_do_umount()。 */
+static int32_t sys_umount(uint32_t path, uint32_t b, uint32_t c, struct interrupt_frame *frame)
+{
+    (void)b, (void)c;
+    return path_op(path, frame, fs_do_umount);
 }
 
 /* getcwd(buf, size)：把当前目录写进 buf，返回长度；放不下返回 -1。 */
@@ -704,6 +729,8 @@ static const syscall_fn syscall_table[SYS_CALLS] = {
     [SYS_SETGID] = sys_setgid,
     [SYS_CHOWN]  = sys_chown,
     [SYS_IOCTL]  = sys_ioctl,
+    [SYS_MOUNT]  = sys_mount,
+    [SYS_UMOUNT] = sys_umount,
 };
 
 void syscall_dispatch(struct interrupt_frame *frame)

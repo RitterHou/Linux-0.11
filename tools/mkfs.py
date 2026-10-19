@@ -1,9 +1,13 @@
 """把一个目录打包成 Minix v1 文件系统镜像，格式与 Linux 0.11 使用的相同（include/linux/fs.h）。
 
-Usage: python3 tools/mkfs.py <image> <dir> [--chr 路径=主设备号,次设备号 ...] [--own 路径=主人,组,权限 ...]
+Usage: python3 tools/mkfs.py <image> <dir> [--blocks 块数] [--chr 路径=主设备号,次设备号 ...]
+                               [--blk 路径=主设备号,次设备号 ...] [--own 路径=主人,组,权限 ...]
+
+--blocks 镜像的总块数（每块 1 KB），默认 4096，也就是 4 MB。
 
 --chr 在镜像里加一个字符设备文件，例如 --chr /dev/tty0=4,0：普通用户在 macOS 上建不了设备文件，
 所以不放在目录里，由这里直接写进镜像。设备号存在 i 节点的第一个区块号里，与 Linux 0.11 相同。
+--blk 加一个块设备文件（硬盘），例如 --blk /dev/hdb=3,5，权限 0600：只有 root 能用它 mount。
 --own 设一个文件的主人、组和权限（八进制，可以带 setuid、setgid、粘滞位），例如 --own /tmp=0,0,1777：
 目录里的文件在宿主机上都是自己的，权限也不一定是想要的。没写到的文件主人和组都是 0（root），
 目录 0755，有执行权限的文件 0755，别的 0644。
@@ -25,7 +29,7 @@ BLOCK = 1024
 NAME_LEN = 14
 MAGIC = 0x137F
 NINODES = 128
-S_IFDIR, S_IFREG, S_IFCHR = 0o040000, 0o100000, 0o020000
+S_IFDIR, S_IFREG, S_IFCHR, S_IFBLK = 0o040000, 0o100000, 0o020000, 0o060000
 NZONES = 4096                           # 镜像的总块数（含元数据），4 MB
 MAX_SIZE = (7 + 512 + 512 * 512) * BLOCK
 
@@ -36,21 +40,25 @@ def ceil_div(a, b):
 
 def main():
     image, src = sys.argv[1], sys.argv[2]
-    devices = {}                        # 镜像里的路径（不以 / 开头）-> 设备号
+    devices = {}                        # 镜像里的路径（不以 / 开头）-> (类型, 设备号)
     owners = {}                         # 镜像里的路径 -> (主人, 组, 权限)
+    nzones = NZONES
     args = sys.argv[3:]
     while args:
-        if args[0] not in ("--chr", "--own") or len(args) < 2:
+        if args[0] not in ("--chr", "--blk", "--own", "--blocks") or len(args) < 2:
             sys.exit(__doc__)
+        if args[0] == "--blocks":
+            nzones = int(args[1])
+            args = args[2:]
+            continue
         path, numbers = args[1].split("=")
-        if args[0] == "--chr":
+        if args[0] in ("--chr", "--blk"):
             major, minor = (int(x) for x in numbers.split(","))
-            devices[path.strip("/")] = major << 8 | minor
+            devices[path.strip("/")] = (S_IFCHR | 0o666 if args[0] == "--chr" else S_IFBLK | 0o600, major << 8 | minor)
         else:
             uid, gid, perm = numbers.split(",")
             owners[path.strip("/")] = (int(uid), int(gid), int(perm, 8))
         args = args[2:]
-    nzones = NZONES
     imap_blocks = ceil_div(NINODES + 1, BLOCK * 8)
     zmap_blocks = ceil_div(nzones + 1, BLOCK * 8)
     inode_blocks = ceil_div(NINODES * 32, BLOCK)
@@ -134,9 +142,9 @@ def main():
             content = b"".join(struct.pack("<H14s", ino, name.encode()) for name, ino in entries)
             subdirs = sum(tree[c] == "dir" for c in children(path))
             mode, nlinks, zones = S_IFDIR | 0o755, 2 + subdirs, store(content)
-        elif isinstance(kind, int):    # 字符设备：没有内容，第一个区块号是设备号
-            content, mode, nlinks = b"", S_IFCHR | 0o666, 1
-            zones[0] = kind
+        elif isinstance(kind, tuple):  # 设备文件：没有内容，第一个区块号是设备号
+            content, nlinks = b"", 1
+            mode, zones[0] = kind
         else:
             with open(kind, "rb") as f:
                 content = f.read()

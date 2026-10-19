@@ -1,6 +1,7 @@
 /*
  * 缓冲区缓存：最近用过的磁盘块留在内存里，再读同一块就不用访问硬盘。
- * 思路与 Linux 0.11 的 fs/buffer.c 相同：bread(block) 返回一个装着那一块的缓冲区，用完调用 brelse()。
+ * 思路与 Linux 0.11 的 fs/buffer.c 相同：bread(dev, block) 返回一个装着 dev 那块盘第 block 块的缓冲区，用完调用 brelse()。
+ * 一个缓冲区由设备号和块号认出来：两块盘上的第 5 块是不同的两块。
  *   - 缓冲区里已经有这一块，直接给出去（命中）；
  *   - 没有，就挑一个没人在用、最久没用过的缓冲区，换成这一块，从硬盘读进来（未命中）；
  *   - 别的任务正在把这一块读进来（locked），或者 16 个缓冲区全都有人在用，就睡下等。
@@ -26,12 +27,18 @@ static struct wait_queue buffer_wait;   /* 等某个缓冲区读完、或者等�
 static uint32_t clock;                  /* 每用一次缓冲区加一，用来比较谁最久没用 */
 uint32_t buffer_hits, buffer_misses, buffer_writes;    /* buffer_writes：写回硬盘的块数 */
 
-static struct buffer *find(uint32_t block)
+static struct buffer *find(uint32_t dev, uint32_t block)
 {
     for (int i = 0; i < NR_BUFFERS; i++)
-        if (buffers[i].block == block)
+        if (buffers[i].block == block && buffers[i].dev == dev)
             return &buffers[i];
     return 0;
+}
+
+/* 设备号对应哪块盘：hda 是主盘 0，hdb 是从盘 1；别的设备不是硬盘，返回 -1。 */
+static int drive_of(uint32_t dev)
+{
+    return dev == ROOT_DEV ? 0 : dev == HDB_DEV ? 1 : -1;
 }
 
 /* 挑一个没人在用的缓冲区换成别的块：干净的里面最久没用的；没有干净的，才挑脏的（要先写回）。 */
@@ -51,7 +58,8 @@ static struct buffer *pick_victim(void)
 /* 把缓冲区写回硬盘（两个扇区）。调用者已经把它锁上（locked），别人要用这一块得等着。成功返回 0。 */
 static int write_back(struct buffer *b)
 {
-    int ok = hd_write(2 * b->block, b->data) == 0 && hd_write(2 * b->block + 1, b->data + 512) == 0;
+    int drive = drive_of(b->dev);
+    int ok = hd_write(drive, 2 * b->block, b->data) == 0 && hd_write(drive, 2 * b->block + 1, b->data + 512) == 0;
     if (!ok)
         return -1;
     b->dirty = 0;
@@ -59,18 +67,18 @@ static int write_back(struct buffer *b)
     return 0;
 }
 
-static struct buffer *get_block(uint32_t block, int read);
+static struct buffer *get_block(uint32_t dev, uint32_t block, int read);
 
 /* 读第 block 块（1024 字节，即第 2 × block 和 2 × block + 1 扇区）。读不出来返回 0。 */
-struct buffer *bread(uint32_t block)
+struct buffer *bread(uint32_t dev, uint32_t block)
 {
-    return get_block(block, 1);
+    return get_block(dev, block, 1);
 }
 
 /* 要整块重写的新块：拿一个缓冲区，内容清零，不从硬盘读。改完要 bdirty()，以后才会写到硬盘上。 */
-struct buffer *bget(uint32_t block)
+struct buffer *bget(uint32_t dev, uint32_t block)
 {
-    return get_block(block, 0);
+    return get_block(dev, block, 0);
 }
 
 /* 缓冲区的内容改过了，以后要写回硬盘。调用者正拿着它（count 不为 0）。 */
@@ -107,6 +115,30 @@ int bsync(void)
     return ret;
 }
 
+/*
+ * 卸下一块盘时调用：把这块盘的脏块写回去，再把它的缓冲区都清空，免得以后换了一块盘还读到旧的内容。
+ * 有缓冲区还有人在用，或者写不回去，返回 -1。调用者拿着文件系统锁。Linux 0.11 的 sys_umount() 调用 sync_dev()。
+ */
+int bflush_dev(uint32_t dev)
+{
+    if (bsync() < 0)
+        return -1;
+    uint32_t flags = irq_save();
+    for (int i = 0; i < NR_BUFFERS; i++) {
+        struct buffer *b = &buffers[i];
+        if (b->dev != dev || b->block == NO_BLOCK)
+            continue;
+        if (b->count || b->locked || b->dirty) {
+            irq_restore(flags);
+            return -1;
+        }
+        b->block = NO_BLOCK;
+        b->valid = 0;
+    }
+    irq_restore(flags);
+    return 0;
+}
+
 /* 现在有几个脏的缓冲区：df 显示。 */
 uint32_t buffer_dirty(void)
 {
@@ -116,7 +148,7 @@ uint32_t buffer_dirty(void)
     return n;
 }
 
-static struct buffer *get_block(uint32_t block, int read)
+static struct buffer *get_block(uint32_t dev, uint32_t block, int read)
 {
     uint32_t flags = irq_save();
 
@@ -124,7 +156,7 @@ static struct buffer *get_block(uint32_t block, int read)
         for (int i = 0; i < NR_BUFFERS; i++)
             buffers[i].block = NO_BLOCK;
     for (;;) {
-        struct buffer *b = find(block);
+        struct buffer *b = find(dev, block);
         if (b && b->locked) {       /* 别人正在读这一块：等它读完，再从头找 */
             sleep_on(&buffer_wait);
             continue;
@@ -158,13 +190,14 @@ static struct buffer *get_block(uint32_t block, int read)
                 irq_restore(flags);
                 return 0;
             }
-            if (find(block)) {      /* 写回的时候睡过：别人可能已经把这一块读进了别的缓冲区，那就用那一个 */
+            if (find(dev, block)) { /* 写回的时候睡过：别人可能已经把这一块读进了别的缓冲区，那就用那一个 */
                 b->locked = 0;
                 b->count = 0;
                 wake_up(&buffer_wait);
                 continue;
             }
         }
+        b->dev = dev;
         b->block = block;
         b->valid = 0;
         irq_restore(flags);
@@ -172,7 +205,8 @@ static struct buffer *get_block(uint32_t block, int read)
         int ok = 1;
         if (read) {
             buffer_misses++;
-            ok = hd_read(2 * block, b->data) == 0 && hd_read(2 * block + 1, b->data + 512) == 0;
+            int drive = drive_of(dev);
+            ok = hd_read(drive, 2 * block, b->data) == 0 && hd_read(drive, 2 * block + 1, b->data + 512) == 0;
         } else {
             for (int i = 0; i < BLOCK_SIZE; i++)
                 b->data[i] = 0;

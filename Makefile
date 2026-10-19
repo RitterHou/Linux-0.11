@@ -32,7 +32,7 @@ KERNEL_HEADERS := kernel.h io.h syscall.h selftest.h fs.h
 
 .PHONY: all run test clean
 
-all: $(BUILD)/floppy.img $(BUILD)/kernel.elf $(BUILD)/hd.img
+all: $(BUILD)/floppy.img $(BUILD)/kernel.elf $(BUILD)/hd.img $(BUILD)/hdb.img
 
 $(BUILD):
 	mkdir -p $@
@@ -67,7 +67,7 @@ $(BUILD)/floppy.img: $(BUILD)/boot.bin $(BUILD)/loader.bin $(BUILD)/kernel.bin M
 	dd if=$(BUILD)/kernel.bin of=$@ bs=512 seek=2 conv=notrunc
 
 # 用户程序：每个 user/名称.c 和 user/ulib.c 链接成 build/user/名称.elf，装进硬盘的 /bin/名称。
-USER_PROGS := sh ls cat echo ps wc grep sort rm ln mv mkdir rmdir chmod chown touch df sync pwd date kill sleep nice id su login passwd hello check letter
+USER_PROGS := sh ls cat echo ps wc grep sort rm ln mv mkdir rmdir chmod chown touch df sync mount umount pwd date kill sleep nice id su login passwd hello check letter
 USER_ELFS := $(addprefix $(BUILD)/user/, $(addsuffix .elf, $(USER_PROGS)))
 
 $(BUILD)/user:
@@ -91,20 +91,28 @@ ROOTFS_FILES := $(shell find rootfs -type f)
 $(BUILD)/hd.img: tools/mkfs.py tools/mkbig.py tools/mkshadow.py $(ROOTFS_FILES) $(USER_ELFS) | $(BUILD)
 	rm -rf $(BUILD)/rootfs
 	cp -R rootfs $(BUILD)/rootfs
-	mkdir -p $(BUILD)/rootfs/bin $(BUILD)/rootfs/tmp $(BUILD)/rootfs/home/user
+	mkdir -p $(BUILD)/rootfs/bin $(BUILD)/rootfs/tmp $(BUILD)/rootfs/home/user $(BUILD)/rootfs/mnt
 	for p in $(USER_PROGS); do cp $(BUILD)/user/$$p.elf $(BUILD)/rootfs/bin/$$p; done
 	$(PYTHON) tools/mkbig.py $(BUILD)/rootfs/big
 	$(PYTHON) tools/mkshadow.py $(BUILD)/rootfs/etc/shadow root:root user:user
 	$(PYTHON) tools/mkfs.py $@ $(BUILD)/rootfs --chr /dev/tty0=4,0 --chr /dev/tty1=4,1 --chr /dev/ttyS0=4,64 \
+		--blk /dev/hda=3,0 --blk /dev/hdb=3,5 \
 		--own /tmp=0,0,1777 --own /home/user=100,100,755 --own /etc/shadow=0,0,600 \
 		--own /bin/su=0,0,4755 --own /bin/passwd=0,0,4755
 
 # 运行它的终端窗口接在串口上：串口那头是 login，可以在这里登录（user/user 或 root/root）。signal=off：在这里按 Ctrl+C 交给客户机，不结束 QEMU。
-run: $(BUILD)/floppy.img $(BUILD)/hd.img
+# 第二块硬盘：接在主 IDE 通道的从盘上（hdb），1 MB 的 Minix 文件系统，内容是 rootfs-hdb/。mount /dev/hdb /mnt 挂上它。
+HDB_FILES := $(shell find rootfs-hdb -type f)
+
+$(BUILD)/hdb.img: tools/mkfs.py $(HDB_FILES) | $(BUILD)
+	$(PYTHON) tools/mkfs.py $@ rootfs-hdb --blocks 1024
+
+run: $(BUILD)/floppy.img $(BUILD)/hd.img $(BUILD)/hdb.img
 	$(QEMU) -name "Two-stage boot - C kernel" \
 		-machine pc -accel tcg -m 16M \
 		-drive file=$<,format=raw,if=floppy,index=0 \
 		-drive file=$(BUILD)/hd.img,format=raw,if=ide,index=0 \
+		-drive file=$(BUILD)/hdb.img,format=raw,if=ide,index=1 \
 		-boot order=a -display $(QEMU_DISPLAY) \
 		-nic none -chardev stdio,id=com1,signal=off -serial chardev:com1 -monitor none -no-reboot $(QEMU_FLAGS)
 

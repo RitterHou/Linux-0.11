@@ -16,10 +16,20 @@
 #define S_IFDIR 0040000
 #define S_IFREG 0100000
 #define S_IFCHR 0020000             /* 字符设备：i 节点的第一个区块号存的是设备号（主设备号 << 8 | 次设备号） */
+#define S_IFBLK 0060000             /* 块设备（硬盘）：同上，mount 用它找到是哪块盘 */
 #define TTY_MAJOR 4                 /* 终端：次设备号 0 是控制台（/dev/tty0），1 是第 6 行（/dev/tty1），64 是串口（/dev/ttyS0） */
 
 /* buffer.c：缓冲区缓存 */
+/*
+ * 设备号：主设备号 << 8 | 次设备号，与 Linux 0.11 相同。硬盘的主设备号是 3，次设备号 0 是第一块盘（hda）整块，
+ * 5 是第二块（hdb）整块（1～4、6～9 是两块盘上的分区，这里不分区）。根文件系统在 hda 上。
+ */
+#define HD_MAJOR 3
+#define ROOT_DEV (HD_MAJOR << 8 | 0)
+#define HDB_DEV  (HD_MAJOR << 8 | 5)
+
 struct buffer {
+    uint32_t dev;                   /* 哪块盘的 */
     uint32_t block;                 /* 装的是哪一块；NO_BLOCK 表示空 */
     uint8_t valid;                  /* 内容已经从硬盘读进来了 */
     uint8_t locked;                 /* 正在从硬盘读，别人要等 */
@@ -30,8 +40,9 @@ struct buffer {
 };
 #define NO_BLOCK 0xFFFFFFFFu
 #define NR_BUFFERS 16               /* 缓冲区缓存有几个缓冲区 */
-struct buffer *bread(uint32_t block);
-struct buffer *bget(uint32_t block);
+struct buffer *bread(uint32_t dev, uint32_t block);
+struct buffer *bget(uint32_t dev, uint32_t block);
+int bflush_dev(uint32_t dev);
 void bdirty(struct buffer *b);
 int bsync(void);
 uint32_t buffer_dirty(void);
@@ -56,6 +67,7 @@ struct dir_entry {                  /* 目录项，16 字节 */
 
 /* 内存里的 i 节点：同一个文件打开几次，共用表里的一项 */
 struct m_inode {
+    uint32_t dev;                   /* 在哪块盘上 */
     uint32_t ino;
     int count;                      /* 有几处在用：打开的文件、正在执行的操作 */
     struct minix_inode d;           /* 磁盘上那 32 字节的拷贝，改了就写回去 */
@@ -68,12 +80,12 @@ struct m_inode {
 int permission(const struct minix_inode *ip, int mask);
 
 int fs_mount(void);
-int read_inode(uint32_t ino, struct minix_inode *out);
-int32_t inode_read(const struct minix_inode *ip, uint32_t pos, void *dst, uint32_t n);
-int namei(const char *path, uint32_t *ino, struct minix_inode *ip);
+int read_inode(uint32_t dev, uint32_t ino, struct minix_inode *out);
+int32_t inode_read(uint32_t dev, const struct minix_inode *ip, uint32_t pos, void *dst, uint32_t n);
+int namei(const char *path, uint32_t *dev, uint32_t *ino, struct minix_inode *ip);
 void fs_lock(void);
 void fs_unlock(void);
-struct m_inode *iget(uint32_t ino);
+struct m_inode *iget(uint32_t dev, uint32_t ino);
 void iput(struct m_inode *ip);
 int32_t inode_write(struct m_inode *ip, uint32_t pos, const void *src, uint32_t n);
 void fs_truncate(struct m_inode *ip);
@@ -86,7 +98,9 @@ int fs_chown(const char *path, uint32_t uid, uint32_t gid);
 int fs_utime(const char *path, uint32_t t);
 int fs_rmdir(const char *path);
 struct fsinfo;
-int fs_info(struct fsinfo *info);
+int fs_info(uint32_t n, struct fsinfo *info);
+int fs_do_mount(const char *devpath, const char *dirpath, const char *on);
+int fs_do_umount(const char *path);
 
 /* file.c：打开的文件 */
 #define NR_OPEN 8                   /* 每个任务最多同时打开 8 个文件 */
